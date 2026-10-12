@@ -68,7 +68,10 @@ def mark_read(msg_uuids: list[str]) -> dict:
 
 
 def send_message(alias: str, body: str) -> dict:
-    """Send a message to a contact. It is queued if they're currently offline."""
+    """Send a message to a contact. It is queued if they're currently offline.
+
+    A body too long for one Tox message is sent as several "[i/n] " parts.
+    """
     return client.request("send_message", {"alias": alias, "body": body})
 
 

@@ -672,29 +672,32 @@ class Daemon:
         if contact is None:
             raise RpcError("CONTACT_NOT_FOUND", f"no contact named {alias!r}")
 
-        env = envelope.make_text(body)
-        payload = envelope.encode(env)
-        if len(payload) > MAX_MESSAGE_LENGTH:
-            raise RpcError("MESSAGE_TOO_LONG",
-                           f"message exceeds {MAX_MESSAGE_LENGTH} bytes once encoded")
-
-        # Persist first (status 'queued'), then try to send (PRD §4.3.3).
-        self.db.execute(
-            "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
-            "created_at, status) VALUES (?, ?, 'out', 'text', ?, ?, 'queued')",
-            (env["uuid"], contact["id"], body, env["ts"]),
-        )
-        self.db.commit()
-
-        status = "queued"
-        if contact["is_online"] and self.tox.friend_send_message(contact["friend_number"], payload):
+        # A body too long for one Tox message goes out as several "[i/n] " parts.
+        online = bool(contact["is_online"])
+        uuids = []
+        for part in envelope.split_text(body, MAX_MESSAGE_LENGTH):
+            env = envelope.make_text(part)
+            # Persist first (status 'queued'), then try to send (PRD §4.3.3).
             self.db.execute(
-                "UPDATE messages SET status='sent', last_attempt_at=? WHERE msg_uuid=?",
-                (env["ts"], env["uuid"]),
+                "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
+                "created_at, status) VALUES (?, ?, 'out', 'text', ?, ?, 'queued')",
+                (env["uuid"], contact["id"], part, env["ts"]),
             )
             self.db.commit()
-            status = "sent"
-        return {"msg_uuid": env["uuid"], "status": status}
+            uuids.append(env["uuid"])
+            # Once one part is queued, queue the rest too so they stay in order.
+            online = online and self.tox.friend_send_message(
+                contact["friend_number"], envelope.encode(env))
+            if online:
+                self.db.execute(
+                    "UPDATE messages SET status='sent', last_attempt_at=? WHERE msg_uuid=?",
+                    (env["ts"], env["uuid"]),
+                )
+                self.db.commit()
+        res = {"msg_uuid": uuids[0], "status": "sent" if online else "queued"}
+        if len(uuids) > 1:
+            res.update(parts=len(uuids), msg_uuids=uuids)
+        return res
 
     def _get_messages(self, params: dict) -> dict:
         conds, args = [], []

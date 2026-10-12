@@ -222,10 +222,11 @@ def send(ctx, alias, message):
     res = _call("send_message", {"alias": alias, "body": message})
     if _emit(ctx, res):
         return
+    parts = f" ({res['parts']} parts)" if res.get("parts") else ""
     if res["status"] == "sent":
-        click.echo("✓ sent")
+        click.echo(f"✓ sent{parts}")
     else:
-        click.echo(f"✓ {alias} is offline — queued (will send when they come online)")
+        click.echo(f"✓ {alias} is offline — queued{parts} (will send when they come online)")
 
 
 _RESET = "\033[0m"

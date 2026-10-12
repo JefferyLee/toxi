@@ -39,7 +39,29 @@ def make_contact_share(tox_id: str, suggested_alias: str, note: str = "") -> dic
 
 
 def encode(envelope: dict) -> bytes:
-    return json.dumps(envelope).encode("utf-8")
+    # Keep non-ASCII as raw UTF-8 (3 bytes for a CJK char) instead of \uXXXX (6).
+    return json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+
+
+def split_text(body: str, limit: int) -> list[str]:
+    """Split `body` into parts whose text envelopes each encode to <= `limit` bytes.
+
+    A body that fits is returned as is. Otherwise each part gets an "[i/n] "
+    prefix; splits fall on character boundaries.
+    """
+    if len(encode(make_text(body))) <= limit:
+        return [body]
+    budget = limit - len(encode(make_text(""))) - len("[999/999] ")
+    parts, cur, size = [], "", 0
+    for ch in body:
+        cost = len(json.dumps(ch, ensure_ascii=False).encode("utf-8")) - 2
+        if cur and size + cost > budget:
+            parts.append(cur)
+            cur, size = "", 0
+        cur += ch
+        size += cost
+    parts.append(cur)
+    return [f"[{i}/{len(parts)}] {p}" for i, p in enumerate(parts, 1)]
 
 
 def parse(raw: bytes) -> dict:

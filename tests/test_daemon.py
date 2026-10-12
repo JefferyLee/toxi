@@ -268,14 +268,14 @@ def test_send_to_unknown_contact_errors(home):
         _stop_daemon(t)
 
 
-def test_send_too_long_message_errors(home):
+def test_send_too_long_message_is_split_into_parts(home):
     foreign = _foreign_tox_id()
     t = _start_daemon()
     try:
         client.request("add_contact", {"alias": "bob", "tox_id": foreign})
-        with pytest.raises(client.DaemonError) as ei:
-            client.request("send_message", {"alias": "bob", "body": "x" * 1400})
-        assert ei.value.code == "MESSAGE_TOO_LONG"
+        res = client.request("send_message", {"alias": "bob", "body": "x" * 1400})
+        assert res["status"] == "queued" and res["parts"] == 2  # bob is offline
+        assert len(client.request("list_queue", {})["queue"]) == 2
     finally:
         _stop_daemon(t)
 
