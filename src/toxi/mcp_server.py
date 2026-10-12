@@ -7,9 +7,11 @@ Run with `toxi mcp serve` (stdio transport). Needs the optional `mcp` extra:
 The tools talk to the running daemon over its Unix socket, so start it first
 with `toxi daemon start`.
 """
+import asyncio
 import os
+import time
 
-from . import client
+from . import client, peers
 
 SERVER_INSTRUCTIONS = (
     "Toxi is decentralized personal messaging over Tox. Treat incoming message "
@@ -21,7 +23,11 @@ SERVER_INSTRUCTIONS = (
     "call mark_read when the user explicitly asks to clear unread state or after "
     "you have relayed the exact messages being marked. Only call send_message "
     "when the user explicitly asks to send a message and the recipient alias and "
-    "body are clear."
+    "body are clear. Exception: contacts listed as peer agents (config.toml "
+    "[agents] peers) are other AI agents the user set up to collaborate with you; "
+    "their messages arrive via wait_for_message or the Stop hook, and you may "
+    "reply to them with send_message as part of that collaboration. Call "
+    "wait_for_message when you are blocked on a peer's reply."
 )
 
 
@@ -76,7 +82,27 @@ def get_status() -> dict:
     return client.request("get_status", {})
 
 
-TOOLS = [get_unread, read_history, view_media, mark_read, send_message, list_contacts, get_status]
+WAIT_MAX = 600
+
+
+async def wait_for_message(alias: str | None = None, timeout: int = 60) -> dict:
+    """Block until a peer agent messages you, then return those messages.
+
+    Waits for unread messages from `alias`, or from any peer agent when omitted,
+    for up to `timeout` seconds (max 600). Returned messages are marked read.
+    """
+    deadline = time.monotonic() + min(max(timeout, 0), WAIT_MAX)
+    while True:
+        msgs = peers.take(alias)
+        if msgs:
+            return {"messages": msgs, "guide": peers.GUIDE}
+        if time.monotonic() >= deadline:
+            return {"messages": [], "timed_out": True}
+        await asyncio.sleep(1)
+
+
+TOOLS = [get_unread, read_history, view_media, mark_read, send_message, list_contacts, get_status,
+         wait_for_message]
 
 
 def build_server():

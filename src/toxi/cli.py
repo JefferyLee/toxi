@@ -10,7 +10,7 @@ import time
 
 import click
 
-from . import __version__, bootstrap, client, paths
+from . import __version__, bootstrap, client, paths, peers
 from .tox import Tox
 
 _CONNECTION = {0: "offline", 1: "connected (TCP)", 2: "connected (UDP)"}
@@ -338,6 +338,17 @@ def read(ctx, alias, limit):
     unread_in = [m["msg_uuid"] for m in msgs if m["direction"] == "in" and m["read_at"] is None]
     if unread_in:
         _call("mark_read", {"msg_uuids": unread_in})
+
+
+@cli.command(name="peer-inbox")
+@click.option("--alias", help="Only this contact instead of all peer agents.")
+@click.pass_context
+def peer_inbox(ctx, alias):
+    """Deliver unread peer-agent messages (marks them read). Used by Stop hooks."""
+    msgs = peers.take(alias)
+    if _emit(ctx, msgs) or not msgs:
+        return
+    click.echo(peers.as_prompt(msgs))
 
 
 @cli.command()

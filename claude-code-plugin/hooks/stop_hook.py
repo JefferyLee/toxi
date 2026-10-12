@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Claude Code Stop hook for toxi.
 
-Peeks at unread messages after each Claude response. If any exist, prints a
-one-line notification. Silent when there is nothing new.
+If a peer agent (config.toml [agents] peers) has messaged us, blocks the stop
+and feeds those messages back to Claude so it keeps working on them. Otherwise
+peeks at unread messages and prints a one-line notification, silent when there
+is nothing new.
 
 Set TOXI_BIN if `toxi` isn't on PATH, and TOXI_HOME for a non-default config dir.
 """
@@ -12,8 +14,24 @@ import subprocess
 import sys
 
 
+def peer_block(toxi: str) -> bool:
+    """Deliver peer-agent messages by blocking the stop. Returns True if it did."""
+    try:
+        out = subprocess.run(
+            [toxi, "peer-inbox"], capture_output=True, text=True, timeout=8
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    text = out.stdout.strip() if out.returncode == 0 else ""
+    if text:
+        print(json.dumps({"decision": "block", "reason": text}))
+    return bool(text)
+
+
 def main() -> None:
     toxi = os.environ.get("TOXI_BIN", "toxi")
+    if peer_block(toxi):
+        return
     try:
         out = subprocess.run(
             [toxi, "--json", "unread"], capture_output=True, text=True, timeout=8

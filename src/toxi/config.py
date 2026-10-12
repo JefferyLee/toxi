@@ -27,3 +27,8 @@ def retry_config() -> dict:
 
 def daemon_log_level() -> str:
     return _load().get("daemon", {}).get("log_level", "info")
+
+
+def agent_peers() -> list[str]:
+    """Aliases of contacts that are peer AI agents (`[agents] peers = [...]`)."""
+    return list(_load().get("agents", {}).get("peers", []))
