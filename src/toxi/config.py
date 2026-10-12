@@ -32,3 +32,8 @@ def daemon_log_level() -> str:
 def agent_peers() -> list[str]:
     """Aliases of contacts that are peer AI agents (`[agents] peers = [...]`)."""
     return list(_load().get("agents", {}).get("peers", []))
+
+
+def on_message_hook() -> str | None:
+    """Shell command run when new messages arrive (`[hooks] on_message`)."""
+    return _load().get("hooks", {}).get("on_message") or None

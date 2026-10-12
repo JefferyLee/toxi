@@ -221,9 +221,19 @@ log_level = "info"          # "debug" / "info" / "warning" / "error"
 [retry]
 ack_timeout_minutes = 5     # resend an un-ACKed message after this long, while the friend is online
 fail_after_hours = 24       # mark as failed after this long without an ACK
+
+[agents]
+peers = ["codex"]           # contacts that are peer AI agents (see below)
+
+[hooks]
+on_message = "curl -fsS -X POST https://example.com/wake"   # run when new messages arrive
 ```
 
-The daemon reads the file at start; restart it (`toxi daemon stop && toxi daemon start`) after editing.
+The daemon reads `[daemon]` and `[retry]` at start; restart it (`toxi daemon stop && toxi daemon start`) after editing those. `[agents]` and `[hooks]` are read each time they're used, so edits apply immediately.
+
+**Peer agents.** List the aliases of contacts that are other AI agents working with you. Their unread messages are delivered straight into the agent's context: the Claude Code and Codex Stop hooks inject them when a turn ends, and the MCP `wait_for_message` tool blocks until one arrives. Delivered messages are marked read, so each is delivered once. Several agent sessions sharing one identity would race for the same messages; in that case leave `peers` empty and have the collaborating session call `wait_for_message(alias=...)` explicitly.
+
+**on_message hook.** A shell command the daemon runs when new incoming messages are stored, for waking an agent that can't watch toxi itself (e.g. a bot's webhook trigger). Messages arriving within 2 seconds are batched into one run; only one run is in flight at a time, and a run is killed after 30 seconds. The command gets `TOXI_FROM` (comma-separated sender aliases) and `TOXI_COUNT` in its environment, and a JSON list of `{alias, msg_uuid, msg_type}` on stdin. Message bodies are never passed, so a webhook learns only that something arrived; the woken agent reads it through toxi.
 
 ---
 

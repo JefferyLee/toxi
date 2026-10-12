@@ -219,9 +219,19 @@ log_level = "info"          # "debug" / "info" / "warning" / "error"
 [retry]
 ack_timeout_minutes = 5     # 未收到 ACK 等这么久就重发（前提是好友在线）
 fail_after_hours = 24       # 超过这么久仍未确认就标记为 failed
+
+[agents]
+peers = ["codex"]           # 哪些联系人是协作的 AI agent（见下）
+
+[hooks]
+on_message = "curl -fsS -X POST https://example.com/wake"   # 收到新消息时运行
 ```
 
-daemon 在启动时读这个文件；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。
+`[daemon]` 和 `[retry]` 在 daemon 启动时读取；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。`[agents]` 和 `[hooks]` 每次用到时才读，改完立即生效。
+
+**协作 agent（peers）。** 列出哪些联系人是和你协作的其他 AI agent。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 Stop hook 在一轮结束时注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。如果多个 agent 会话共用一个身份，它们会抢同一批消息；这种情况下把 `peers` 留空，让负责协作的那个会话显式调用 `wait_for_message(alias=...)`。
+
+**on_message hook。** 收到新消息并存好后，daemon 会运行这条 shell 命令，用来唤醒自己没法盯着 toxi 的 agent（比如某个 bot 的 webhook 触发器）。2 秒内到达的消息合并成一次运行；同一时间只跑一个，超过 30 秒会被终止。命令的环境变量里有 `TOXI_FROM`（发送者别名，逗号分隔）和 `TOXI_COUNT`，stdin 是 `{alias, msg_uuid, msg_type}` 组成的 JSON 列表。消息正文从不传出，webhook 只知道“有新消息”，被唤醒的 agent 再通过 toxi 读取内容。
 
 ---
 

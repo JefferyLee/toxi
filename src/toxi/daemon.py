@@ -5,9 +5,11 @@ loop both drives `tox_iterate` and serves IPC requests from one thread: we wait
 on `accept()` with a timeout derived from `tox_iteration_interval`, so we never
 block the protocol for long. This sidesteps all locking.
 """
+import json
 import logging
 import os
 import socket
+import subprocess
 import time
 import uuid as _uuid
 from logging.handlers import RotatingFileHandler
@@ -24,6 +26,8 @@ from .tox import (
 
 SWEEP_INTERVAL = 30  # seconds between ACK-timeout retry sweeps
 MAX_FILE_BYTES = 100 * 1024 * 1024  # cap on an accepted incoming file (100 MB)
+HOOK_DEBOUNCE = 2.0  # quiet seconds before [hooks] on_message fires; coalesces bursts
+HOOK_TIMEOUT = 30  # seconds before a still-running on_message hook is killed
 
 # Map a filename extension to one of our media msg_types (PRD: image/voice/video).
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "tiff", "tif", "svg"}
@@ -84,6 +88,10 @@ class Daemon:
         self._last_sweep = 0.0
         self._started_at = time.time()
         self._transfers: dict[tuple[int, int], dict] = {}  # in-flight incoming files
+        self._hook_msgs: list[dict] = []  # new messages awaiting the on_message hook
+        self._hook_due = 0.0
+        self._hook_proc: subprocess.Popen | None = None
+        self._hook_started = 0.0
         self.tox = self._init_tox()
         self._remap_friend_numbers()
         self._save_state()  # ensure tox_state.bin exists from first run
@@ -236,20 +244,22 @@ class Daemon:
             return
 
         row = self.db.execute(
-            "SELECT id FROM contacts WHERE friend_number=?", (friend_number,)
+            "SELECT id, alias FROM contacts WHERE friend_number=?", (friend_number,)
         ).fetchone()
         if row is None:
             log.warning("message from unknown friend_number %d", friend_number)
             return
         body = env.get("data", {}).get("body", "")
         # INSERT OR IGNORE: msg_uuid is UNIQUE, so a re-delivered message is dropped.
-        self.db.execute(
+        cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
             "content, created_at, received_at, status) "
             "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received')",
             (env["uuid"], row["id"], body, env.get("ts", int(time.time())), int(time.time())),
         )
         self.db.commit()
+        if cur.rowcount:
+            self._queue_hook(row["alias"], env["uuid"], "text")
         # ACK even for a duplicate, so the sender can clear it (PRD §4.4.1).
         self.tox.friend_send_message(friend_number, envelope.encode(envelope.make_ack(env["uuid"])))
 
@@ -346,14 +356,67 @@ class Daemon:
         except OSError:
             log.exception("could not finalize received file")
             return
-        self.db.execute(
+        cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
             "content, created_at, received_at, status) VALUES (?, ?, 'in', ?, ?, ?, ?, 'received')",
             (tr["uuid"], tr["contact_id"], tr["msg_type"], str(tr["final_path"]),
              tr["ts"], int(time.time())),
         )
         self.db.commit()
+        if cur.rowcount:
+            alias = self.db.execute(
+                "SELECT alias FROM contacts WHERE id=?", (tr["contact_id"],)
+            ).fetchone()["alias"]
+            self._queue_hook(alias, tr["uuid"], tr["msg_type"])
         log.info("received %s message from contact %d", tr["msg_type"], tr["contact_id"])
+
+    # --- on_message hook ---
+    def _queue_hook(self, alias: str, msg_uuid: str, msg_type: str) -> None:
+        """Note a newly stored incoming message; the hook fires after HOOK_DEBOUNCE quiet."""
+        self._hook_msgs.append({"alias": alias, "msg_uuid": msg_uuid, "msg_type": msg_type})
+        self._hook_due = time.time() + HOOK_DEBOUNCE
+
+    def _tick_hook(self) -> None:
+        """Run `[hooks] on_message` for queued messages. Called from the event loop.
+
+        One hook process at a time, never waited on: we reap it on later ticks,
+        so the single-threaded loop never blocks. The command gets TOXI_FROM
+        (comma-separated aliases), TOXI_COUNT, and a JSON list of
+        {alias, msg_uuid, msg_type} on stdin. Message bodies are never passed,
+        so a webhook only learns that something arrived, not what.
+        """
+        p = self._hook_proc
+        if p is not None:
+            if p.poll() is None:
+                if time.time() - self._hook_started > HOOK_TIMEOUT:
+                    log.warning("on_message hook timed out; killing it")
+                    p.kill()
+                return
+            if p.returncode:
+                log.warning("on_message hook exited with %d", p.returncode)
+            self._hook_proc = None
+        if not self._hook_msgs or time.time() < self._hook_due:
+            return
+        msgs, self._hook_msgs = self._hook_msgs, []
+        cmd = config.on_message_hook()
+        if not cmd:
+            return
+        env = dict(os.environ,
+                   TOXI_FROM=",".join(dict.fromkeys(m["alias"] for m in msgs)),
+                   TOXI_COUNT=str(len(msgs)))
+        try:
+            p = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 env=env, start_new_session=True)
+        except OSError:
+            log.exception("could not start on_message hook")
+            return
+        try:
+            p.stdin.write(json.dumps(msgs).encode())
+            p.stdin.close()
+        except OSError:
+            pass  # the command doesn't read stdin
+        self._hook_proc, self._hook_started = p, time.time()
 
     def _discard_transfer(self, key: tuple[int, int]) -> None:
         tr = self._transfers.pop(key, None)
@@ -407,6 +470,7 @@ class Daemon:
         try:
             while self.running:
                 self.tox.iterate()
+                self._tick_hook()
                 if time.time() - self._last_sweep > SWEEP_INTERVAL:
                     self._retry_sweep()
                     self._last_sweep = time.time()
