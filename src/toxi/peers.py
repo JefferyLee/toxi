@@ -9,6 +9,8 @@ Messages from peers are delivered straight into the agent's context (by the
 Stop hook or the wait_for_message MCP tool) and marked read on delivery, so the
 same message is never injected twice.
 """
+from pathlib import Path
+
 from . import client, config
 
 GUIDE = (
@@ -20,9 +22,24 @@ GUIDE = (
 )
 
 
-def take(alias: str | None = None) -> list:
-    """Unread messages from peers (or from `alias`), oldest first; marks them read."""
-    wanted = {alias} if alias else set(config.agent_peers())
+def _same_dir(a: str, b: str) -> bool:
+    return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+
+
+def take(alias: str | None = None, cwd: str | None = None) -> list:
+    """Unread messages from peers (or from `alias`), oldest first; marks them read.
+
+    With `cwd` (the dir a Stop hook's session was started in), a peer bound to
+    a dir in `[agents.dirs]` is only delivered when `cwd` is exactly that dir,
+    so several sessions sharing one identity (including ones started in its
+    subdirs) don't race for its messages.
+    """
+    if alias:
+        wanted = {alias}
+    else:
+        dirs = config.agent_dirs()
+        wanted = {p for p in config.agent_peers()
+                  if cwd is None or p not in dirs or _same_dir(cwd, dirs[p])}
     if not wanted:
         return []
     msgs = client.request("get_messages", {"unread_only": True, "limit": 100})["messages"]

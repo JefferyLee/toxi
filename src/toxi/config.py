@@ -37,3 +37,9 @@ def agent_peers() -> list[str]:
 def on_message_hook() -> str | None:
     """Shell command run when new messages arrive (`[hooks] on_message`)."""
     return _load().get("hooks", {}).get("on_message") or None
+
+
+def agent_dirs() -> dict[str, str]:
+    """Per-peer project dirs (`[agents.dirs]`): Stop hooks deliver that peer's
+    messages only to sessions started in exactly that dir."""
+    return dict(_load().get("agents", {}).get("dirs", {}))

@@ -16,10 +16,18 @@ import sys
 
 def peer_block(toxi: str) -> bool:
     """Deliver peer-agent messages by blocking the stop. Returns True if it did."""
+    args = [toxi, "peer-inbox"]
+    # The dir the session was started in; it stays put when the session cd's around.
+    cwd = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not cwd and not sys.stdin.isatty():
+        try:
+            cwd = json.load(sys.stdin).get("cwd")
+        except (ValueError, AttributeError):
+            pass
+    if cwd:
+        args += ["--cwd", cwd]  # lets [agents.dirs] route peers to one session
     try:
-        out = subprocess.run(
-            [toxi, "peer-inbox"], capture_output=True, text=True, timeout=8
-        )
+        out = subprocess.run(args, capture_output=True, text=True, timeout=8)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     text = out.stdout.strip() if out.returncode == 0 else ""

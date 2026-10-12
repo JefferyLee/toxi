@@ -94,7 +94,8 @@ def _fake_toxi(tmp_path, peer_out: str) -> str:
 def _run(hook: Path, env_extra: dict) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k != "TOXI_HOME"}
     env.update(env_extra)
-    return subprocess.run([sys.executable, str(hook)], capture_output=True, text=True, env=env)
+    return subprocess.run([sys.executable, str(hook)], capture_output=True, text=True,
+                          env=env, stdin=subprocess.DEVNULL)
 
 
 CC_HOOK = ROOT / "claude-code-plugin" / "hooks" / "stop_hook.py"
@@ -126,3 +127,44 @@ def test_codex_stop_hook_falls_back_to_statusline(tmp_path):
     r = _run(CODEX_HOOK, {"TOXI_BIN": _fake_toxi(tmp_path, ""),
                           "CODEX_HOME": str(tmp_path)})
     assert json.loads(r.stdout)["systemMessage"] == "toxi: 1/1 online"
+
+
+def _dirs_config(tmp_path, monkeypatch, peer_list, dirs):
+    monkeypatch.setenv("TOXI_HOME", str(tmp_path))
+    lines = [f"[agents]\npeers = {json.dumps(peer_list)}\n", "[agents.dirs]\n"]
+    lines += [f"{k} = {json.dumps(v)}\n" for k, v in dirs.items()]
+    (tmp_path / "config.toml").write_text("".join(lines))
+
+
+def test_dir_bound_peer_only_delivered_to_session_started_there(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    _dirs_config(tmp_path, monkeypatch, ["codex"], {"codex": str(proj)})
+    _fake_daemon(monkeypatch, MSGS)
+    assert peers.take(cwd=str(tmp_path)) == []  # another session's dir: left unread
+    assert peers.take(cwd=str(proj / "sub")) == []  # a session started in a subdir
+    got = peers.take(cwd=str(proj))
+    assert [m["content"] for m in got] == ["first", "second"]
+
+
+def test_dir_binding_ignored_without_cwd_and_for_unbound_peers(tmp_path, monkeypatch):
+    _dirs_config(tmp_path, monkeypatch, ["codex", "bob"], {"codex": str(tmp_path / "x")})
+    _fake_daemon(monkeypatch, MSGS)
+    assert [m["alias"] for m in peers.take(cwd=str(tmp_path))] == ["bob"]  # unbound: anywhere
+    assert [m["alias"] for m in peers.take()] == ["codex", "codex"]  # no cwd (MCP): no filter
+
+
+def test_claude_stop_hook_passes_session_cwd(tmp_path):
+    p = tmp_path / "faketoxi"
+    p.write_text("#!/usr/bin/env python3\nimport sys\n"
+                 f"open({str(tmp_path / 'args')!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
+    p.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k not in ("TOXI_HOME", "CLAUDE_PROJECT_DIR")}
+    env["TOXI_BIN"] = str(p)
+    run = lambda e: subprocess.run([sys.executable, str(CC_HOOK)], capture_output=True,
+                                   input=json.dumps({"cwd": "/w/proj/apple"}), text=True, env=e)
+    run(env)  # no CLAUDE_PROJECT_DIR: fall back to the hook input's cwd
+    run(dict(env, CLAUDE_PROJECT_DIR="/w/proj"))  # preferred: the launch dir
+    calls = (tmp_path / "args").read_text().splitlines()
+    assert "peer-inbox --cwd /w/proj/apple" in calls
+    assert "peer-inbox --cwd /w/proj" in calls

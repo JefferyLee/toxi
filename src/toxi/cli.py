@@ -342,10 +342,11 @@ def read(ctx, alias, limit):
 
 @cli.command(name="peer-inbox")
 @click.option("--alias", help="Only this contact instead of all peer agents.")
+@click.option("--cwd", help="Dir the session was started in, matched against [agents.dirs].")
 @click.pass_context
-def peer_inbox(ctx, alias):
+def peer_inbox(ctx, alias, cwd):
     """Deliver unread peer-agent messages (marks them read). Used by Stop hooks."""
-    msgs = peers.take(alias)
+    msgs = peers.take(alias, cwd)
     if _emit(ctx, msgs) or not msgs:
         return
     click.echo(peers.as_prompt(msgs))
