@@ -200,6 +200,9 @@ def parse(raw: bytes) -> dict:
         env = json.loads(raw.decode("utf-8"))
         if isinstance(env, dict) and "type" in env:
             env.setdefault("uuid", str(_uuid.uuid4()))
+            # ids are capped at 64 chars everywhere (dedup, reply_to, receipts), so a
+            # peer with longer ids still gets consistent matching.
+            env["uuid"] = str(env["uuid"])[:64]
             env.setdefault("ts", int(time.time()))
             return env
     except (json.JSONDecodeError, UnicodeDecodeError):

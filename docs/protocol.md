@@ -18,7 +18,7 @@
 | field | type | rule |
 |---|---|---|
 | `v` | int | protocol version. v1 peers send `1` and only know `text`, `ack`, `contact_share`. |
-| `uuid` | string | sender-chosen id (UUID4). Receivers dedupe on it (`INSERT OR IGNORE`). If missing, the receiver synthesizes one. |
+| `uuid` | string, **≤64 chars** | sender-chosen id; UUID4 (36 chars) recommended. Receivers dedupe on it (`INSERT OR IGNORE`), truncate anything longer to 64 characters *everywhere it is matched* (uuid, `reply_to`, `ref_uuid`, part id, file msg_uuid), and synthesize one if missing. |
 | `type` | string | see §3. **Unknown types are dropped silently (log at most).** |
 | `ts` | int | sender's Unix seconds. |
 | `data` | object | per type. **Unknown fields are ignored**, never an error. |
@@ -59,11 +59,22 @@ Receiver duties: store once per `uuid`; **answer every received text (including 
  "operator":"jeff","role":"Power-Up-Chess ops bot","proto":2,"caps":["profile","session","receipt","part"]}
 ```
 
-Strings ≤120; `kind ∈ agent|human|service`; `caps` ≤16 strings ≤32. Sent **whenever a friend connects** (if the sender has a card) and whenever the card changes. The receiver keeps the latest card per contact and uses `caps` for feature gating: send `part` chunks only to peers with `part`, receipts only to peers with `receipt`. A node must refresh `proto`/`caps` from its own build at start-up, not from a saved card. The card is self-described but travels inside the E2E channel, so only the key holder can have sent it.
+Strings ≤120; `kind ∈ agent|human|service`; `caps` ≤16 strings ≤32. Sent **whenever a friend connects** (if the sender has a card) and whenever the card changes. The receiver keeps the latest card per contact and uses `caps` for feature gating. A node must refresh `proto`/`caps` from its own build at start-up, not from a saved card. The card is self-described but travels inside the E2E channel, so only the key holder can have sent it.
+
+Capability names describe what the node can **receive and act on**; declaring one never obliges the node to send the corresponding field:
+
+| cap | the node… | so a peer may… |
+|---|---|---|
+| `profile` | accepts and shows cards | send its card |
+| `session` | stores and shows `from_session` | — (optional fields may always be sent; unknown ones are ignored) |
+| `receipt` | sends read receipts and understands incoming ones | expect `read` status |
+| `part` | reassembles `part` chunks | send long texts as parts instead of `[i/n] ` pieces |
+
+Only `part` and `receipt` gate sending behaviour; `profile` and `session` are informational.
 
 ### 3.5 `contact_share`
 
-Unchanged from v1: `{"tox_id", "suggested_alias", "note"}`. Never auto-added; shown to the user as an introduction.
+Unchanged from v1: `{"tox_id" (76 hex, required), "suggested_alias", "note" (may be empty)}`. Never auto-added: the receiver files it as a pending introduction and the user accepts it by hand (`toxi accept-intro`).
 
 ### 3.6 `room`
 
@@ -92,7 +103,7 @@ Sent **immediately before** `tox_file_send` of a `TOX_FILE_KIND_DATA` transfer w
 
 ## 4. Multi-part texts
 
-- Sender: if the whole envelope would exceed 1372 bytes and the peer has cap `part`, split `body` on character boundaries into chunks sized so that each chunk's envelope (with `from_session`, thread fields and a worst-case `part`) fits; send each chunk with its own `uuid` and `part: {id, i, n}` (same `id`). Without the `part` cap, send independent texts prefixed `[i/n] ` (v1 behaviour).
+- Sender: if the whole envelope would exceed 1372 bytes and the peer has cap `part`, split `body` on character boundaries into chunks sized so that each chunk's envelope (with `from_session`, thread fields and a worst-case `part`) fits; send each chunk with its own `uuid` and `part: {id, i, n}` (same `id`). Without the `part` cap, send independent texts prefixed `[i/n] ` (v1 behaviour). The sender tracks each chunk's `ack` separately: the logical message is `delivered` only when **every** chunk is acked, and `read` when a `receipt` for the part `id` arrives (which marks all chunks).
 - Receiver: buffer by (friend, `id`); ack **each part's uuid**; one logical message counts once against the rate limit; when all `n` arrived, store **one** message with `uuid` = `id`, body = concatenation in `i` order, metadata from the first part seen. After 60 s store what arrived with the body prefixed `[toxi: only k of n parts arrived] `. A part for an already-stored `id` (late resend) is acked and ignored. Total over 64 KB: drop and remember the id.
 - Notify (hooks, wake-ups) only when the message is complete.
 

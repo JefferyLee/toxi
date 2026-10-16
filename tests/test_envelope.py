@@ -17,6 +17,12 @@ def test_parse_non_json_is_treated_as_text():
     assert parsed["uuid"]  # a uuid is synthesized
 
 
+def test_parse_caps_uuid_at_64_chars():
+    long_id = "A" * 64 + ":12345"
+    parsed = envelope.parse(('{"type":"text","uuid":"%s","data":{"body":"x"}}' % long_id).encode())
+    assert parsed["uuid"] == "A" * 64 and envelope.clean_meta({"reply_to": long_id})["reply_to"] == "A" * 64
+
+
 def test_parse_fills_missing_uuid_and_ts():
     parsed = envelope.parse(b'{"type": "text", "data": {"body": "hi"}}')
     assert parsed["uuid"]
