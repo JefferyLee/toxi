@@ -232,7 +232,11 @@ toxi read - --room ops                   # room 的历史（自己的扇出合�
 toxi room list / toxi room show ops
 ```
 
+后加入的成员会从创建者那里收到该 room 最近 20 条消息，带 `history: <作者> @ <时间>` 标签，且已标为已读。
+
 **文件。** `toxi send <别名> --file 路径/截图.png [-t 线程] [正文]` 通过加密的 Tox 文件传输发文件（上限 100 MB）；接收方存到 `~/.config/toxi/media/`，带上你的线程/类型字段和发送方的消息 id，校验 sha256，已读回执与文本一样。超过 64 KB 的文本正文会自动作为文本文件发送。
+
+**检索与归档。** `toxi search <文本> [--alias 别名] [-t 线程] [--archived]` 按内容找消息。`toxi archive --status` 看 `chat.db` 有多大；`toxi archive --older-than 90d` 把早于该时间、已送达/已接收的消息搬到旁边的 `archive.db`（未送达的不会动；`--delete` 改为直接删除，`--dry-run` 只统计）。config.toml 里 `[archive] after_days = 180` 让 daemon 每天自动做。
 
 **实时观察。** `toxi watch` 实时输出 daemon 事件——新消息、联系人上下线、送达、已读回执、被拒绝的发送（`--alias <别名>` 过滤，`--json` 给脚本用，`--context N` 给每条新消息附上和发送者的最近 N 条，方便无记忆的 bot）。
 

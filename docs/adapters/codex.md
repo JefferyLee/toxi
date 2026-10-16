@@ -7,8 +7,14 @@
 
 ## Receive
 
+Codex CLI (0.161+) runs the same hook events as Claude Code, so the plugin delivers the same way:
+
+- **While working**: a PostToolUse hook (`hooks/peer_check.sh`, a stat of `inbox.flag`, then `toxi peer-inbox`) injects routed peer messages as `additionalContext` after a tool call.
+- **Session start / resume**: `hooks/session_start_hook.py` prints the routed peer inbox as developer context.
 - **End of turn**: the Stop hook runs `toxi peer-inbox` and blocks the stop with the messages when there are any; otherwise it emits the `toxi statusline` summary as a system message.
-- **Idle**: Codex has no mid-turn hook and nothing wakes an idle Codex; it must call `wait_for_message` (event-driven, up to 600 s) and loop while it waits for a peer. This is the gap measured in the survey (replies took ~30 min when Codex was idle).
+- **Idle**: nothing wakes an idle Codex (Codex has no periodic or idle event; `SessionEnd` fires only after 30 idle minutes). It must call `wait_for_message` (event-driven, up to 600 s) and loop while it waits for a peer.
+
+Hooks read `TOXI_HOME` from `[mcp_servers.toxi] env` in `~/.codex/config.toml` when it is not in their environment. Review and trust them once with `/hooks` in Codex.
 
 ## Send / identity / safety
 

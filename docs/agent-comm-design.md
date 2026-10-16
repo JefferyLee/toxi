@@ -428,7 +428,7 @@ Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connec
 
 ---
 
-## 12. Backlog (recorded 2026-10-16, by priority)
+## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**
 
@@ -439,13 +439,13 @@ Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connec
 
 **Mid-term (a week each at most)**
 
-5. Codex idle wake-up: Codex has no PostToolUse-like hook, so an idle Codex hears nothing; look for new Codex hooks/notifications, otherwise bake the `wait_for_message` loop into the skill.
+5. ◐ Codex idle wake-up: Codex has no PostToolUse-like hook, so an idle Codex hears nothing; look for new Codex hooks/notifications, otherwise bake the `wait_for_message` loop into the skill.
 6. Claude Code Channels: get onto the channel allowlist so `--dangerously-load-development-channels` goes away.
-7. Room history: a new member sees nothing from before; the creator attaches the last N messages with the card.
+7. ✅ Room history: a new member sees nothing from before; the creator attaches the last N messages with the card.
 8. Daemon self-supervision on hosts without systemd (the Grok VM): `toxi daemon start --supervise` or `toxi agent run` keeping the daemon up, instead of cron.
-9. Archive and search: `toxi archive` / retention, `toxi search` (Ada sees ~1,500 messages a day; `chat.db` only grows).
-10. `toxi doctor` should compare the running daemon's version with the CLI's (an editable install without a restart bit us twice today).
-11. `toxi read --limit N` truncates before parts are merged, so one long message eats the window (seen in the S3 test); merge in SQL or page by logical message.
+9. ✅ Archive and search: `toxi archive` / retention, `toxi search` (Ada sees ~1,500 messages a day; `chat.db` only grows).
+10. ✅ `toxi doctor` should compare the running daemon's version with the CLI's (an editable install without a restart bit us twice today).
+11. ✅ `toxi read --limit N` truncates before parts are merged, so one long message eats the window (seen in the S3 test); merge in SQL or page by logical message.
 12. `toxi agent run` suspected start-up race right after a daemon restart: keep watching, add a repro case.
 13. Receipts recorded as sent by old builds are never backfilled (ToxiOS's three pre-migration rows); a one-off backfill is ToxiOS's call.
 
@@ -454,3 +454,9 @@ Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connec
 14. At-rest encryption of keys and database; optional Tor.
 15. Real Tox groups (NGC) instead of app-layer rooms once rooms get large.
 16. Reconcile the PRD with v2; Homebrew tap for 0.5.x; a real Debian test; Windows is out of scope.
+
+### P6 Room history, archive & search, version check, pagination fix, Codex mid-turn delivery (2026-10-16, v0.6.0)
+
+Code: a room's creator relays the last 20 texts to a member once its card first reaches them (`relayed: {name, ts}`, uuid = the original message id, stored read and silent on arrival; copies the member already holds are skipped; `room_members.history_sent` keeps it to once). `toxi archive` (`--older-than 90d` / `--delete` / `--dry-run` / `--status`; undelivered rows never move; `archive.db` carries an extra alias column) plus `[archive] after_days` for a daily automatic run; `toxi search` / MCP `search_messages` (content LIKE, optionally across the archive). `toxi doctor` compares the running daemon's version with the CLI's (`get_status` now returns `version`). `get_messages` paginates by logical message, so parts and fan-out copies no longer eat the window. **Codex adapter**: research confirmed Codex CLI 0.161 ships 12 hook events (including PostToolUse with `additionalContext` and SessionStart context), on by default and trusted via `/hooks`; the plugin therefore gained PostToolUse (reusing `peer_check.sh` + `post_tool_hook.py`, resolving `TOXI_HOME` from Codex's config) and SessionStart (`session_start_hook.py`, plain text) — mid-turn and session-start delivery now match Claude Code; idle wake-up remains open (Codex has no periodic or idle event; `SessionEnd` fires only after 30 idle minutes). Protocol: the `relayed` field and newcomer history are specified in §3.1/§3.6. 181 unit tests.
+
+Acceptance: unit and two-daemon e2e suites pass; live Ada and Belinda on 0.6.0 with `toxi doctor` green; Codex needs the two new hooks trusted in `/hooks` and a session restart.

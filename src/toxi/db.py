@@ -106,7 +106,9 @@ _ADDED_COLUMNS = {
                  ("sha256", "TEXT"),                  # files: digest declared by the sender / verified by us
                  ("from_dir", "TEXT"),                # outgoing: project dir of the sending session (local only)
                  ("handled_at", "INTEGER"),           # `done` receipt (out) / we marked it handled (in)
-                 ("receipt_pending", "TEXT")],        # incoming: receipt kind still owed to the sender
+                 ("receipt_pending", "TEXT"),         # incoming: receipt kind still owed to the sender
+                 ("relayed", "TEXT")],                # JSON {name, ts}: room history relayed by the creator
+    "room_members": [("history_sent", "INTEGER")],   # creator: when this member got the room's history
 }
 
 

@@ -20,7 +20,7 @@ PROFILE_KINDS = ("agent", "human", "service")
 
 # Structured fields a text may carry besides its body (design §4.5).
 KINDS = ("msg", "request", "report", "ack", "relay")
-META_KEYS = ("thread", "reply_to", "kind", "needs_human", "tags", "room", "room_msg")
+META_KEYS = ("thread", "reply_to", "kind", "needs_human", "tags", "room", "room_msg", "relayed")
 
 
 def clean_meta(raw) -> dict:
@@ -48,6 +48,12 @@ def clean_meta(raw) -> dict:
         v = str(raw.get(k) or "").strip()[:64]
         if v:
             out[k] = v
+    rel = raw.get("relayed")  # room history: who originally wrote this, and when
+    if isinstance(rel, dict) and rel.get("name"):
+        try:
+            out["relayed"] = {"name": str(rel["name"])[:64], "ts": int(rel.get("ts") or 0)}
+        except (TypeError, ValueError):
+            pass
     return out
 
 

@@ -118,6 +118,10 @@ def meta_tag(m: dict) -> str:
     parts = []
     if m.get("room_id"):
         parts.append(f"room {m.get('room_name') or m['room_id'][:8]}")
+    if m.get("relayed"):
+        rel = m["relayed"]
+        when = time.strftime("%m-%d %H:%M", time.localtime(rel.get("ts") or 0))
+        parts.append(f"history: {rel.get('name')} @ {when}")
     if m.get("thread"):
         parts.append(f"#{m['thread']}")
     if m.get("kind", "msg") != "msg":

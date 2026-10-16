@@ -22,7 +22,7 @@ from collections import deque
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import client, config, db, envelope, invite, ipc, paths
+from . import __version__, client, config, db, envelope, invite, ipc, paths
 from .tox import (
     FILE_CONTROL_CANCEL,
     FILE_CONTROL_RESUME,
@@ -149,6 +149,11 @@ def _with_profile(row) -> dict:
             d["tags"] = json.loads(d["tags"]) if d["tags"] else []
         except ValueError:
             d["tags"] = []
+    if "relayed" in d:
+        try:
+            d["relayed"] = json.loads(d["relayed"]) if d["relayed"] else None
+        except ValueError:
+            d["relayed"] = None
     return d
 
 
@@ -158,6 +163,11 @@ def _row_meta(row) -> dict:
     raw = {k: row[k] for k in envelope.META_KEYS if k in keys}
     if "room_id" in keys:
         raw["room"], raw["room_msg"] = row["room_id"], row["room_msg_id"]
+    if raw.get("relayed"):
+        try:
+            raw["relayed"] = json.loads(raw["relayed"])
+        except ValueError:
+            raw["relayed"] = None
     if raw.get("tags"):
         try:
             raw["tags"] = json.loads(raw["tags"])
@@ -167,11 +177,16 @@ def _row_meta(row) -> dict:
 
 
 def _meta_values(meta: dict) -> tuple:
-    """(thread, reply_to, kind, needs_human, tags_json, room_id, room_msg_id) for an INSERT."""
+    """(thread, reply_to, kind, needs_human, tags_json, room_id, room_msg_id, relayed_json)."""
     return (meta.get("thread"), meta.get("reply_to"), meta.get("kind"),
             1 if meta.get("needs_human") else 0,
             json.dumps(meta["tags"], ensure_ascii=False) if meta.get("tags") else None,
-            meta.get("room"), meta.get("room_msg"))
+            meta.get("room"), meta.get("room_msg"),
+            json.dumps(meta["relayed"], ensure_ascii=False) if meta.get("relayed") else None)
+
+
+ROOM_HISTORY = 20  # recent room messages a new member receives from the creator
+ARCHIVE_INTERVAL = 86400  # the daemon checks [archive] after_days once a day
 
 
 def _merge_room_sends(msgs: list) -> list:
@@ -272,6 +287,7 @@ class Daemon:
         self.ack_timeout = rc["ack_timeout_minutes"] * 60
         self.fail_after = rc["fail_after_hours"] * 3600
         self._last_sweep = 0.0
+        self._last_archive = 0.0
         self._started_at = time.time()
         self._transfers: dict[tuple[int, int], dict] = {}  # in-flight incoming files
         self._out: dict[tuple[int, int], dict] = {}  # in-flight outgoing files (design §4.6)
@@ -316,6 +332,9 @@ class Daemon:
             "send_file": self._send_file,
             "rename_contact": self._rename_contact,
             "mark_handled": self._mark_handled,
+            "archive_messages": self._archive_messages,
+            "archive_status": self._archive_status,
+            "search_messages": self._search_messages,
             "shutdown": self._shutdown,
         }
 
@@ -517,10 +536,10 @@ class Daemon:
         cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
             "content, created_at, received_at, status, from_session, "
-            "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id) "
-            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, relayed, read_at) "
+            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (env["uuid"], row["id"], body, env.get("ts", int(time.time())), int(time.time()),
-             session, *_meta_values(meta)),
+             session, *_meta_values(meta), int(time.time()) if meta.get("relayed") else None),
         )
         self.db.commit()
         if cur.rowcount:
@@ -586,10 +605,10 @@ class Daemon:
         cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
             "content, created_at, received_at, status, from_session, "
-            "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id) "
-            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, relayed, read_at) "
+            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (key[1], buf["contact_id"], body, buf["ts"], now, buf["session"],
-             *_meta_values(buf["meta"])),
+             *_meta_values(buf["meta"]), now if buf["meta"].get("relayed") else None),
         )
         self.db.commit()
         if cur.rowcount:
@@ -597,8 +616,9 @@ class Daemon:
 
     def _stored(self, msg_uuid: str, alias: str, meta: dict) -> None:
         """A text was stored: wake hooks and flag unless it is a mere `ack`
-        (design §4.5: acknowledgements never wake anyone), always tell subscribers."""
-        wake = meta.get("kind") != "ack"
+        (design §4.5: acknowledgements never wake anyone) or relayed room
+        history (old news, stored as already read); always tell subscribers."""
+        wake = meta.get("kind") != "ack" and not meta.get("relayed")
         if wake:
             self._queue_hook(alias, msg_uuid, "text")
         self._announce(msg_uuid, alias, wake=wake)
@@ -893,8 +913,9 @@ class Daemon:
             members.append((r["public_key"], prof.get("name") or r["alias"]))
         self.db.execute("INSERT INTO rooms (room_id, name, created_by, created_at) VALUES (?,?,?,?)",
                         (room_id, name, self._my_pk(), now))
-        self.db.executemany("INSERT OR REPLACE INTO room_members (room_id, public_key, name) "
-                            "VALUES (?, ?, ?)", [(room_id, pk, n) for pk, n in members])
+        self.db.executemany("INSERT OR REPLACE INTO room_members (room_id, public_key, name, "
+                            "history_sent) VALUES (?, ?, ?, ?)",
+                            [(room_id, pk, n, now) for pk, n in members])  # nothing to catch up on
         self.db.commit()
         card = self._room_card(room_id)
         told = [r["alias"] for r in rows
@@ -921,8 +942,9 @@ class Daemon:
                 name = (json.loads(c["profile_json"]) if c["profile_json"] else {}).get("name")
             except ValueError:
                 name = None
-            self.db.execute("INSERT OR REPLACE INTO room_members (room_id, public_key, name) "
-                            "VALUES (?, ?, ?)", (room["room_id"], c["public_key"], name or alias))
+            self.db.execute("INSERT INTO room_members (room_id, public_key, name) VALUES (?, ?, ?) "
+                            "ON CONFLICT(room_id, public_key) DO UPDATE SET name=excluded.name",
+                            (room["room_id"], c["public_key"], name or alias))  # keeps history_sent
         for alias in remove:
             self.db.execute("DELETE FROM room_members WHERE room_id=? AND public_key="
                             "(SELECT public_key FROM contacts WHERE alias=?)", (room["room_id"], alias))
@@ -936,6 +958,7 @@ class Daemon:
                                  (m["alias"],)).fetchone()["friend_number"]
             if fn is not None and self.tox.friend_send_message(fn, card):
                 told.append(m["alias"])
+                self._send_room_history(room["room_id"], m["public_key"], fn)
         # Removed members that are online hear about it too (the card no longer lists them).
         for alias in remove:
             c = self.db.execute("SELECT friend_number, is_online FROM contacts WHERE alias=?",
@@ -955,7 +978,57 @@ class Daemon:
             "SELECT r.room_id FROM rooms r JOIN room_members m ON m.room_id=r.room_id "
             "WHERE r.created_by=? AND m.public_key=?", (self._my_pk(), c["public_key"])).fetchall()
         for r in rows:
-            self.tox.friend_send_message(friend_number, self._room_card(r["room_id"]))
+            if self.tox.friend_send_message(friend_number, self._room_card(r["room_id"])):
+                self._send_room_history(r["room_id"], c["public_key"], friend_number)
+
+    def _send_room_history(self, room_id: str, member_pk: str, friend_number: int) -> int:
+        """Once per member: relay the room's last ROOM_HISTORY texts so a newcomer
+        is not blind (design backlog 7). Copies carry the original writer and time
+        in `relayed`, keep their ids (so re-sends dedupe), create no rows here and
+        arrive on the other side already read: history, not news."""
+        done = self.db.execute("SELECT history_sent FROM room_members WHERE room_id=? AND public_key=?",
+                               (room_id, member_pk)).fetchone()
+        if done is None or done["history_sent"]:
+            return 0
+        member = self.db.execute("SELECT alias FROM contacts WHERE public_key=?", (member_pk,)).fetchone()
+        member_alias = member["alias"] if member else None
+        # Logical messages (parts and fan-out copies already merged), newest first.
+        picked = []
+        for m in self._get_messages({"room": room_id, "limit": ROOM_HISTORY + 40})["messages"]:
+            if m["msg_type"] != "text" or m.get("relayed"):
+                continue
+            if m["direction"] == "out" and any(r["alias"] == member_alias for r in m.get("recipients", [])):
+                continue  # they already have their own copy of this one
+            picked.append(m)
+            if len(picked) >= ROOM_HISTORY:
+                break
+        me = self.profile.get("name") or self.tox.self_get_name().decode("utf-8", "replace") or "me"
+        sent = 0
+        for m in reversed(picked):  # oldest first
+            if m["direction"] == "out":
+                who, uid = me, m.get("room_msg_id") or m["msg_uuid"]
+            else:
+                who = (m.get("profile") or {}).get("name") or m["alias"]
+                uid = m["msg_uuid"]
+            meta = {"thread": m.get("thread"), "kind": m.get("kind"), "room": room_id, "room_msg": uid,
+                    "relayed": {"name": who, "ts": m["created_at"]}}
+            if m.get("tags"):
+                meta["tags"] = m["tags"]
+            r = {"content": m["content"], "created_at": m["created_at"]}
+            chunks = envelope.split_text(r["content"], MAX_MESSAGE_LENGTH, None, parts=True, meta=meta)
+            for i, chunk in enumerate(chunks, 1):
+                part = {"id": uid, "i": i, "n": len(chunks)} if len(chunks) > 1 else None
+                env = envelope.text_envelope(uid if not part else f"{uid}:{i}", r["created_at"],
+                                             chunk, None, part, meta)
+                if not self.tox.friend_send_message(friend_number, envelope.encode(env)):
+                    break
+            sent += 1
+        self.db.execute("UPDATE room_members SET history_sent=? WHERE room_id=? AND public_key=?",
+                        (int(time.time()), room_id, member_pk))
+        self.db.commit()
+        if sent:
+            log.info("sent %d history message(s) of room %s to %s", sent, room_id[:8], member_pk[:8])
+        return sent
 
     def _receive_room(self, friend_number: int, env: dict) -> None:
         card = envelope.clean_room(env.get("data"))
@@ -1202,7 +1275,7 @@ class Daemon:
             new_uuid = meta["msg_uuid"]
         self.db.execute(
             "UPDATE messages SET msg_uuid=?, sha256=?, from_session=?, thread=?, reply_to=?, "
-            "kind=?, needs_human=?, tags=?, room_id=?, room_msg_id=? WHERE msg_uuid=?",
+            "kind=?, needs_human=?, tags=?, room_id=?, room_msg_id=?, relayed=? WHERE msg_uuid=?",
             (new_uuid, digest, meta.get("session"), *_meta_values(m), row_uuid),
         )
         self.db.commit()
@@ -1231,7 +1304,8 @@ class Daemon:
         self.db.execute(
             "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, created_at, "
             "status, from_session, sha256, thread, reply_to, kind, needs_human, tags, room_id, "
-            "room_msg_id, from_dir) VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "room_msg_id, relayed, from_dir) "
+            "VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (uid, contact["id"], kind, str(path.resolve()), now, session, digest,
              *_meta_values(meta), from_dir),
         )
@@ -1466,6 +1540,7 @@ class Daemon:
                 self._tick_parts()
                 if time.time() - self._last_sweep > SWEEP_INTERVAL:
                     self._retry_sweep()
+                    self._archive_tick()
                     self._last_sweep = time.time()
                 timeout = min(self.tox.iteration_interval() / 1000, 0.1)
                 for key, _ in self._sel.select(timeout):
@@ -1557,6 +1632,7 @@ class Daemon:
         stat = lambda sql: self.db.execute(sql, (since,)).fetchone()["c"]
         return {
             "pid": os.getpid(),
+            "version": __version__,
             "uptime_seconds": int(time.time() - self._started_at),
             "dht_connected": self.tox.is_connected(),
             "connection": self.tox.self_get_connection_status(),
@@ -1728,8 +1804,8 @@ class Daemon:
             self.db.execute(
                 "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
                 "created_at, status, from_session, part_id, part_i, part_n, "
-                "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, from_dir) "
-                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, relayed, from_dir) "
+                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (env["uuid"], contact["id"], chunk, env["ts"], session, part_id,
                  i if part_id else None, len(chunks) if part_id else None,
                  *_meta_values(meta), from_dir),
@@ -1767,24 +1843,35 @@ class Daemon:
             args.append(self._resolve_room(params["room"])["room_id"])
         if params.get("unread_only"):
             conds.append("m.direction='in' AND m.read_at IS NULL")
+        base = ("FROM messages m JOIN contacts c ON c.id=m.contact_id "
+                "LEFT JOIN rooms r ON r.room_id=m.room_id")
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+        # `limit` counts logical messages: the parts of one long text and the
+        # fan-out copies of one room message share a key and come back together.
+        key = ("CASE WHEN m.direction='out' AND m.room_msg_id IS NOT NULL THEN 'r:'||m.room_msg_id "
+               "WHEN m.direction='out' AND m.part_id IS NOT NULL THEN 'p:'||m.part_id "
+               "ELSE 'u:'||m.msg_uuid END")
+        keys = [k[0] for k in self.db.execute(
+            f"SELECT {key} AS lk {base}{where} GROUP BY lk "
+            f"ORDER BY MAX(m.created_at) DESC, MAX(m.id) DESC LIMIT ?",
+            (*args, int(params.get("limit", 20)))).fetchall()]
+        if not keys:
+            return {"messages": []}
+        qs = ",".join("?" * len(keys))
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                  "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                  "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                 "r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
-                 "FROM messages m "
-                 "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id")
-        if conds:
-            query += " WHERE " + " AND ".join(conds)
-        query += " ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
-        args.append(int(params.get("limit", 20)))
-        rows = [_with_profile(r) for r in self.db.execute(query, args).fetchall()]
+                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
+                 f"{base}{where}{' AND' if conds else ' WHERE'} {key} IN ({qs}) "
+                 "ORDER BY m.created_at DESC, m.id DESC")
+        rows = [_with_profile(r) for r in self.db.execute(query, (*args, *keys)).fetchall()]
         return {"messages": _merge_room_sends(_merge_parts(rows))}
 
     def _get_message(self, params: dict) -> dict:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                 "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                "r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
+                "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
                 "FROM messages m "
                 "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id ")
         rows = self.db.execute(cols + "WHERE m.msg_uuid=?", (params.get("msg_uuid"),)).fetchall()
@@ -1909,6 +1996,113 @@ class Daemon:
             (*args, int(params.get("limit", 50))),
         ).fetchall()
         return {"threads": [dict(r) for r in rows]}
+
+    # --- archive & search (design backlog 9) ---
+    def _archive_path(self):
+        return paths.config_dir() / "archive.db"
+
+    def _archive_messages(self, params: dict) -> dict:
+        """Move (or delete) delivered/received messages older than N days into
+        archive.db (same columns plus the contact alias). Undelivered rows stay."""
+        days = int(params.get("older_than_days") or 0)
+        if days <= 0:
+            raise RpcError("INVALID_DAYS", "older_than_days must be a positive number")
+        cutoff = int(time.time()) - days * 86400
+        conds, args = ["m.created_at<?", "m.status NOT IN ('queued','sent')"], [cutoff]
+        if params.get("alias"):
+            conds.append("c.alias=?")
+            args.append(params["alias"])
+        where = " AND ".join(conds)
+        count = self.db.execute(
+            f"SELECT COUNT(*) AS c FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE {where}",
+            args).fetchone()["c"]
+        res = {"matched": count, "cutoff": cutoff, "archive": str(self._archive_path()),
+               "dry_run": bool(params.get("dry_run")), "deleted": bool(params.get("delete"))}
+        if params.get("dry_run") or not count:
+            return res
+        if not params.get("delete"):
+            ap = str(self._archive_path())
+            self.db.execute("ATTACH DATABASE ? AS arc", (ap,))
+            try:
+                self.db.execute("CREATE TABLE IF NOT EXISTS arc.messages AS "
+                                "SELECT c.alias AS alias, m.* FROM messages m "
+                                "JOIN contacts c ON c.id=m.contact_id WHERE 0")
+                self.db.execute(f"INSERT OR IGNORE INTO arc.messages SELECT c.alias AS alias, m.* "
+                                f"FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE {where}", args)
+                self.db.commit()
+            finally:
+                self.db.execute("DETACH DATABASE arc")
+            os.chmod(ap, 0o600)
+        self.db.execute(f"DELETE FROM messages WHERE id IN (SELECT m.id FROM messages m "
+                        f"JOIN contacts c ON c.id=m.contact_id WHERE {where})", args)
+        self.db.commit()
+        return res
+
+    def _archive_status(self, params: dict) -> dict:
+        row = self.db.execute("SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM messages").fetchone()
+        ap = self._archive_path()
+        archived = 0
+        if ap.exists():
+            try:
+                self.db.execute("ATTACH DATABASE ? AS arc", (str(ap),))
+                try:
+                    archived = self.db.execute("SELECT COUNT(*) AS n FROM arc.messages").fetchone()["n"]
+                finally:
+                    self.db.execute("DETACH DATABASE arc")
+            except Exception:  # an archive from a foreign schema: report what we can
+                archived = -1
+        return {"messages": row["n"], "oldest": row["oldest"],
+                "db_bytes": paths.db_path().stat().st_size if paths.db_path().exists() else 0,
+                "archived": archived, "archive_bytes": ap.stat().st_size if ap.exists() else 0,
+                "auto_after_days": config.archive_after_days()}
+
+    def _archive_tick(self) -> None:
+        days = config.archive_after_days()
+        if not days or time.time() - self._last_archive < ARCHIVE_INTERVAL:
+            return
+        self._last_archive = time.time()
+        try:
+            res = self._archive_messages({"older_than_days": days})
+            if res["matched"]:
+                log.info("archived %d message(s) older than %d days", res["matched"], days)
+        except Exception:
+            log.exception("auto-archive failed")
+
+    def _search_messages(self, params: dict) -> dict:
+        q = str(params.get("q") or "").strip()
+        if not q:
+            raise RpcError("INVALID_QUERY", "a search string is required")
+        limit = int(params.get("limit") or 20)
+        like = f"%{q.lower()}%"
+        conds, args = ["LOWER(m.content) LIKE ?"], [like]
+        if params.get("alias"):
+            conds.append("c.alias=?")
+            args.append(params["alias"])
+        if params.get("thread"):
+            conds.append("m.thread=?")
+            args.append(params["thread"])
+        where = " AND ".join(conds)
+        rows = self.db.execute(
+            f"SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
+            f"m.status, m.thread, m.kind, m.room_id FROM messages m JOIN contacts c ON c.id=m.contact_id "
+            f"WHERE {where} ORDER BY m.created_at DESC LIMIT ?", (*args, limit)).fetchall()
+        out = [dict(r, archived=False) for r in rows]
+        ap = self._archive_path()
+        if params.get("archived") and ap.exists() and len(out) < limit:
+            self.db.execute("ATTACH DATABASE ? AS arc", (str(ap),))
+            try:
+                aconds = ["LOWER(content) LIKE ?"] + (["alias=?"] if params.get("alias") else []) \
+                    + (["thread=?"] if params.get("thread") else [])
+                arows = self.db.execute(
+                    f"SELECT msg_uuid, alias, direction, msg_type, content, created_at, status, thread, "
+                    f"kind, room_id FROM arc.messages WHERE {' AND '.join(aconds)} "
+                    f"ORDER BY created_at DESC LIMIT ?", (*args, limit - len(out))).fetchall()
+                out += [dict(r, archived=True) for r in arows]
+            finally:
+                self.db.execute("DETACH DATABASE arc")
+        for m in out:
+            m["kind"] = m["kind"] or "msg"
+        return {"count": len(out), "messages": out}
 
     def _get_profile(self, params: dict) -> dict:
         return {"profile": self.profile}

@@ -92,6 +92,14 @@ def send_room_message(room: str, body: str, thread: str | None = None, kind: str
                                         "needs_human": needs_human, "tags": tags or []})
 
 
+def search_messages(q: str, alias: str | None = None, thread: str | None = None,
+                    limit: int = 20, archived: bool = False) -> dict:
+    """Find messages whose text contains `q` (case-insensitive), newest first;
+    `archived=True` also searches archive.db. Does NOT mark anything read."""
+    return client.request("search_messages", {"q": q, "alias": alias, "thread": thread,
+                                              "limit": limit, "archived": archived})
+
+
 def get_threads(alias: str | None = None) -> dict:
     """Threads (topics) in your conversations, most recent first, with message
     count, unread count and how many unread messages need the user's decision."""
@@ -251,9 +259,9 @@ async def _poll_for_message(take, deadline: float) -> dict:
     return {"messages": [], "timed_out": True}
 
 
-TOOLS = [get_unread, read_history, get_threads, view_media, mark_read, mark_handled,
-         send_message, send_file, list_contacts, get_peers, get_status, wait_for_message,
-         list_rooms, read_room, send_room_message]
+TOOLS = [get_unread, read_history, get_threads, search_messages, view_media, mark_read,
+         mark_handled, send_message, send_file, list_contacts, get_peers, get_status,
+         wait_for_message, list_rooms, read_room, send_room_message]
 
 # Hints for clients that gate tools by side effect (e.g. Claude Code's auto mode,
 # which otherwise classified send_message as risky and blocked it).
@@ -261,6 +269,7 @@ ANNOTATIONS = {
     "get_unread": {"readOnlyHint": True},
     "read_history": {"readOnlyHint": True},
     "get_threads": {"readOnlyHint": True},
+    "search_messages": {"readOnlyHint": True},
     "list_rooms": {"readOnlyHint": True},
     "read_room": {"readOnlyHint": True},
     "send_room_message": {"readOnlyHint": False, "destructiveHint": False,

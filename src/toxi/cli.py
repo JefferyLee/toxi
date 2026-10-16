@@ -324,6 +324,76 @@ def _wait_status(msg_uuid: str, seconds: int, until=("read", "handled", "failed"
         time.sleep(0.5)
 
 
+def _parse_age(text: str) -> int:
+    """'90d' / '12w' / '6m' / '1y' -> days."""
+    t = text.strip().lower()
+    mult = {"d": 1, "w": 7, "m": 30, "y": 365}
+    try:
+        if t[-1] in mult:
+            return int(t[:-1]) * mult[t[-1]]
+        return int(t)
+    except (ValueError, IndexError):
+        raise click.BadParameter("use a number of days, or e.g. 90d, 12w, 6m, 1y")
+
+
+@cli.command()
+@click.option("--older-than", "older", default="90d", show_default=True,
+              help="Age of the messages to archive: 90d, 12w, 6m, 1y, or a number of days.")
+@click.option("--alias", default=None, help="Only this contact's messages.")
+@click.option("--delete", is_flag=True, help="Delete instead of moving to archive.db (DESTRUCTIVE).")
+@click.option("--dry-run", is_flag=True, help="Only count what would move.")
+@click.option("--status", "show_status", is_flag=True, help="Show database and archive sizes.")
+@click.pass_context
+def archive(ctx, older, alias, delete, dry_run, show_status):
+    """Move old delivered/received messages into archive.db so chat.db stays small.
+
+    Undelivered messages are never archived. `[archive] after_days = N` in
+    config.toml makes the daemon do this daily by itself.
+    """
+    if show_status:
+        st = _call("archive_status")
+        if _emit(ctx, st):
+            return
+        oldest = _ago(st["oldest"]) if st["oldest"] else "-"
+        click.echo(f"chat.db: {st['messages']} messages ({st['db_bytes'] // 1024} KB), oldest {oldest}\n"
+                   f"archive.db: {st['archived']} messages ({st['archive_bytes'] // 1024} KB)\n"
+                   f"auto-archive: " + (f"after {st['auto_after_days']} days" if st["auto_after_days"] else "off"))
+        return
+    days = _parse_age(older)
+    if delete and not dry_run and not (ctx.obj and ctx.obj.get("json")):
+        click.confirm(f"Permanently delete messages older than {days} days?", abort=True)
+    res = _call("archive_messages", {"older_than_days": days, "alias": alias, "delete": delete,
+                                     "dry_run": dry_run})
+    if _emit(ctx, res):
+        return
+    verb = "would be " + ("deleted" if delete else "archived") if dry_run else ("deleted" if delete else "moved to archive.db")
+    click.echo(f"✓ {res['matched']} message(s) older than {days} days {verb}")
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--alias", default=None, help="Only this contact.")
+@click.option("-t", "--thread", default=None, help="Only this thread.")
+@click.option("--limit", default=20, show_default=True)
+@click.option("--archived", is_flag=True, help="Also search archive.db.")
+@click.pass_context
+def search(ctx, query, alias, thread, limit, archived):
+    """Find messages whose text contains QUERY (case-insensitive)."""
+    res = _call("search_messages", {"q": query, "alias": alias, "thread": thread, "limit": limit,
+                                    "archived": archived})
+    if _emit(ctx, res):
+        return
+    if not res["messages"]:
+        click.echo("No matches.")
+        return
+    for m in res["messages"]:
+        who = "you" if m["direction"] == "out" else m["alias"]
+        peer = f" → {m['alias']}" if m["direction"] == "out" else ""
+        tag = f" #{m['thread']}" if m.get("thread") else ""
+        arc = " (archived)" if m.get("archived") else ""
+        click.echo(f"  {who}{peer} ({_ago(m['created_at'])}){tag}{arc}: {m['content'][:120]}")
+
+
 @cli.command()
 @click.argument("msg_uuids", nargs=-1, required=True)
 def done(msg_uuids):
@@ -945,6 +1015,10 @@ def _doctor_checks() -> list:
     if running:
         try:
             status = _call("get_status")
+            dv = status.get("version")
+            if dv != __version__:
+                add(False, "daemon version", f"daemon runs {dv or 'an older build'}, CLI is "
+                    f"{__version__} — `toxi service restart` (or daemon stop/start)")
             add(bool(status["dht_connected"]), "dht",
                 "connected" if status["dht_connected"] else "not connected yet (give it a minute)")
             add(None, "contacts", f"{status['contacts_online']}/{status['contacts_total']} online, "

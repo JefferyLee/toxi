@@ -35,6 +35,12 @@ class FakeTox:
     def get_savedata(self):
         return b"s"
 
+    def is_connected(self):
+        return True
+
+    def self_get_connection_status(self):
+        return 2
+
 
 def _daemon(tmp_path, monkeypatch, caps=ALL_CAPS, status=2):
     tmp_path.mkdir(exist_ok=True)
@@ -44,6 +50,7 @@ def _daemon(tmp_path, monkeypatch, caps=ALL_CAPS, status=2):
     d.tox = FakeTox(status)
     d.profile = {}
     d.ack_timeout, d.fail_after = 300, 86400
+    d._started_at, d._last_archive = time.time(), 0.0
     d._text_times, d._request_times = {}, deque()
     d._hook_msgs, d._hook_due, d._hook_proc, d._hook_started = [], 0.0, None, 0.0
     d._subs, d._parts, d._sel = [], {}, selectors.DefaultSelector()
@@ -254,3 +261,16 @@ def test_merge_parts_keeps_order_and_least_status():
     assert [m["msg_uuid"] for m in out] == ["P", "x"]
     assert out[0]["content"] == "abc" and out[0]["status"] == "sent" and out[0]["created_at"] == 1
     assert "part_id" not in out[0] and "part_id" not in out[1]
+
+
+def test_get_messages_limit_counts_logical_messages(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    big = d._send_message({"alias": "bob", "body": "y" * 3000})      # 3 parts
+    d._on_friend_message(5, _text("one"), 0)
+    d._on_friend_message(5, _text("two"), 0)
+    got = d._get_messages({"alias": "bob", "limit": 2})["messages"]
+    assert [m["content"] for m in got] == ["two", "one"]              # parts did not eat the window
+    got = d._get_messages({"alias": "bob", "limit": 3})["messages"]
+    assert got[2]["msg_uuid"] == big["msg_uuid"] and got[2]["content"] == "y" * 3000
+    assert d._get_messages({"alias": "bob", "limit": 1, "unread_only": True})["messages"][0]["content"] == "two"
+    assert d._get_status({})["version"]

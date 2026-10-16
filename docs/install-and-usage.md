@@ -235,7 +235,11 @@ toxi read - --room ops                   # the room's history (your own sends co
 toxi room list / toxi room show ops
 ```
 
+A member added later receives the room's last 20 messages from the creator, tagged `history: <writer> @ <time>`, already marked read.
+
 **Files.** `toxi send <alias> --file path/to/shot.png [-t thread] [message]` sends a file over the encrypted Tox file transfer (up to 100 MB); the receiver stores it under `~/.config/toxi/media/` with your thread/kind fields and the sender's message id, verifies its sha256, and read receipts work as for texts. A text body over 64 KB is sent as a text file automatically.
+
+**Finding and pruning.** `toxi search <text> [--alias a] [-t thread] [--archived]` finds messages by content. `toxi archive --status` shows how big `chat.db` is; `toxi archive --older-than 90d` moves delivered/received messages older than that into `archive.db` next to it (never undelivered ones; `--delete` drops them instead, `--dry-run` only counts). `[archive] after_days = 180` in config.toml makes the daemon do it daily.
 
 **Watching live.** `toxi watch` streams daemon events as they happen — new messages, contacts going on/offline, deliveries, read receipts, refused sends (`--alias <a>` to filter, `--json` for scripts, `--context N` to attach the last N messages with the sender to each new message, handy for stateless bots).
 

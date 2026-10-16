@@ -419,7 +419,7 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 
 发布：`v2-p1` 合并到 `master`，打 `v0.4.0` 触发 GitHub Actions 发 PyPI（见 release.md）。
 
-### P5 回复路由、处理回执、自动化双 daemon 测试（2026-10-16，v0.5.0）
+### P5 回复路由、处理回执、自动化双 daemon 测试（2026-10-16，v0.5.0；0.5.1 补回执持久队列）
 
 代码：发出的消息本地记录发送会话的项目目录（`from_dir`，不进协议）；收到的消息若 `reply_to` 指向某会话发出的消息（含多段的分片 id），或延续该会话最近与该联系人对话的线程，`get_messages` 算出 `route_dir`，`peers.take()` 30 分钟内只投递给那个目录的会话，之后退回 `dirs` 规则；MCP 的 `wait_for_message` 与 channel 唤醒改为监听所有 peer、按消息判定路由。`receipt kind=done`：带 `reply_to` 的回复自动发出，`toxi done <id>` / MCP `mark_handled` 显式发出；发送方状态新增 `handled`（`done` 蕴含 `read`，`read` 不降级）；`--wait-handled` / `wait_handled=`；`toxi threads` 新增"等待回答的请求数"；`toxi agent run` 的命令成功返回即标处理完。`[tox] bootstrap` / `public_dht` 配置与 `toxi me` 的 DHT 节点信息，让两个 daemon 直接互相 bootstrap。测试：`tests/test_e2e_local.py` 起两个真实 daemon（互相 bootstrap + 公网 DHT 做 onion），覆盖配对、卡片、分段、read/done 回执、回复路由、room、文件，**18 秒互连、21 秒跑完**；单测 172 个。协议文档补 `done` 与 `handled`。版本 0.5.0。
 
@@ -427,7 +427,7 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 
 ---
 
-## 12. 待办清单（2026-10-16 记录，按优先级）
+## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**
 
@@ -438,13 +438,13 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 
 **中期（每项一周内）**
 
-5. Codex 空闲唤醒：Codex 没有 PostToolUse 类 hook，空闲收不到消息；看 Codex 侧有无新 hook/通知机制，没有则在 skill 里固化 `wait_for_message` 循环。
+5. ◐ Codex 空闲唤醒：Codex 没有 PostToolUse 类 hook，空闲收不到消息；看 Codex 侧有无新 hook/通知机制，没有则在 skill 里固化 `wait_for_message` 循环。
 6. Claude Code Channels 转正：申请进 channel 白名单，去掉 `--dangerously-load-development-channels`。
-7. room 补历史：新成员进 room 看不到之前的消息；创建者发卡片时附最近 N 条。
+7. ✅ room 补历史：新成员进 room 看不到之前的消息；创建者发卡片时附最近 N 条。
 8. 无 systemd 机器（Grok VM）的 daemon 自监督：`toxi daemon start --supervise` 或由 `toxi agent run` 拉起 daemon，替代 cron。
-9. 归档与检索：`toxi archive` / 保留策略、`toxi search`（Ada 一天 1500 条，`chat.db` 会一直长）。
-10. `toxi doctor` 比对 daemon 进程版本与 CLI 版本（编辑式安装忘重启是本次踩过两次的坑）。
-11. `toxi read --limit N` 在分片合并之前截断，长消息的分片会吃掉窗口（S3 测试时发现）；应在 SQL 层合并或按逻辑消息分页。
+9. ✅ 归档与检索：`toxi archive` / 保留策略、`toxi search`（Ada 一天 1500 条，`chat.db` 会一直长）。
+10. ✅ `toxi doctor` 比对 daemon 进程版本与 CLI 版本（编辑式安装忘重启是本次踩过两次的坑）。
+11. ✅ `toxi read --limit N` 在分片合并之前截断，长消息的分片会吃掉窗口（S3 测试时发现）；应在 SQL 层合并或按逻辑消息分页。
 12. `toxi agent run` 在 daemon 刚重启后的首条未投递疑似竞态，留观并补复现用例。
 13. 旧版本已记"已发"的回执不会补发（ToxiOS 迁移前的三条）；是否做一次性补发由 ToxiOS 决定。
 
@@ -453,3 +453,9 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 14. 私钥与数据库静态加密、可选 Tor。
 15. 真正的 Tox 群组（NGC）替代应用层 room（成员多时）。
 16. PRD 与 v2 对齐、Homebrew tap 跟进 0.5.x、Linux 发行版（Debian）实测、Windows 不在计划内。
+
+### P6 room 历史、归档与检索、版本比对、分页修正、Codex 回合中投递（2026-10-16，v0.6.0）
+
+代码：room 创建者在卡片首次送达某成员后转发最近 20 条文本（`relayed: {name, ts}`，uuid 用原消息 id，接收端存为已读、不唤醒；成员已有的拷贝不重发；`room_members.history_sent` 保证只补一次）。`toxi archive`（`--older-than 90d` / `--delete` / `--dry-run` / `--status`，未送达的不归档，`archive.db` 多一列 alias）与 `[archive] after_days` 每日自动归档；`toxi search` / MCP `search_messages`（内容 LIKE，可含归档）。`toxi doctor` 比对 daemon 进程版本与 CLI 版本（`get_status` 现返回 `version`）。`get_messages` 的 `limit` 改为按逻辑消息分页（分片与扇出拷贝不再吃掉窗口）。**Codex 适配器**：调研确认 Codex CLI 0.161 已有 12 种 hook（含 PostToolUse `additionalContext`、SessionStart 上下文），默认开启、需在 `/hooks` 里信任；插件因此加上 PostToolUse（复用 `peer_check.sh` + `post_tool_hook.py`，并从 Codex 配置解析 `TOXI_HOME`）和 SessionStart（`session_start_hook.py`，纯文本输出）——Codex 工作中与会话启动时的投递与 Claude Code 对齐；空闲唤醒仍无解（Codex 无周期或空闲事件，`SessionEnd` 仅在空闲 30 分钟后触发）。协议：`relayed` 字段与"新成员补历史"写入 §3.1/§3.6。单测 181 个。
+
+验收：单测与两 daemon e2e 通过；现网 Ada、Belinda 升级到 0.6.0 后 `toxi doctor` 全绿；Codex 需在 `/hooks` 里信任两个新 hook 并重启会话。

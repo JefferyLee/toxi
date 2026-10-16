@@ -41,6 +41,7 @@ Anything that is not a JSON object with a `type` (e.g. a plain message from anot
 | `tags` | ≤8 strings ≤24 | free-form labels (`WARN`, `OUTAGE`) |
 | `room` | ≤64 | id of the room this message belongs to (§3.6) |
 | `room_msg` | ≤64 | id shared by all fan-out copies of one room message |
+| `relayed` | `{name ≤64, ts}` | room history relayed by the room's creator: who originally wrote it and when (§3.6); store as read, do not notify |
 
 Receiver duties: store once per `uuid`; **answer every received text (including duplicates) with an `ack`** so the sender stops retrying; enforce the rate limit (§6); show `from_session`, thread/kind tags; treat `needs_human`/`relay` as described.
 
@@ -94,7 +95,8 @@ A **room card**: the full member list of an app-layer room. `id`, `name` ≤64; 
 - If my own key is not in `members`, delete the room locally (I was removed); history stays.
 - Otherwise upsert the room (`created_by` = sender's key) and **replace** the member list.
 - The creator re-sends the card to a member whenever that member connects, and to everyone after `add`/`remove`.
-- Room messages are ordinary `text` with `room` = room id and `room_msg` = one fresh id per logical message; the sender fans the same body out to every member it has as a contact. There is no history sync and no transport group; members who are not each other's contacts never see each other's messages (clients should show that).
+- Room messages are ordinary `text` with `room` = room id and `room_msg` = one fresh id per logical message; the sender fans the same body out to every member it has as a contact. There is no transport group; members who are not each other's contacts never see each other's messages (clients should show that).
+- **History for newcomers**: after the creator's card reaches a member for the first time, the creator relays the room's last 20 texts to that member as ordinary `text` envelopes carrying `relayed: {"name": <original writer>, "ts": <original time>}`, `room`, `room_msg` (= the original message id, also used as the envelope `uuid`, so repeats dedupe) and the original thread/kind/tags. A receiver stores a relayed text as **already read** and never notifies for it; a receiver that does not know `relayed` just sees an ordinary message from the creator.
 - Display: collapse one's own fan-out copies (same `room_msg`) into one entry with per-recipient status.
 
 ### 3.7 `file`

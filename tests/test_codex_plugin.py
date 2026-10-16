@@ -76,11 +76,14 @@ def test_codex_marketplace_exposes_toxi_plugin():
     assert entry["policy"]["installation"] == "AVAILABLE"
 
 
-def test_codex_hooks_use_stop_not_session_start():
+def test_codex_hooks_cover_start_tool_and_stop():
     hooks = _load(PLUGIN / "hooks" / "hooks.json")["hooks"]
 
-    assert "Stop" in hooks
-    assert "SessionStart" not in hooks
+    assert set(hooks) == {"SessionStart", "PostToolUse", "Stop"}
+    assert "session_start_hook.py" in hooks["SessionStart"][0]["hooks"][0]["command"]
+    assert "peer_check.sh" in hooks["PostToolUse"][0]["hooks"][0]["command"]
+    for name in ("session_start_hook.py", "peer_check.sh", "post_tool_hook.py", "stop_hook.py"):
+        assert (PLUGIN / "hooks" / name).exists()
 
 
 def test_codex_stop_hook_emits_statusline_context(tmp_path):

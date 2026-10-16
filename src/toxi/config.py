@@ -58,6 +58,15 @@ def peer_config() -> dict[str, dict]:
     return out
 
 
+def archive_after_days() -> int:
+    """`[archive] after_days = N`: the daemon moves messages older than N days to
+    archive.db once a day (0 / absent = never)."""
+    try:
+        return max(0, int(_load().get("archive", {}).get("after_days", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def tox_config() -> dict:
     """`[tox]`: extra DHT bootstrap nodes and whether to use the public ones.
 
