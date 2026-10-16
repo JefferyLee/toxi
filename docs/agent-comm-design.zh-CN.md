@@ -312,7 +312,7 @@ MCP 工具：`send_message(alias, body, thread?, reply_to?, kind?)`、`send_file
 |---|---|---|
 | **P0 定稿**（已完成 2026-10-16） | 本提案定稿并译成英文。§8 的文档树**随功能落地同步建立**（避免文档先于代码而漂移），README 在 P4 改为 agent 优先 | 英文版与中文版一致 |
 | **P1 安全与身份**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | 0600 自检；限流；peer 分级 + 统一措辞；`profile` 类型与 `toxi peers`；`from_session`；`pair/join`；MCP annotations + 权限示例 | observer peer 的消息注入带正确措辞；`pair/join` 30 秒内双向好友；私钥文件 0600 |
-| **P2 及时性** | `subscribe` IPC + `inbox.flag`；PostToolUse 注入；`wait_for_message` 订阅化 + SessionStart 自恢复；分片重组 + 摘要注入；`receipt` + `--wait-read`；`service install`；Channels 作为可选开启 | 进行中会话：发→注入 ≤2s；空闲会话 ≤1 回合；1.7MB 文本只产生 1 条消息；重启 Mac 后 daemon 自动在线 |
+| **P2 及时性**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | `subscribe` IPC + `inbox.flag`；PostToolUse 注入；`wait_for_message` 订阅化 + SessionStart 自恢复；分片重组 + 摘要注入；`receipt` + `--wait-read`；`service install`；Channels 作为可选开启 | 进行中会话：发→注入 ≤2s；空闲会话 ≤1 回合；1.7MB 文本只产生 1 条消息；重启 Mac 后 daemon 自动在线 |
 | **P3 结构化与多方** | `thread / reply_to / kind`；`room` 扇出；附件发送 + 大正文自动转附件 | 三方 room 一条消息三端都收到并归到同一线程；附件 sha256 两端一致 |
 | **P4 发行与接入** | PyPI 发布；`install.sh --for`；Linux 实测；headless 适配器 + Grok 接入文档（在 vibe-op/castle-op 的 VM 上实际替换掉它们的轮询）；`toxi doctor` | 三类 agent 各一台干净机器，从零到互发消息 ≤5 分钟 |
 
@@ -375,3 +375,19 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 - 同一台机器上两个全新身份 8 分钟内没能互连（LAN 发现只发往 33445 端口，而该端口被常驻 daemon 占用；跨 NAT 回环失败），但好友请求本身经公网 DHT 送达并被自动接受。结论：同机双节点不适合做连通性验收，改用 Belinda。
 
 现网：Ada 的两个身份（`ada`、`codex@Ada`）和 Belinda 的两个身份（`belinda`、`belinda-bot`）已运行新代码并设好卡片；Ada 的 config 迁到 `[peers]`（codex = collaborator，castle-op / vibe-op / grok = observer，各自绑定项目目录；备份 `config.toml.pre-peers-v2`）。Grok VM 上的三个身份待按部署脚本升级。
+
+### P2 及时性（2026-10-16，分支 `v2-p1`）
+
+代码：daemon 事件循环改为 `select`，新增 `subscribe` 长连接（事件 message.new / contact.online|offline / delivery / receipt / send.failed，可按别名过滤、可附最近 N 条上下文）和 `inbox.flag`；v2 分片 `part{id,i,n}` 由接收 daemon 重组成一条（上限 64 KB，超时 60 秒按残缺入库，对无 `part` 能力的对端退回 `[i/n]` 前缀）；已读回执 `receipt`（消息被人看到或送进 agent 上下文时发出，发送方状态 `read`；只发给声明了 `receipt` 能力的对端）；发送前以 toxcore 实时连接状态为准，重试扫描也会补发在线好友的 `queued` 行；`[hooks] on_message` 只在分片齐全后触发。CLI：`toxi watch`、`toxi show`、`toxi send --wait-read`、`toxi read --oldest-first`、`toxi service install|status|restart|uninstall`（launchd / systemd --user，每个身份一个服务，用 `toxi-daemon` 脚本名）。MCP：`wait_for_message` 改为阻塞在事件流上（旧 daemon 自动退回轮询），`send_message(wait_read=)`，`TOXI_CHANNEL=1` 的 channel 模式只推唤醒提示、不推正文。Claude Code 插件：新增 PostToolUse hook（sh 先 stat `inbox.flag`，变了才起 python 调 `toxi peer-inbox`），SessionStart hook 先投递路由到本项目的 peer 消息。长消息注入只给前 600 字 + `toxi show <id>`。升级后 daemon 启动时以当前构建刷新卡片里的 proto/caps（否则对端学不到新能力——第一轮验收就栽在这里）。单测 137 个通过。
+
+验收（Ada ↔ Belinda，四个 daemon 全部由 launchd 托管）：
+
+- 事件流延迟：Belinda 的 bot 把本机时钟写进正文，Ada 的 `toxi watch` 收到事件时比对，**0.61 秒**（含 0.1 秒的轮询粒度）。
+- 59.5 KB 消息：Ada 发出 52 个分片，Belinda 的 bot 库里只有 **1 行**（31,500 字 = 59,500 字节），msg_uuid 等于 Ada 侧的 part id；Ada 的 `toxi show` 合并显示为一条；bot 的 `peer-inbox` 注入只有 1,728 字符的摘要；bot 消费后 Ada 侧状态变为 `read`。
+- 已读回执：`toxi send belinda-bot ... --wait-read 20` 在 **3.2 秒**内返回 `✓ read by belinda-bot`（echo bot 用 `peer-inbox` 读到即发回执）。
+- 能力协商：四个节点互相看到 `caps = profile, session, receipt, part`；codex 身份看 ada 亦然。
+- 服务：Ada（`ada`、`codex@Ada`）和 Belinda（`belinda`、`belinda-bot`）四个 daemon 由 `toxi service install` 接管，`launchctl print` 为 running；登录项里显示为 toxi-daemon。
+- 发现并修复的两个问题：`toxi service install` 停旧 daemon 后探测时连接半关导致 `daemon_running()` 抛错（已接住）；升级后卡片 caps 不刷新（已改为启动时刷新）。
+- 同机第一轮里 Ada 日志出现"rate limit: dropped a text"是 P1 突发测试的 11 条消息 5 分钟后重试、echo bot 一次回了 60 多条触发的，属预期。
+
+未做（留给 P3/P4）：PostToolUse 在真实 Claude Code 会话中的端到端观察需要 Jeff 在各会话 `/reload-plugins` 后看效果；Codex 侧仍是 Stop hook + `wait_for_message`；headless 适配器 `toxi agent run` 和 Grok VM 的服务化在 P4。

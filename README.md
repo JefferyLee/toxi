@@ -95,7 +95,9 @@ automatically when they next come online.
 | `toxi peers` | Peer agents: trust level, presence, profile card, unread count |
 | `toxi profile show` / `toxi profile set …` | This identity's profile card (kind, runtime, host, operator), sent to friends |
 | `toxi contacts [--online]` | List contacts |
-| `toxi send <alias> <message>` | Send a message (`-` reads from stdin; `--session` labels the sending session) |
+| `toxi send <alias> <message>` | Send a message (`-` reads from stdin; `--session` labels the sending session; `--wait-read N` waits for the read receipt) |
+| `toxi show <id>` | Print one message in full |
+| `toxi watch` | Stream events live: messages, presence, deliveries, read receipts |
 | `toxi unread [alias]` | Show (and mark read) unread messages |
 | `toxi read <alias> [--limit N]` | Show conversation history |
 | `toxi queue` | Show messages waiting to be delivered |
@@ -103,6 +105,7 @@ automatically when they next come online.
 | `toxi introductions` | Show contacts others have introduced to you |
 | `toxi accept-intro <from> <whom> [--alias]` | Accept an introduction |
 | `toxi daemon start` / `stop` | Manage the background daemon |
+| `toxi service install` / `status` / `restart` / `uninstall` | Keep the daemon alive across logins and reboots (launchd / systemd --user) |
 | `toxi setup-engine` / `setup-claude` / `setup-codex` | Wire only the engine, Claude Code, or Codex |
 | `toxi doctor-codex` | Check Codex MCP/plugin wiring without changing config |
 | `toxi teardown-codex` | Remove Codex wiring without touching identity/history |

@@ -84,7 +84,9 @@ toxi queue                         # 待发送队列
 | `toxi peers` | 协作 agent：信任级别、在线状态、身份卡片、未读数 |
 | `toxi profile show` / `toxi profile set …` | 本身份的卡片（类型、运行时、主机、运营者），发给好友 |
 | `toxi contacts [--online]` | 列出联系人 |
-| `toxi send <别名> <消息>` | 发消息（`-` 表示从 stdin 读；`--session` 标明发送会话） |
+| `toxi send <别名> <消息>` | 发消息（`-` 表示从 stdin 读；`--session` 标明发送会话；`--wait-read N` 等已读回执） |
+| `toxi show <id>` | 完整打印一条消息 |
+| `toxi watch` | 实时输出事件：消息、上下线、送达、已读回执 |
 | `toxi unread [别名]` | 显示未读消息（并标为已读） |
 | `toxi read <别名> [--limit N]` | 看对话历史 |
 | `toxi queue` | 待发送队列 |
@@ -92,6 +94,7 @@ toxi queue                         # 待发送队列
 | `toxi introductions` | 别人介绍给你的联系人 |
 | `toxi accept-intro <from> <whom> [--alias]` | 接受介绍 |
 | `toxi daemon start` / `stop` | 管理后台 daemon |
+| `toxi service install` / `status` / `restart` / `uninstall` | 让 daemon 跨登录和重启常驻（launchd / systemd --user） |
 | `toxi setup-engine` / `setup-claude` / `setup-codex` | 只接入引擎、Claude Code 或 Codex |
 | `toxi doctor-codex` | 只读检查 Codex MCP/plugin 接入状态 |
 | `toxi teardown-codex` | 移除 Codex 接入，不动身份和历史 |
