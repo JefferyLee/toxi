@@ -424,3 +424,32 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 代码：发出的消息本地记录发送会话的项目目录（`from_dir`，不进协议）；收到的消息若 `reply_to` 指向某会话发出的消息（含多段的分片 id），或延续该会话最近与该联系人对话的线程，`get_messages` 算出 `route_dir`，`peers.take()` 30 分钟内只投递给那个目录的会话，之后退回 `dirs` 规则；MCP 的 `wait_for_message` 与 channel 唤醒改为监听所有 peer、按消息判定路由。`receipt kind=done`：带 `reply_to` 的回复自动发出，`toxi done <id>` / MCP `mark_handled` 显式发出；发送方状态新增 `handled`（`done` 蕴含 `read`，`read` 不降级）；`--wait-handled` / `wait_handled=`；`toxi threads` 新增"等待回答的请求数"；`toxi agent run` 的命令成功返回即标处理完。`[tox] bootstrap` / `public_dht` 配置与 `toxi me` 的 DHT 节点信息，让两个 daemon 直接互相 bootstrap。测试：`tests/test_e2e_local.py` 起两个真实 daemon（互相 bootstrap + 公网 DHT 做 onion），覆盖配对、卡片、分段、read/done 回执、回复路由、room、文件，**18 秒互连、21 秒跑完**；单测 172 个。协议文档补 `done` 与 `handled`。版本 0.5.0。
 
 验收：e2e 测试在 Ada 上通过（之前同机两个新节点 8 分钟都连不上，原因是 LAN 发现只打 33445 且 NAT 回环失败；直接 bootstrap 解决）。现网 Ada、Belinda 节点部署 0.5.0 后由 `toxi doctor` 与 `toxi peers` 确认。
+
+---
+
+## 12. 待办清单（2026-10-16 记录，按优先级）
+
+**马上要收的尾**
+
+1. grok、vibe-op 升级到 0.5.1 并重启各自 daemon（等 Jeff 在聊天里直接批准；castle-op 已完成）。
+2. 各 Claude Code 会话 `/reload-plugins`（已通知；toxi 仓库这个会话也要），Codex 会话重启一次以刷新 MCP 工具列表。
+3. ToxiOS：手机端真机回归（v0.0.15）、延后的 S7、Me 页把卡片名改成 "Jeff"；Ada 侧按需配合发消息/文件/room。
+4. Grok VM 的 webhook：在 webhook 接收侧校验 `X-Toxi-Signature`（castle-op 说它那边暂无法验证）。
+
+**中期（每项一周内）**
+
+5. Codex 空闲唤醒：Codex 没有 PostToolUse 类 hook，空闲收不到消息；看 Codex 侧有无新 hook/通知机制，没有则在 skill 里固化 `wait_for_message` 循环。
+6. Claude Code Channels 转正：申请进 channel 白名单，去掉 `--dangerously-load-development-channels`。
+7. room 补历史：新成员进 room 看不到之前的消息；创建者发卡片时附最近 N 条。
+8. 无 systemd 机器（Grok VM）的 daemon 自监督：`toxi daemon start --supervise` 或由 `toxi agent run` 拉起 daemon，替代 cron。
+9. 归档与检索：`toxi archive` / 保留策略、`toxi search`（Ada 一天 1500 条，`chat.db` 会一直长）。
+10. `toxi doctor` 比对 daemon 进程版本与 CLI 版本（编辑式安装忘重启是本次踩过两次的坑）。
+11. `toxi read --limit N` 在分片合并之前截断，长消息的分片会吃掉窗口（S3 测试时发现）；应在 SQL 层合并或按逻辑消息分页。
+12. `toxi agent run` 在 daemon 刚重启后的首条未投递疑似竞态，留观并补复现用例。
+13. 旧版本已记"已发"的回执不会补发（ToxiOS 迁移前的三条）；是否做一次性补发由 ToxiOS 决定。
+
+**远期**
+
+14. 私钥与数据库静态加密、可选 Tor。
+15. 真正的 Tox 群组（NGC）替代应用层 room（成员多时）。
+16. PRD 与 v2 对齐、Homebrew tap 跟进 0.5.x、Linux 发行版（Debian）实测、Windows 不在计划内。

@@ -425,3 +425,32 @@ Release: `v2-p1` merged into `master`, tag `v0.4.0` triggers the GitHub Actions 
 Code: outgoing messages record the sending session's project dir locally (`from_dir`, never on the wire); for an incoming message whose `reply_to` points at something a session sent (including a multi-part id), or which continues the thread that session last wrote in with that contact, `get_messages` computes `route_dir` and `peers.take()` delivers it only to that session for 30 minutes, then falls back to the `dirs` rule; MCP `wait_for_message` and channel wake-ups listen to all peers and decide per message. `receipt kind=done`: sent automatically by a reply carrying `reply_to`, or explicitly with `toxi done <id>` / MCP `mark_handled`; the sender gets a new `handled` status (`done` implies `read`, `read` never downgrades it); `--wait-handled` / `wait_handled=`; `toxi threads` counts requests awaiting an answer; `toxi agent run` marks a message handled when its command succeeds. `[tox] bootstrap` / `public_dht` config plus DHT node info in `toxi me` let two daemons bootstrap to each other directly. Tests: `tests/test_e2e_local.py` starts two real daemons (mutual bootstrap, public DHT for the onion) and covers pairing, cards, parts, read/done receipts, reply routing, rooms and files — **connected in 18 s, whole flow in 21 s**; 172 unit tests. Protocol doc gained `done` and `handled`. Version 0.5.0.
 
 Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connected within 8 minutes before, because LAN discovery only targets 33445 and NAT hairpinning fails; direct bootstrap fixes it). Live Ada and Belinda nodes confirmed on 0.5.0 with `toxi doctor` and `toxi peers`.
+
+---
+
+## 12. Backlog (recorded 2026-10-16, by priority)
+
+**Loose ends**
+
+1. grok and vibe-op upgrade to 0.5.1 and restart their own daemons (awaiting Jeff's direct approval in their chats; castle-op is done).
+2. `/reload-plugins` in every Claude Code session (notified; the toxi repo session too); restart the Codex session once so its MCP tool list refreshes.
+3. ToxiOS: device regression on the phone (v0.0.15), the deferred S7, card name set to "Jeff" on the Me page; Ada assists with test messages/files/rooms on request.
+4. Grok VM webhook: verify `X-Toxi-Signature` on the receiving side (castle-op cannot verify it there yet).
+
+**Mid-term (a week each at most)**
+
+5. Codex idle wake-up: Codex has no PostToolUse-like hook, so an idle Codex hears nothing; look for new Codex hooks/notifications, otherwise bake the `wait_for_message` loop into the skill.
+6. Claude Code Channels: get onto the channel allowlist so `--dangerously-load-development-channels` goes away.
+7. Room history: a new member sees nothing from before; the creator attaches the last N messages with the card.
+8. Daemon self-supervision on hosts without systemd (the Grok VM): `toxi daemon start --supervise` or `toxi agent run` keeping the daemon up, instead of cron.
+9. Archive and search: `toxi archive` / retention, `toxi search` (Ada sees ~1,500 messages a day; `chat.db` only grows).
+10. `toxi doctor` should compare the running daemon's version with the CLI's (an editable install without a restart bit us twice today).
+11. `toxi read --limit N` truncates before parts are merged, so one long message eats the window (seen in the S3 test); merge in SQL or page by logical message.
+12. `toxi agent run` suspected start-up race right after a daemon restart: keep watching, add a repro case.
+13. Receipts recorded as sent by old builds are never backfilled (ToxiOS's three pre-migration rows); a one-off backfill is ToxiOS's call.
+
+**Long-term**
+
+14. At-rest encryption of keys and database; optional Tor.
+15. Real Tox groups (NGC) instead of app-layer rooms once rooms get large.
+16. Reconcile the PRD with v2; Homebrew tap for 0.5.x; a real Debian test; Windows is out of scope.
