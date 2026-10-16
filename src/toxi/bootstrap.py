@@ -8,7 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import client, paths
+from . import client, ipc, paths
 
 STATUSLINE_CMD = "toxi statusline"
 
@@ -163,3 +163,5 @@ def daemon_running() -> bool:
         return True
     except client.DaemonNotRunning:
         return False
+    except (client.DaemonError, ipc.IPCError, OSError):
+        return False  # answering but broken, or shutting down mid-handshake: not usable

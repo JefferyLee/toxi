@@ -11,22 +11,31 @@ import time
 import uuid as _uuid
 
 VERSION = 2
-# What this daemon implements; advertised in its profile so peers can feature-gate.
-CAPS = ["profile", "session"]
+# What this daemon implements; advertised in its profile so peers can feature-gate:
+# profile cards, from_session labels, read receipts, multi-part reassembly.
+CAPS = ["profile", "session", "receipt", "part"]
 
 PROFILE_KEYS = ("kind", "name", "runtime", "model", "host", "operator", "role", "proto", "caps")
 PROFILE_KINDS = ("agent", "human", "service")
 
 
-def text_envelope(uuid: str, ts: int, body: str, session: str | None = None) -> dict:
+def text_envelope(uuid: str, ts: int, body: str, session: str | None = None,
+                  part: dict | None = None) -> dict:
     data = {"body": body}
     if session:
         data["from_session"] = session
+    if part:
+        data["part"] = {"id": part["id"], "i": part["i"], "n": part["n"]}
     return {"v": VERSION, "uuid": uuid, "type": "text", "ts": ts, "data": data}
 
 
-def make_text(body: str, session: str | None = None) -> dict:
-    return text_envelope(str(_uuid.uuid4()), int(time.time()), body, session)
+def make_text(body: str, session: str | None = None, part: dict | None = None) -> dict:
+    return text_envelope(str(_uuid.uuid4()), int(time.time()), body, session, part)
+
+
+def make_receipt(ref_uuid: str, kind: str = "read") -> dict:
+    return {"v": VERSION, "uuid": str(_uuid.uuid4()), "type": "receipt", "ts": int(time.time()),
+            "data": {"ref_uuid": ref_uuid, "kind": kind}}
 
 
 def make_profile(profile: dict) -> dict:
@@ -85,25 +94,35 @@ def encode(envelope: dict) -> bytes:
     return json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
 
-def split_text(body: str, limit: int, session: str | None = None) -> list[str]:
-    """Split `body` into parts whose text envelopes each encode to <= `limit` bytes.
+_PART_STUB = {"id": "x" * 36, "i": 99999, "n": 99999}  # worst-case size of a `part` field
 
-    A body that fits is returned as is. Otherwise each part gets an "[i/n] "
-    prefix; splits fall on character boundaries.
+
+def split_text(body: str, limit: int, session: str | None = None, parts: bool = False) -> list[str]:
+    """Split `body` into chunks whose text envelopes each encode to <= `limit` bytes.
+
+    A body that fits is returned as is. Otherwise, with `parts=False` (v1 peers)
+    each chunk gets an "[i/n] " prefix; with `parts=True` chunks are returned
+    bare and the caller sends them with a `part` field for reassembly. Splits
+    fall on character boundaries.
     """
     if len(encode(make_text(body, session))) <= limit:
         return [body]
-    budget = limit - len(encode(make_text("", session))) - len("[999/999] ")
-    parts, cur, size = [], "", 0
+    if parts:
+        budget = limit - len(encode(make_text("", session, _PART_STUB)))
+    else:
+        budget = limit - len(encode(make_text("", session))) - len("[999/999] ")
+    chunks, cur, size = [], "", 0
     for ch in body:
         cost = len(json.dumps(ch, ensure_ascii=False).encode("utf-8")) - 2
         if cur and size + cost > budget:
-            parts.append(cur)
+            chunks.append(cur)
             cur, size = "", 0
         cur += ch
         size += cost
-    parts.append(cur)
-    return [f"[{i}/{len(parts)}] {p}" for i, p in enumerate(parts, 1)]
+    chunks.append(cur)
+    if parts:
+        return chunks
+    return [f"[{i}/{len(chunks)}] {p}" for i, p in enumerate(chunks, 1)]
 
 
 def parse(raw: bytes) -> dict:

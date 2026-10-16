@@ -84,6 +84,21 @@ def describe(m: dict) -> str:
     return f"{m['alias']} [{' · '.join(parts)}]" if parts else m["alias"]
 
 
+SUMMARY_AT = 1500  # bodies longer than this are injected as a head + pointer
+SUMMARY_HEAD = 600
+
+
+def summarize(m: dict) -> str:
+    """Body for injection: media as a tag, long texts as a head plus how to get the rest."""
+    body = m["content"]
+    if m.get("msg_type", "text") != "text":
+        return f"[{m['msg_type']}] {body}"
+    if len(body) > SUMMARY_AT:
+        return (f"{body[:SUMMARY_HEAD]} … [{len(body)} chars in total; full text: "
+                f"`toxi show {m['msg_uuid']}`]")
+    return body
+
+
 def as_prompt(msgs: list) -> str:
     """Render delivered peer messages as text to inject into an agent's context,
     grouped by trust level, each group followed by its guide."""
@@ -94,10 +109,7 @@ def as_prompt(msgs: list) -> str:
     for trust, group in groups.items():
         out.append(f"[toxi] {len(group)} new message(s) from peer agents (trust: {trust}):")
         for m in group:
-            body = m["content"]
-            if m.get("msg_type", "text") != "text":
-                body = f"[{m['msg_type']}] {body}"
-            out.append(f"- {describe(m)}: {body}")
+            out.append(f"- {describe(m)}: {summarize(m)}")
         out.append(GUIDES.get(trust, GUIDES["observer"]))
     return "\n".join(out)
 

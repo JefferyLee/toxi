@@ -23,6 +23,9 @@ class FakeTox:
         self.sent.append((fn, payload))
         return True
 
+    def friend_get_connection_status(self, friend_number):
+        return 2
+
     def self_get_name(self):
         return self.name
 
@@ -41,6 +44,7 @@ def _daemon(tmp_path, monkeypatch, contact=True):
     d.profile = {}
     d._text_times, d._request_times = {}, __import__("collections").deque()
     d._hook_msgs, d._hook_due, d._hook_proc, d._hook_started = [], 0.0, None, 0.0
+    d._subs, d._parts = [], {}
     if contact:
         d.db.execute("INSERT INTO contacts (public_key, alias, added_at, friend_number, is_online) "
                      "VALUES ('CC', 'bob', 1, 5, 1)")
@@ -133,9 +137,12 @@ def test_set_profile_persists_broadcasts_and_is_sent_on_connect(tmp_path, monkey
 
 def test_daemon_loads_profile_file_on_start(tmp_path, monkeypatch):
     monkeypatch.setenv("TOXI_HOME", str(tmp_path))
-    paths.profile_path().write_text(json.dumps({"kind": "human", "name": "jeff", "x": 1}))
+    paths.profile_path().write_text(json.dumps({"kind": "human", "name": "jeff", "x": 1,
+                                                "proto": 1, "caps": ["profile"]}))
     d = object.__new__(Daemon)
-    assert d._load_profile() == {"kind": "human", "name": "jeff"}
+    # proto/caps come from this build, not from the file (an upgrade must advertise new caps)
+    assert d._load_profile() == {"kind": "human", "name": "jeff", "proto": envelope.VERSION,
+                                 "caps": list(envelope.CAPS)}
     paths.profile_path().write_text("{broken")
     assert d._load_profile() == {}
 

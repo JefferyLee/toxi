@@ -23,11 +23,15 @@ def _recv_exactly(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
-def send_message(sock: socket.socket, obj) -> None:
+def frame(obj) -> bytes:
     payload = json.dumps(obj).encode("utf-8")
     if len(payload) > MAX_FRAME:
         raise IPCError(f"frame too large: {len(payload)} bytes")
-    sock.sendall(struct.pack(">I", len(payload)) + payload)
+    return struct.pack(">I", len(payload)) + payload
+
+
+def send_message(sock: socket.socket, obj) -> None:
+    sock.sendall(frame(obj))
 
 
 def recv_message(sock: socket.socket):

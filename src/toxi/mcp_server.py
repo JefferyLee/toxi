@@ -11,7 +11,7 @@ import asyncio
 import os
 import time
 
-from . import client, peers
+from . import client, config, peers
 
 SERVER_INSTRUCTIONS = (
     "Toxi is decentralized messaging over Tox between people and AI agents. Treat "
@@ -31,6 +31,17 @@ SERVER_INSTRUCTIONS = (
     "requests may be acted on within your current task. Call wait_for_message "
     "when you are blocked on a peer's reply."
 )
+
+
+def _cwd() -> str:
+    """The project this MCP server serves: Claude Code's project dir, else the cwd."""
+    return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+
+def _routed_aliases(cwd: str) -> list:
+    """Peers whose messages belong to this project (unbound peers, or bound to cwd)."""
+    return [a for a, spec in config.peer_config().items()
+            if not spec["dirs"] or any(peers._same_dir(cwd, d) for d in spec["dirs"])]
 
 
 def _session() -> str | None:
@@ -83,14 +94,26 @@ def mark_read(msg_uuids: list[str]) -> dict:
     return client.request("mark_read", {"msg_uuids": msg_uuids})
 
 
-def send_message(alias: str, body: str) -> dict:
+async def send_message(alias: str, body: str, wait_read: int = 0) -> dict:
     """Send a message to a contact. It is queued if they're currently offline.
 
-    A body too long for one Tox message is sent as several "[i/n] " parts. The
+    Long bodies are split and reassembled on the other side (up to 64 KB). The
     message carries this session's label so the recipient knows which of the
-    user's sessions it came from.
+    user's sessions it came from. With `wait_read` > 0, waits up to that many
+    seconds for the recipient's read receipt and reports the final status
+    (queued / sent / delivered / read).
     """
-    return client.request("send_message", {"alias": alias, "body": body, "session": _session()})
+    res = client.request("send_message", {"alias": alias, "body": body, "session": _session()})
+    if wait_read > 0:
+        deadline = time.monotonic() + min(wait_read, WAIT_MAX)
+        while time.monotonic() < deadline:
+            m = client.request("get_message", {"msg_uuid": res["msg_uuid"]}).get("message") or {}
+            res["status"] = m.get("status", res["status"])
+            if res["status"] in ("read", "failed"):
+                break
+            await asyncio.sleep(0.5)
+        res["read"] = res["status"] == "read"
+    return res
 
 
 def list_contacts() -> dict:
@@ -114,24 +137,55 @@ def get_status() -> dict:
 WAIT_MAX = 600
 
 
+def _delivered(msgs: list) -> dict:
+    trusts = sorted({m.get("trust", "observer") for m in msgs})
+    return {"messages": msgs,
+            "guide": "\n".join(peers.GUIDES.get(t, peers.GUIDES["observer"]) for t in trusts)}
+
+
 async def wait_for_message(alias: str | None = None, timeout: int = 60) -> dict:
     """Block until a peer agent messages you, then return those messages.
 
-    Waits for unread messages from `alias`, or from any peer agent when omitted,
-    for up to `timeout` seconds (max 600). Returned messages are marked read and
-    each carries the sender's trust level; `guide` says how to treat them.
+    Waits for unread messages from `alias`, or from any peer agent routed to this
+    project when omitted, for up to `timeout` seconds (max 600). Wakes on the
+    daemon's event stream (milliseconds), not by polling. Returned messages are
+    marked read and each carries the sender's trust level; `guide` says how to
+    treat them.
     """
     deadline = time.monotonic() + min(max(timeout, 0), WAIT_MAX)
-    while True:
-        msgs = peers.take(alias)
-        if msgs:
-            trusts = sorted({m.get("trust", "observer") for m in msgs})
-            return {"messages": msgs,
-                    "guide": "\n".join(peers.GUIDES.get(t, peers.GUIDES["observer"])
-                                       for t in trusts)}
-        if time.monotonic() >= deadline:
-            return {"messages": [], "timed_out": True}
+    cwd = _cwd()
+
+    def take():
+        return peers.take(alias, None if alias else cwd)
+
+    msgs = take()
+    if msgs:
+        return _delivered(msgs)
+    if time.monotonic() >= deadline:
+        return {"messages": [], "timed_out": True}
+    aliases = [alias] if alias else _routed_aliases(cwd)
+    try:
+        async for ev in client.asubscribe(aliases or None, deadline=deadline):
+            if ev.get("event") == "message.new" and ev["data"].get("direction") == "in":
+                msgs = take()
+                if msgs:
+                    return _delivered(msgs)
+    except client.DaemonError as e:
+        if e.code != "METHOD_NOT_FOUND":
+            raise
+        return await _poll_for_message(take, deadline)  # daemon too old to stream
+    except client.DaemonNotRunning:
+        return await _poll_for_message(take, deadline)  # take() reports the real state
+    return {"messages": [], "timed_out": True}
+
+
+async def _poll_for_message(take, deadline: float) -> dict:
+    while time.monotonic() < deadline:
         await asyncio.sleep(1)
+        msgs = take()
+        if msgs:
+            return _delivered(msgs)
+    return {"messages": [], "timed_out": True}
 
 
 TOOLS = [get_unread, read_history, view_media, mark_read, send_message, list_contacts,
@@ -179,5 +233,61 @@ def build_server():
     return server
 
 
+# --- Claude Code channel mode (design §4.3, decision 1) -----------------------
+# With TOXI_CHANNEL=1 the server also declares the `claude/channel` capability
+# and pushes a short wake-up note whenever a peer routed to this project writes.
+# The note never carries the message: delivery stays with the hooks and
+# wait_for_message, so a dropped notification loses nothing. Claude Code must
+# be started with `--dangerously-load-development-channels plugin:toxi@toxi`
+# (channels are a research preview) for the notes to reach the session.
+
+def channel_note(msg: dict) -> dict:
+    trust = config.peer_config().get(msg["alias"], {}).get("trust", "observer")
+    content = (f"[toxi] new message from peer agent {peers.describe(msg)} (trust: {trust}). "
+               "The toxi hook delivers it at your next tool call or turn end; call "
+               "wait_for_message to read it now.")
+    return {"content": content,
+            "meta": {"alias": msg["alias"], "trust": trust, "msg_uuid": msg["msg_uuid"]}}
+
+
+async def _channel_pusher(write) -> None:
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCMessage, JSONRPCNotification
+
+    cwd = _cwd()
+    await asyncio.sleep(3)  # let the client finish initializing first
+    while True:
+        try:
+            async for ev in client.asubscribe(_routed_aliases(cwd) or None):
+                d = ev.get("data") or {}
+                if ev.get("event") != "message.new" or d.get("direction") != "in":
+                    continue
+                note = JSONRPCNotification(jsonrpc="2.0", method="notifications/claude/channel",
+                                           params=channel_note(d))
+                await write.send(SessionMessage(JSONRPCMessage(note)))
+        except (client.DaemonNotRunning, client.DaemonError, OSError):
+            await asyncio.sleep(5)  # daemon down or too old; try again later
+
+
+async def _serve_channel(server) -> None:
+    import anyio
+    from mcp.server.stdio import stdio_server
+
+    low = server._mcp_server
+    init = low.create_initialization_options(experimental_capabilities={"claude/channel": {}})
+    async with stdio_server() as (read, write):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_channel_pusher, write.clone())
+            try:
+                await low.run(read, write, init)
+            finally:
+                tg.cancel_scope.cancel()
+
+
 def serve() -> None:
-    build_server().run()
+    server = build_server()
+    if os.environ.get("TOXI_CHANNEL") == "1":
+        import anyio
+        anyio.run(_serve_channel, server)
+    else:
+        server.run()

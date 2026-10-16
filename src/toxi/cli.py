@@ -12,7 +12,7 @@ import time
 
 import click
 
-from . import __version__, bootstrap, client, envelope, invite, paths, peers
+from . import __version__, bootstrap, client, envelope, invite, paths, peers, service
 from .tox import Tox
 
 _CONNECTION = {0: "offline", 1: "connected (TCP)", 2: "connected (UDP)"}
@@ -234,20 +234,40 @@ def _content(m: dict) -> str:
 @click.option("--session", default=None,
               help="Label of the session/project sending this (default: $TOXI_SESSION, "
                    "else the Claude Code project dir name).")
+@click.option("--wait-read", "wait_read", default=0, metavar="SECONDS",
+              help="Wait up to this long for the recipient's read receipt.")
 @click.pass_context
-def send(ctx, alias, message, session):
+def send(ctx, alias, message, session, wait_read):
     """Send a message: toxi send <alias> <message> (use - to read from stdin)."""
     if message == "-":
         message = sys.stdin.read().rstrip("\n")
     res = _call("send_message", {"alias": alias, "body": message,
                                  "session": session or _default_session()})
+    if wait_read > 0:
+        res["status"] = _wait_status(res["msg_uuid"], wait_read)
+        res["read"] = res["status"] == "read"
     if _emit(ctx, res):
         return
     parts = f" ({res['parts']} parts)" if res.get("parts") else ""
-    if res["status"] == "sent":
-        click.echo(f"✓ sent{parts}")
+    if res["status"] == "read":
+        click.echo(f"✓ read by {alias}{parts}")
+    elif res["status"] == "sent" or res["status"] == "delivered":
+        click.echo(f"✓ {res['status']}{parts}" + (
+            f" — not read within {wait_read}s" if wait_read > 0 else ""))
     else:
         click.echo(f"✓ {alias} is offline — queued{parts} (will send when they come online)")
+
+
+def _wait_status(msg_uuid: str, seconds: int) -> str:
+    """Poll a sent message until it is read (or failed) or `seconds` pass."""
+    deadline = time.monotonic() + seconds
+    status = "sent"
+    while True:
+        m = _call("get_message", {"msg_uuid": msg_uuid}).get("message") or {}
+        status = m.get("status", status)
+        if status in ("read", "failed") or time.monotonic() >= deadline:
+            return status
+        time.sleep(0.5)
 
 
 _RESET = "\033[0m"
@@ -345,12 +365,18 @@ def unread(ctx, alias):
 @cli.command()
 @click.argument("alias")
 @click.option("--limit", default=20, help="How many recent messages to show.")
+@click.option("--oldest-first", is_flag=True,
+              help="With --json, list oldest first (the terminal view always does).")
 @click.pass_context
-def read(ctx, alias, limit):
+def read(ctx, alias, limit, oldest_first):
     """Show conversation history with a contact."""
     msgs = _call("get_messages", {"alias": alias, "limit": limit})["messages"]
+    if oldest_first:
+        msgs = list(reversed(msgs))
     if _emit(ctx, msgs):  # programmatic peek: don't mark read
         return
+    if oldest_first:
+        msgs = list(reversed(msgs))  # the loop below reverses again
     if not msgs:
         click.echo("No messages yet.")
         return
@@ -481,6 +507,113 @@ def join(invite_text, alias):
 
 
 @cli.command()
+@click.argument("msg_uuid")
+@click.pass_context
+def show(ctx, msg_uuid):
+    """Print one message in full by its id (e.g. a long one injected as a summary)."""
+    m = _call("get_message", {"msg_uuid": msg_uuid}).get("message")
+    if m is None:
+        raise click.ClickException(f"no message with id {msg_uuid}")
+    if _emit(ctx, m):
+        return
+    who = "you" if m["direction"] == "out" else _sender(m)
+    click.echo(f"{who} · {_ago(m['created_at'])} · {m['status']} · {m['msg_uuid']}")
+    click.echo(_content(m))
+
+
+@cli.command()
+@click.option("--alias", "aliases", multiple=True, help="Only events about this contact (repeatable).")
+@click.option("--context", default=0, metavar="N",
+              help="Attach the last N messages with the sender to each new-message event.")
+@click.pass_context
+def watch(ctx, aliases, context):
+    """Stream daemon events as they happen (new messages, presence, delivery, receipts)."""
+    as_json = bool(ctx.obj and ctx.obj.get("json"))
+    try:
+        for ev in client.subscribe(aliases, context):
+            if as_json:
+                click.echo(json.dumps(ev, ensure_ascii=False))
+                continue
+            d, t = ev.get("data") or {}, time.strftime("%H:%M:%S", time.localtime(ev.get("ts", 0)))
+            if ev["event"] == "message.new":
+                click.echo(f"{t} message   {_sender(d)}: {_content(d)}")
+            elif ev["event"] in ("contact.online", "contact.offline"):
+                click.echo(f"{t} {ev['event'].split('.')[1]:9} {d.get('alias')}")
+            else:
+                click.echo(f"{t} {ev['event']:9} {d.get('alias')} {d.get('msg_uuid', '')} "
+                           f"{d.get('reason', '')}".rstrip())
+    except client.DaemonNotRunning as e:
+        raise click.ClickException(str(e))
+    except client.DaemonError as e:
+        raise click.ClickException(e.message)
+    except (KeyboardInterrupt, client.ipc.IPCError):
+        pass
+
+
+@cli.group(name="service")
+def service_cmd():
+    """Keep the daemon running across logins and reboots (launchd / systemd --user)."""
+
+
+@service_cmd.command("install")
+def service_install():
+    """Install and start the background service for this identity."""
+    if bootstrap.daemon_running():
+        _call("shutdown")  # the service manager starts its own instance
+        for _ in range(50):
+            if not bootstrap.daemon_running():
+                break
+            time.sleep(0.1)
+    try:
+        p = service.install()
+    except service.ServiceError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"✓ service installed: {p}")
+    for _ in range(50):
+        if bootstrap.daemon_running():
+            click.echo("✓ daemon is up under the service manager")
+            return
+        time.sleep(0.2)
+    click.echo("⚠ service installed but the daemon has not answered yet — check "
+               f"{paths.config_dir() / 'service.log'}")
+
+
+@service_cmd.command("uninstall")
+def service_uninstall():
+    """Stop and remove the background service (identity and history are kept)."""
+    if service.uninstall():
+        click.echo("✓ service removed (the daemon is stopped; `toxi daemon start` runs it by hand)")
+    else:
+        click.echo("no service installed for this identity")
+
+
+@service_cmd.command("restart")
+def service_restart():
+    """Restart the daemon under the service manager (e.g. after an upgrade)."""
+    if not service.installed():
+        raise click.ClickException("no service installed — use `toxi service install`")
+    try:
+        service.restart()
+    except service.ServiceError as e:
+        raise click.ClickException(str(e))
+    click.echo("✓ daemon restarted")
+
+
+@service_cmd.command("status")
+@click.pass_context
+def service_status(ctx):
+    """Is the service installed and running?"""
+    st = service.status()
+    if _emit(ctx, st):
+        return
+    if not st["installed"]:
+        click.echo("not installed (`toxi service install` keeps the daemon alive across reboots)")
+        return
+    state = f"running (pid {st['pid']})" if st["running"] else "installed but not running"
+    click.echo(f"{state} — {st['path']}")
+
+
+@cli.command()
 @click.pass_context
 def queue(ctx):
     """Show messages waiting to be delivered."""
@@ -569,6 +702,9 @@ def daemon_start():
 
 @daemon.command("stop")
 def daemon_stop():
+    if service.installed():
+        click.echo("⚠ a background service manages this daemon and will restart it; "
+                   "use `toxi service restart` or `toxi service uninstall`.")
     """Stop the background daemon."""
     try:
         client.request("shutdown")

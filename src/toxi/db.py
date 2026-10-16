@@ -77,7 +77,11 @@ _ADDED_COLUMNS = {
     "contacts": [("profile_json", "TEXT"),          # peer's self-described card (design §4.1)
                  ("profile_at", "INTEGER"),
                  ("proto", "INTEGER DEFAULT 1")],   # envelope version the peer speaks
-    "messages": [("from_session", "TEXT")],          # sender's session/project label
+    "messages": [("from_session", "TEXT"),           # sender's session/project label
+                 ("part_id", "TEXT"),                 # multi-part text: shared id (design §4.3)
+                 ("part_i", "INTEGER"),
+                 ("part_n", "INTEGER"),
+                 ("read_receipt_at", "INTEGER")],     # outgoing: when the peer reported it read
 }
 
 

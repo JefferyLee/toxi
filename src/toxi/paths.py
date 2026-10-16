@@ -66,6 +66,12 @@ def bootstrap_path() -> Path:
     return config_dir() / "bootstrap.json"
 
 
+def inbox_flag_path() -> Path:
+    # Touched by the daemon whenever an incoming message is stored: hooks stat it
+    # and only talk to the daemon when its mtime moved (design §4.3).
+    return config_dir() / "inbox.flag"
+
+
 def profile_path() -> Path:
     # This identity's self-described profile card (design §4.1), sent to friends.
     return config_dir() / "profile.json"

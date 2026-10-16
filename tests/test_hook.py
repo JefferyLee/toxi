@@ -14,7 +14,9 @@ HOOK = Path(__file__).resolve().parents[1] / "claude-code-plugin" / "hooks" / "u
 
 def _fake_toxi(tmp_path) -> str:
     p = tmp_path / "faketoxi"
-    p.write_text("#!/usr/bin/env python3\nimport os\nprint(os.environ.get('FAKE_OUT', ''))\n")
+    p.write_text("#!/usr/bin/env python3\nimport os, sys\n"
+                 "if sys.argv[1:2] == ['peer-inbox']: print(os.environ.get('FAKE_PEER', ''))\n"
+                 "else: print(os.environ.get('FAKE_OUT', ''))\n")
     p.chmod(0o755)
     return str(p)
 
@@ -64,3 +66,15 @@ def test_hook_silent_when_no_unread(tmp_path):
 def test_hook_silent_when_toxi_missing(tmp_path):
     r = _run({"TOXI_BIN": "/nonexistent/toxi-xyz"})
     assert r.returncode == 0 and r.stdout.strip() == ""
+
+
+def test_hook_delivers_routed_peer_messages_first(tmp_path):
+    peer = "[toxi] 1 new message(s) from peer agents (trust: observer):\n- codex: hi"
+    r = _run({"TOXI_BIN": _fake_toxi(tmp_path), "FAKE_OUT": "[]", "FAKE_PEER": peer,
+              "CLAUDE_PROJECT_DIR": "/w/p"})
+    assert json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] == peer
+
+    r = _run({"TOXI_BIN": _fake_toxi(tmp_path), "FAKE_PEER": peer,
+              "FAKE_OUT": json.dumps([{"alias": "bob", "content": "hello"}])})
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert ctx.index("[toxi] 1 new") < ctx.index("bob: hello")

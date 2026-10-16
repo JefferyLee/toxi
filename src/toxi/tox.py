@@ -99,6 +99,8 @@ def _setup_signatures(lib: _C.CDLL) -> None:
     lib.tox_friend_send_message.argtypes = [
         _C.c_void_p, _C.c_uint32, _C.c_int, _C.c_char_p, _C.c_size_t, _C.POINTER(_C.c_int)
     ]
+    lib.tox_friend_get_connection_status.restype = _C.c_int
+    lib.tox_friend_get_connection_status.argtypes = [_C.c_void_p, _C.c_uint32, _C.c_void_p]
 
     # file transfer (receive side only: accept/cancel incoming transfers)
     lib.tox_file_control.restype = _C.c_bool
@@ -227,6 +229,10 @@ class Tox:
             self._ptr, friend_number, msg_type, message, len(message), _C.byref(err)
         )
         return err.value == 0
+
+    def friend_get_connection_status(self, friend_number: int) -> int:
+        """TOX_CONNECTION_*: 0 = not connected, 1 = via TCP relay, 2 = direct UDP."""
+        return _lib.tox_friend_get_connection_status(self._ptr, friend_number, None)
 
     # --- file transfer (receive side) ---
     def file_control(self, friend_number: int, file_number: int, control: int) -> bool:

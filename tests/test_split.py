@@ -34,6 +34,9 @@ class FakeTox:
     def __init__(self, fail_from=None):
         self.sent, self.fail_from = [], fail_from
 
+    def friend_get_connection_status(self, friend_number):
+        return 2
+
     def friend_send_message(self, friend_number, payload):
         if self.fail_from is not None and len(self.sent) >= self.fail_from:
             return False
@@ -49,6 +52,7 @@ def _daemon(tmp_path, monkeypatch, tox):
     conn.commit()
     d = object.__new__(Daemon)
     d.db, d.tox = conn, tox
+    d._subs, d._parts = [], {}
     return d
 
 
