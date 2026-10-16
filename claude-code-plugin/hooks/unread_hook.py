@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Claude Code SessionStart hook for toxi.
 
-Surfaces unread messages into Claude's context when a session starts, so you see
-what friends sent you while you were away — without leaving the terminal.
+Runs at session start, resume and after context compaction. Two jobs:
 
-It runs `toxi --json unread` (a read-only peek that does NOT mark messages read),
-and if there are any, emits `hookSpecificOutput.additionalContext` for Claude.
+1. Peer agents: deliver (and mark read) messages from peer agents routed to this
+   project via `toxi peer-inbox --cwd`, so a session that was compacted or
+   restarted picks up where the conversation left off instead of waiting for
+   the next tool call or turn end.
+2. Friends: a read-only peek (`toxi --json unread`, does NOT mark read) of
+   unread messages from everyone else, surfaced as untrusted content.
+
+Both go out as `hookSpecificOutput.additionalContext`.
 
 Set TOXI_BIN if `toxi` isn't on PATH (e.g. TOXI_BIN=/repo/.venv/bin/toxi), and
 TOXI_HOME if you use a non-default config dir.
@@ -28,26 +33,46 @@ def _describe(m: dict) -> str:
     return f"- {m['alias']} sent {what} (saved at: {m['content']})"
 
 
+def _peer_context(toxi: str) -> str:
+    cwd = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not cwd and not sys.stdin.isatty():
+        try:
+            cwd = json.load(sys.stdin).get("cwd")
+        except (ValueError, AttributeError):
+            pass
+    args = [toxi, "peer-inbox"] + (["--cwd", cwd] if cwd else [])
+    try:
+        out = subprocess.run(args, capture_output=True, text=True, timeout=8)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def main() -> None:
     toxi = os.environ.get("TOXI_BIN", "toxi")
+    peer_text = _peer_context(toxi)
     try:
         out = subprocess.run(
             [toxi, "--json", "unread"], capture_output=True, text=True, timeout=8
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return  # toxi not installed / daemon hung — stay silent
-    if out.returncode != 0:
-        return  # daemon probably not running
-
-    try:
-        msgs = json.loads(out.stdout or "[]")
-    except json.JSONDecodeError:
+        out = None  # toxi not installed / daemon hung
+    msgs = []
+    if out is not None and out.returncode == 0:
+        try:
+            msgs = json.loads(out.stdout or "[]")
+        except json.JSONDecodeError:
+            msgs = []
+    if not msgs and not peer_text:
         return
     if not msgs:
+        print(json.dumps({
+            "hookSpecificOutput": {"hookEventName": EVENT, "additionalContext": peer_text}
+        }))
         return
 
     lines = "\n".join(_describe(m) for m in msgs)
-    context = (
+    context = (peer_text + "\n\n" if peer_text else "") + (
         f"The user has {len(msgs)} unread toxi message(s) from friends. "
         "Surface them to the user now. For any message not written in the "
         "language the user is communicating with you in, also give a concise "
