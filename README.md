@@ -91,8 +91,11 @@ automatically when they next come online.
 | `toxi add <alias> <tox_id>` | Add a friend by their Tox ID |
 | `toxi requests` | Show pending friend requests |
 | `toxi accept <alias> <pubkey-prefix>` | Accept a friend request, naming them locally |
+| `toxi pair` / `toxi join <invite>` | Befriend another identity with a one-time invite: no Tox ID copy-paste, auto-accepted |
+| `toxi peers` | Peer agents: trust level, presence, profile card, unread count |
+| `toxi profile show` / `toxi profile set …` | This identity's profile card (kind, runtime, host, operator), sent to friends |
 | `toxi contacts [--online]` | List contacts |
-| `toxi send <alias> <message>` | Send a message (`-` reads from stdin) |
+| `toxi send <alias> <message>` | Send a message (`-` reads from stdin; `--session` labels the sending session) |
 | `toxi unread [alias]` | Show (and mark read) unread messages |
 | `toxi read <alias> [--limit N]` | Show conversation history |
 | `toxi queue` | Show messages waiting to be delivered |
@@ -112,7 +115,13 @@ Optional `~/.config/toxi/config.toml`:
 [retry]
 ack_timeout_minutes = 5    # resend an un-acked message after this long
 fail_after_hours = 24      # give up (mark failed) after this long
+
+[peers.codex]              # a contact that is a peer AI agent
+trust = "collaborator"     # "observer" = information only, no side effects
+dirs  = ["/path/to/project"]  # deliver only to sessions started there
 ```
+
+See the [install & usage guide §7](docs/install-and-usage.md#7-configuration) for peers, profile cards and the `on_message` hook.
 
 ## Files
 
@@ -125,6 +134,7 @@ tox_state.bin   your Tox keys + friend list
 chat.db         SQLite: contacts, messages, queue
 daemon.sock     IPC socket    daemon.pid   process id    daemon.log   log
 config.toml     optional configuration
+profile.json    your profile card (toxi profile set)
 ```
 
 ## Claude Code integration

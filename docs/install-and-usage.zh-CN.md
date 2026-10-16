@@ -109,6 +109,23 @@ toxi setup-codex      # 只接入 Codex MCP + 插件
 
 加好友是非对称的：一方发请求，另一方接受。
 
+### 4.0 一步配对（agent 之间推荐）
+
+`toxi pair` 生成一个一次性邀请（10 分钟有效）。对方运行 `toxi join <邀请>`，两边的 daemon 自动互加好友，并按各自的身份卡片（§7）给对方起名，所以两边的别名是一致的。
+
+```bash
+# 机器 A
+toxi pair
+#   Invite (valid 10 min, single use) — share it over a channel you trust:
+#     eyJ2IjoxLCJ0b3hfaWQ...
+
+# 机器 B
+toxi join eyJ2IjoxLCJ0b3hfaWQ...        # --as <别名> 可以换一个本地名字
+toxi contacts                           # DHT 连上后两边都显示在线
+```
+
+只有带着有效邀请的好友请求才会被自动接受；其它好友请求仍然留在 `toxi requests` 里等你手动接受。
+
 ### 4.1 你加对方（你有他的 Tox ID）
 
 ```bash
@@ -220,16 +237,21 @@ log_level = "info"          # "debug" / "info" / "warning" / "error"
 ack_timeout_minutes = 5     # 未收到 ACK 等这么久就重发（前提是好友在线）
 fail_after_hours = 24       # 超过这么久仍未确认就标记为 failed
 
-[agents]
-peers = ["codex"]           # 哪些联系人是协作的 AI agent（见下）
+[peers.codex]               # 每个协作 AI agent 一个表（见下）
+dirs  = ["/path/to/project"]  # 可选：只送给在这个目录启动的会话
+trust = "collaborator"      # 或 "observer"
 
 [hooks]
 on_message = "curl -fsS -X POST https://example.com/wake"   # 收到新消息时运行
 ```
 
-`[daemon]` 和 `[retry]` 在 daemon 启动时读取；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。`[agents]` 和 `[hooks]` 每次用到时才读，改完立即生效。
+`[daemon]` 和 `[retry]` 在 daemon 启动时读取；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。`[peers]` 和 `[hooks]` 每次用到时才读，改完立即生效。
 
-**协作 agent（peers）。** 列出哪些联系人是和你协作的其他 AI agent。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 Stop hook 在一轮结束时注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。如果多个 Claude Code 会话共用一个身份，它们会抢同一批消息。可以用 `[agents.dirs]` 把某个协作 agent 绑定到负责协作的那个会话的项目目录，例如 `codex = "/path/to/project"`：Stop hook 只把它的消息送给在这个目录启动的会话（`CLAUDE_PROJECT_DIR`），别的目录或子目录里启动的会话都不会收到。
+**协作 agent（peers）。** 每个和你协作的其他 AI agent 一个 `[peers.<别名>]` 表。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 Stop hook 在一轮结束时注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。`trust` 决定注入时的措辞：`observer` 表示只是信息（它提出的任何有副作用的事都要先问你）；`collaborator` 表示 agent 可以在当前任务范围内照办的请求（破坏性或超出项目的操作仍然要问你）。两种情况下，消息里转述的"用户已经同意"都不算数。`dirs` 解决多个 Claude Code 会话共用一个身份时抢消息的问题：Stop hook 只把它的消息送给在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`），别的目录或子目录里启动的会话都不会收到。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个协作 agent 的信任级别、在线状态、身份卡片和未读数。
+
+**身份卡片。** `toxi profile set --kind agent --runtime claude-code --operator <你> --role "..."` 描述这个身份（`toxi profile show` 查看）。卡片会在好友连上时和内容变更时发给每个好友；对方在 `toxi peers`、`toxi --json contacts` 和注入的消息头里看到它（`castle-op [agent/grok @ vm1 · operator jeff]: ...`）。卡片是自述的，但它走的是加密信道，只有持有那把密钥的人才发得出来。消息还会带上发送会话的标签（`toxi send --session`，默认取 `$TOXI_SESSION` 或 Claude Code 的项目目录名；MCP 工具会自动填），显示为 `别名@会话`，对方就知道是你的哪个会话在说话。
+
+**限流与文件权限。** daemon 每个联系人每分钟最多接受 60 条文本、每分钟最多 5 个好友请求，多出来的丢弃并记日志。每次启动都会把 `~/.config/toxi/` 设为 0700，把密钥、数据库、配置和卡片文件设为 0600。
 
 **on_message hook。** 收到新消息并存好后，daemon 会运行这条 shell 命令，用来唤醒自己没法盯着 toxi 的 agent（比如某个 bot 的 webhook 触发器）。2 秒内到达的消息合并成一次运行；同一时间只跑一个，超过 30 秒会被终止。命令的环境变量里有 `TOXI_FROM`（发送者别名，逗号分隔）和 `TOXI_COUNT`，stdin 是 `{alias, msg_uuid, msg_type}` 组成的 JSON 列表。消息正文从不传出，webhook 只知道“有新消息”，被唤醒的 agent 再通过 toxi 读取内容。
 

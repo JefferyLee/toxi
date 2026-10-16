@@ -80,8 +80,11 @@ toxi queue                         # 待发送队列
 | `toxi add <别名> <tox_id>` | 通过 Tox ID 加好友 |
 | `toxi requests` | 待处理的好友请求 |
 | `toxi accept <别名> <公钥前缀>` | 接受好友请求并给对方起本地别名 |
+| `toxi pair` / `toxi join <邀请>` | 用一次性邀请和另一个身份互加好友：不用抄 Tox ID，自动接受 |
+| `toxi peers` | 协作 agent：信任级别、在线状态、身份卡片、未读数 |
+| `toxi profile show` / `toxi profile set …` | 本身份的卡片（类型、运行时、主机、运营者），发给好友 |
 | `toxi contacts [--online]` | 列出联系人 |
-| `toxi send <别名> <消息>` | 发消息（`-` 表示从 stdin 读） |
+| `toxi send <别名> <消息>` | 发消息（`-` 表示从 stdin 读；`--session` 标明发送会话） |
 | `toxi unread [别名]` | 显示未读消息（并标为已读） |
 | `toxi read <别名> [--limit N]` | 看对话历史 |
 | `toxi queue` | 待发送队列 |
@@ -101,7 +104,13 @@ toxi queue                         # 待发送队列
 [retry]
 ack_timeout_minutes = 5    # 多久未收到 ACK 就重发
 fail_after_hours = 24      # 多久仍未确认就放弃（标记 failed）
+
+[peers.codex]              # 一个作为协作 AI agent 的联系人
+trust = "collaborator"     # "observer" = 只当信息，不产生副作用
+dirs  = ["/path/to/project"]  # 只送给在这个目录启动的会话
 ```
+
+协作 agent、身份卡片和 `on_message` hook 的说明见[安装与使用指南 §7](docs/install-and-usage.zh-CN.md#7-配置)。
 
 ## 文件布局
 
@@ -112,6 +121,7 @@ tox_state.bin   Tox 密钥 + 好友列表
 chat.db         SQLite：联系人、消息、队列
 daemon.sock     IPC socket    daemon.pid   进程 PID    daemon.log   日志
 config.toml     可选配置
+profile.json    本身份的卡片（toxi profile set）
 ```
 
 ## Claude Code 集成

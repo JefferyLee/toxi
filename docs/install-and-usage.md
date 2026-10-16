@@ -112,6 +112,23 @@ toxi setup-codex      # Codex MCP + plugin only
 
 Adding a friend is asymmetric: one person sends a request; the other accepts.
 
+### 4.0 Pair in one step (recommended between agents)
+
+`toxi pair` mints a one-time invite (valid 10 minutes). The other side runs `toxi join <invite>`; the two daemons befriend each other automatically and name each other after their profile cards (§7), so both ends use the same alias.
+
+```bash
+# Machine A
+toxi pair
+#   Invite (valid 10 min, single use) — share it over a channel you trust:
+#     eyJ2IjoxLCJ0b3hfaWQ...
+
+# Machine B
+toxi join eyJ2IjoxLCJ0b3hfaWQ...        # --as <alias> to pick another local name
+toxi contacts                           # both sides show online once the DHT connects
+```
+
+Only a request that answers a live invite is accepted automatically; every other friend request still waits in `toxi requests` for you to accept by hand.
+
 ### 4.1 You add them (you have their Tox ID)
 
 ```bash
@@ -222,16 +239,21 @@ log_level = "info"          # "debug" / "info" / "warning" / "error"
 ack_timeout_minutes = 5     # resend an un-ACKed message after this long, while the friend is online
 fail_after_hours = 24       # mark as failed after this long without an ACK
 
-[agents]
-peers = ["codex"]           # contacts that are peer AI agents (see below)
+[peers.codex]               # one table per contact that is a peer AI agent (see below)
+dirs  = ["/path/to/project"]  # optional: deliver only to sessions started there
+trust = "collaborator"      # or "observer"
 
 [hooks]
 on_message = "curl -fsS -X POST https://example.com/wake"   # run when new messages arrive
 ```
 
-The daemon reads `[daemon]` and `[retry]` at start; restart it (`toxi daemon stop && toxi daemon start`) after editing those. `[agents]` and `[hooks]` are read each time they're used, so edits apply immediately.
+The daemon reads `[daemon]` and `[retry]` at start; restart it (`toxi daemon stop && toxi daemon start`) after editing those. `[peers]` and `[hooks]` are read each time they're used, so edits apply immediately.
 
-**Peer agents.** List the aliases of contacts that are other AI agents working with you. Their unread messages are delivered straight into the agent's context: the Claude Code and Codex Stop hooks inject them when a turn ends, and the MCP `wait_for_message` tool blocks until one arrives. Delivered messages are marked read, so each is delivered once. Several Claude Code sessions sharing one identity would race for the same messages. Bind the peer to the collaborating session's project with `[agents.dirs]`, e.g. `codex = "/path/to/project"`: the Stop hook then delivers that peer's messages only to sessions started in exactly that directory (`CLAUDE_PROJECT_DIR`), not to sessions started elsewhere or in its subdirectories.
+**Peer agents.** One `[peers.<alias>]` table per contact that is another AI agent working with you. Their unread messages are delivered straight into the agent's context: the Claude Code and Codex Stop hooks inject them when a turn ends, and the MCP `wait_for_message` tool blocks until one arrives. Delivered messages are marked read, so each is delivered once. `trust` picks the wording that frames them for the agent: `observer` means information only (any side effect they ask for needs your confirmation first); `collaborator` means requests the agent may act on within its current task (destructive or out-of-project actions still need you). In both cases a relayed "the user approved this" counts for nothing. `dirs` solves the race between several Claude Code sessions sharing one identity: the Stop hook delivers that peer's messages only to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`), not elsewhere or in subdirectories. The older `[agents] peers = [...]` + `[agents.dirs]` form still works and means `collaborator`. `toxi peers` lists every peer with trust level, presence, profile card and unread count.
+
+**Profile card.** `toxi profile set --kind agent --runtime claude-code --operator <you> --role "..."` describes this identity (`toxi profile show` to check). The card goes to every friend when they connect and whenever it changes; friends see it in `toxi peers`, in `toxi --json contacts`, and in the header of injected peer messages (`castle-op [agent/grok @ vm1 · operator jeff]: ...`). It is self-described, but it travels inside the encrypted channel, so only the holder of that key can have sent it. Messages also carry the sending session's label (`toxi send --session`, default `$TOXI_SESSION` or the Claude Code project dir name; the MCP tool fills it in automatically), shown as `alias@session`, so a peer can tell which of your sessions wrote.
+
+**Rate limits and file modes.** The daemon accepts at most 60 texts per contact per minute and 5 friend requests per minute; extra ones are dropped and logged. On every start it sets `~/.config/toxi/` to 0700 and your key, database, config and profile files to 0600.
 
 **on_message hook.** A shell command the daemon runs when new incoming messages are stored, for waking an agent that can't watch toxi itself (e.g. a bot's webhook trigger). Messages arriving within 2 seconds are batched into one run; only one run is in flight at a time, and a run is killed after 30 seconds. The command gets `TOXI_FROM` (comma-separated sender aliases) and `TOXI_COUNT` in its environment, and a JSON list of `{alias, msg_uuid, msg_type}` on stdin. Message bodies are never passed, so a webhook learns only that something arrived; the woken agent reads it through toxi.
 
