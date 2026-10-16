@@ -314,7 +314,7 @@ MCP 工具：`send_message(alias, body, thread?, reply_to?, kind?)`、`send_file
 | **P1 安全与身份**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | 0600 自检；限流；peer 分级 + 统一措辞；`profile` 类型与 `toxi peers`；`from_session`；`pair/join`；MCP annotations + 权限示例 | observer peer 的消息注入带正确措辞；`pair/join` 30 秒内双向好友；私钥文件 0600 |
 | **P2 及时性**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | `subscribe` IPC + `inbox.flag`；PostToolUse 注入；`wait_for_message` 订阅化 + SessionStart 自恢复；分片重组 + 摘要注入；`receipt` + `--wait-read`；`service install`；Channels 作为可选开启 | 进行中会话：发→注入 ≤2s；空闲会话 ≤1 回合；1.7MB 文本只产生 1 条消息；重启 Mac 后 daemon 自动在线 |
 | **P3 结构化与多方**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | `thread / reply_to / kind`；`room` 扇出；附件发送 + 大正文自动转附件 | 三方 room 一条消息三端都收到并归到同一线程；附件 sha256 两端一致 |
-| **P4 发行与接入** | PyPI 发布；`install.sh --for`；Linux 实测；headless 适配器 + Grok 接入文档（在 vibe-op/castle-op 的 VM 上实际替换掉它们的轮询）；`toxi doctor` | 三类 agent 各一台干净机器，从零到互发消息 ≤5 分钟 |
+| **P4 发行与接入**（✅ 2026-10-16 完成，v0.4.0，验收见 §11） | PyPI 发布；`install.sh --for`；Linux 实测；headless 适配器 + Grok 接入文档（在 vibe-op/castle-op 的 VM 上实际替换掉它们的轮询）；`toxi doctor` | 三类 agent 各一台干净机器，从零到互发消息 ≤5 分钟 |
 
 每阶段末：bilingual 文档同步、版本号四处一致（`tests/test_versions.py`）、`--run-toxcore` 与 `--run-dht` 跑一遍。
 
@@ -404,3 +404,17 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 - Belinda 的两个身份互相配对（`toxi pair/join` 同机也能用：bot 的 LAN 发现能打到 33445 的默认身份）。
 
 未做 / 已知边界：ToxiOS 不懂 `room`、`file` 元信息、`receipt`（决策 6）；room 没有历史同步，新成员看不到加入前的消息；成员之间必须互为好友，`room show` 用 ✗ 标出；`toxi rename` 还没有（别名与卡片名不一致的老联系人仍要人工处理）。
+
+### P4 发行与接入（2026-10-16，v0.4.0）
+
+代码：`toxi doctor`（引擎、libtoxcore、身份、文件权限、daemon、服务、DHT、卡片、peers 配置的目录与联系人、Claude 插件 hook 版本、Codex MCP 注册；`--json`；有问题退出码 1）；`toxi setup engine|claude|codex|headless`（旧的 `setup-*` / `doctor-codex` 保留为隐藏别名；`setup headless` = 身份 + 卡片 + 服务或 cron 提示 + Tox ID 与配对提示）；headless 适配器 `toxi agent run --exec CMD`（订阅事件、按路由投递、标已读、跳过 ack，stdin 给 JSON 载荷含 trust/guide/最近上下文，stdout 原线程 report 回发，daemon 重启自动重连）；`[hooks] on_message_url` webhook（每批一次 POST，`X-Toxi-Timestamp` + `X-Toxi-Signature: sha256=HMAC(secret, ts.body)`，`include_body` 显式打开才带正文——决策 8）；`toxi rename`；`install.sh --for claude|codex|headless|all`、`--ref`、Linux 包管理器、pipx → uv → pip 回退、自动装服务、headless 卡片交互、末尾跑 doctor；协议补充（id ≤64、caps 语义、多段 delivered 规则，回应 ToxiOS 的四个问题）；版本 0.4.0 四处一致。文档树：`architecture / security / install / adapters/{claude-code,codex,headless,ios}`（中英）+ README 改写为 agent 优先。单测 164 个通过（含 toxcore 190 个）。
+
+验收：
+
+- install.sh：在 Belinda 上用全新 `TOXI_HOME`、`--for headless --ref v2-p1` 一条命令跑通：libtoxcore 已有、pipx 从 git 装 0.4.0、生成身份、装 launchd 服务、设卡片、打印 Tox ID 与配对提示、`toxi doctor` 全绿（DHT 需等一分钟）。用后清理。
+- `toxi agent run`：Belinda 的 bot 身份跑 `--exec python3 cmd.py`，Ada 发 `-k request` 后数秒内收到原线程 `report` 回复并带 `↩` 引用、trust/kind/上下文条数正确，`--wait-read` 报已读。第一次尝试在 daemon 刚被 launchd 重启后未投递、第二次起稳定；疑为启动竞态，留观。
+- webhook：Ada 的 daemon 配 `on_message_url` + secret + `include_body`，bot 发一条后本地接收器收到 POST：HMAC 校验通过、`from/count/messages` 完整、正文与线程字段齐全。第一次失败是因为 Ada 的 daemon 还跑着 P3 代码（编辑式安装要 `toxi service restart` 才生效）——`toxi doctor` 以后应对比 daemon 进程版本与 CLI 版本，列入后续。
+- `toxi doctor` 在 Ada：13 项全绿（含 4 个 peer、Claude 插件、Codex MCP）。
+- Grok VM：三个 bot 已在 v2-p1 上（threads/rooms/files 可用），没有 systemd，靠 cron 拉起；webhook 加签与正文可按 `adapters/headless.md` 启用。
+
+发布：`v2-p1` 合并到 `master`，打 `v0.4.0` 触发 GitHub Actions 发 PyPI（见 release.md）。

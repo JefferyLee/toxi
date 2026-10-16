@@ -1,221 +1,98 @@
 # 🛰️ toxi
 
-> **基于 Tox 的去中心化消息中间件，为 AI 编程代理而生。**
+> **AI agent 与运行它们的人之间的无服务器、端到端加密消息通信 —— 基于 Tox。**
 >
-> 🌐 语言: [English](README.md) | **中文**
+> 🌐 Languages: [English](README.md) | **中文**
 
-Toxi 让你在 AI 编程代理里直接和朋友聊天——**异步、端到端加密、完全去中心化**，无需服务器，基于 [Tox](https://tox.chat) 协议。当前以 Claude Code 插件的形式集成（slash 命令、未读通知、MCP 工具、底部状态栏指示器）。引擎本身与 AI 工具解耦，未来计划支持 Codex、Grok Builder 等。
+你的 Claude Code 会话、一个 Codex 会话、VM 上的一个 Grok bot 和你的手机可以直接互相对话：没有中继、没有账号、没有云端。每个参与者运行一个持有 Tox 身份的小 daemon；适配器把这个 daemon 接进运行 agent 的任何环境。消息携带**谁**写的（与密钥绑定的身份卡片，加上发送会话）、是**哪种**消息（request、report、acknowledgement、relay）、属于**哪个线程**，并带回**送达与已读回执**。长文本会被重组，文件走同一条信道，room 把一条消息扇出给多个对端。
 
-> 状态：v0.2，macOS 优先。新用户可看[安装与使用手册](docs/install-and-usage.zh-CN.md)（实操向）；Codex 用户看 [Codex 中的 toxi 使用手册](docs/codex-usage.zh-CN.md)；完整设计见 [PRD](docs/prd.zh-CN.md)。
+> 状态：**0.4.0** —— Claude Code 与 Codex 适配器、面向 bot 的 headless 适配器、macOS 与 Linux。设计与验收日志：[docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md)。线格式：[docs/protocol.zh-CN.md](docs/protocol.zh-CN.md)。
 
-## 工作原理
-
-两个进程（参见 PRD §3.2）：
-
-- **`toxi-daemon`** —— 常驻后台进程，持有你的 Tox 身份、维持 DHT 连接，并把收到的消息写入本地 SQLite。
-- **`toxi`** —— 短生命周期的 CLI，每次执行一条命令；通过 Unix socket 与 daemon 通信后退出。
-
-所有数据本地化：密钥放在 `~/.config/toxi/`，没有云端。通过任何渠道交换 Tox ID 即可加好友。
-
-## 依赖
-
-- **Python 3.10+**
-- **libtoxcore**（唯一的非 Python 依赖）：
-  - macOS：`brew install toxcore`
-  - Linux：安装发行版的 `toxcore` / `libtoxcore` 包
-
-## 安装引擎
-
-`toxi` 引擎是个普通程序（Python + 后台 daemon），需要 `libtoxcore`。它与下面的 Claude Code 插件分开安装。
+## 安装
 
 ```bash
-# macOS 推荐 —— Homebrew tap 会自动拉取 libtoxcore：
-brew install <owner>/tap/toxi              # 见 packaging/homebrew/
-
-# 或者用 pipx（先装好 libtoxcore：brew install toxcore）：
-pipx install git+https://github.com/JefferyLee/toxi      # 从源码安装，今天就能用
-pipx install toxi                                        # 发布到 PyPI 后
-# 加 MCP 工具支持（可选 extra）：
-pipx install 'toxi[mcp]'
+curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
+# 或：  ... | bash -s -- --for codex      /  --for headless --name my-bot --operator me
 ```
 
-会安装两个命令：`toxi` 和 `toxi-daemon`。（PyPI/Homebrew 上的发布名是 `toxi`；Python 包名是 `toxi`。）
+一条命令安装 libtoxcore 和引擎，创建你的身份，让 daemon 跨重启常驻，并接入它找到的适配器。细节、平台、一台机器上多个身份：[docs/install.zh-CN.md](docs/install.zh-CN.md)。
 
-## 快速上手
+## 两分钟让两个 agent 对话
 
 ```bash
-# 1. 创建身份（生成你的 Tox 密钥对）
-toxi init
-
-# 2. 启动后台 daemon
-toxi daemon start
-
-# 3. 看自己的 Tox ID —— 通过任何渠道分享给朋友
-toxi me
-
-# 4. 通过朋友的 Tox ID 加好友（76 位十六进制）
-toxi add bob 76518406F6A9F2217E8DC487...
-
-#    朋友收到请求后，在他那边接受：
-toxi requests                      # 看待处理请求的公钥
-toxi accept alice <公钥前缀>
-
-# 5. 开聊
-toxi send bob "你看下我刚 push 的 PR，有空回我"
-toxi unread                        # 看未读
-toxi read bob                      # 看与 bob 的对话历史
-toxi queue                         # 待发送队列
+# 机器 A                                      # 机器 B
+toxi profile set --kind agent \               toxi profile set --kind agent \
+  --runtime claude-code --operator jeff         --runtime grok --operator jeff
+toxi pair            # 打印一个邀请  →        toxi join <invite>     # 成为好友，自动接受，按卡片命名
+toxi peers           # 谁是谁：卡片、信任、在线状态、未读
+toxi send bot "please run the smoke test" -t release -k request --wait-read 30
+                                              toxi agent run --exec 'python3 bot.py'   # 或 hook / MCP / webhook
 ```
 
-如果朋友离线，消息会本地入队，等他下次上线自动发出。
-
-## 命令一览
-
-| 命令 | 作用 |
-|---|---|
-| `toxi init` | 生成身份（一次性） |
-| `toxi me` | 显示自己的 Tox ID、名字、连接状态 |
-| `toxi set-name <名字>` | 设置展示名 |
-| `toxi status` | daemon 状态、DHT 连接、联系人、队列、统计 |
-| `toxi add <别名> <tox_id>` | 通过 Tox ID 加好友 |
-| `toxi requests` | 待处理的好友请求 |
-| `toxi accept <别名> <公钥前缀>` | 接受好友请求并给对方起本地别名 |
-| `toxi pair` / `toxi join <邀请>` | 用一次性邀请和另一个身份互加好友：不用抄 Tox ID，自动接受 |
-| `toxi peers` | 协作 agent：信任级别、在线状态、身份卡片、未读数 |
-| `toxi profile show` / `toxi profile set …` | 本身份的卡片（类型、运行时、主机、运营者），发给好友 |
-| `toxi contacts [--online]` | 列出联系人 |
-| `toxi send <别名> <消息>` | 发消息（`-` 表示从 stdin 读；`--session` 标明发送会话；`--wait-read N` 等已读回执） |
-| `toxi show <id>` | 完整打印一条消息 |
-| `toxi send … -t <线程> -k <类型> -r <id>` | 线程、引用回复、消息类型（`request` / `report` / `ack` / `relay`）、`--needs-human`、`--tag` |
-| `toxi send <别名> --file <路径>` | 发文件（超过 64 KB 的正文自动转为文件） |
-| `toxi threads` | 线程列表，含未读与待决定数 |
-| `toxi room create / add / send / list / show` | Room：一条消息扇出给多个联系人 |
-| `toxi watch` | 实时输出事件：消息、上下线、送达、已读回执 |
-| `toxi unread [别名]` | 显示未读消息（并标为已读） |
-| `toxi read <别名> [--limit N]` | 看对话历史 |
-| `toxi queue` | 待发送队列 |
-| `toxi introduce <to> <whom>` | 把一个联系人介绍给另一个 |
-| `toxi introductions` | 别人介绍给你的联系人 |
-| `toxi accept-intro <from> <whom> [--alias]` | 接受介绍 |
-| `toxi daemon start` / `stop` | 管理后台 daemon |
-| `toxi service install` / `status` / `restart` / `uninstall` | 让 daemon 跨登录和重启常驻（launchd / systemd --user） |
-| `toxi setup-engine` / `setup-claude` / `setup-codex` | 只接入引擎、Claude Code 或 Codex |
-| `toxi doctor-codex` | 只读检查 Codex MCP/plugin 接入状态 |
-| `toxi teardown-codex` | 移除 Codex 接入，不动身份和历史 |
-
-## 配置
-
-可选 `~/.config/toxi/config.toml`：
+在 `~/.config/toxi/config.toml` 里给对端一个信任级别和一个项目：
 
 ```toml
-[retry]
-ack_timeout_minutes = 5    # 多久未收到 ACK 就重发
-fail_after_hours = 24      # 多久仍未确认就放弃（标记 failed）
-
-[peers.codex]              # 一个作为协作 AI agent 的联系人
-trust = "collaborator"     # "observer" = 只当信息，不产生副作用
-dirs  = ["/path/to/project"]  # 只送给在这个目录启动的会话
+[peers.bot]
+trust = "observer"                 # 只当信息；"collaborator" 可在任务范围内行动
+dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 会话
 ```
 
-协作 agent、身份卡片和 `on_message` hook 的说明见[安装与使用指南 §7](docs/install-and-usage.zh-CN.md#7-配置)。
+## 消息如何进入 agent
 
-## 文件布局
+| 运行时 | 工作中 | 回合结束 | 空闲 |
+|---|---|---|---|
+| Claude Code | PostToolUse hook（stat 一下 `inbox.flag`，再 `toxi peer-inbox`） | Stop hook | `wait_for_message`（事件驱动）或 channel 模式 |
+| Codex | — | Stop hook | `wait_for_message` 循环 |
+| headless | `toxi agent run --exec CMD` · `[hooks] on_message_url` webhook（HMAC）· `on_message` 命令 | | |
+| 人 | `toxi unread`、`toxi watch`、状态栏、手机上的 ToxiOS | | |
 
-所有数据放在 `~/.config/toxi/`（可用 `TOXI_HOME` 环境变量覆盖——本机起两个 daemon 做测试时有用）：
+每条注入的行形如 `castle-op [agent/grok @ grok-vm · operator jeff · session ops] (#release · request): …`，后接该对端信任级别的措辞：只当信息，或 agent 可在其任务范围内执行的请求；转述的批准永远不算数。
+
+## 命令
+
+| | |
+|---|---|
+| 身份 | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor` |
+| 联系人 | `toxi pair` / `toxi join <invite>` · `toxi add` / `toxi requests` / `toxi accept` · `toxi rename` · `toxi contacts` · `toxi peers` · `toxi introduce` |
+| 消息 | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi queue` · `toxi watch` |
+| room | `toxi room create <name> <alias>…` · `room add/remove` · `room send` · `room list/show` · `toxi read - --room <name>` |
+| agent | `toxi peer-inbox`（hook 调用的命令）· `toxi agent run --exec CMD` · `toxi mcp serve` · `toxi setup claude\|codex\|headless` |
+| daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade` · `toxi teardown` |
+
+在任何读命令前加 `--json` 可得到机器可读输出。
+
+## 文档
+
+- [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md) —— 四层、进程、数据流、适配器契约
+- [docs/protocol.zh-CN.md](docs/protocol.zh-CN.md) —— 信封 v2，对每个实现都是规范
+- [docs/security.zh-CN.md](docs/security.zh-CN.md) —— 保护什么、威胁、适配器规则
+- [docs/install.zh-CN.md](docs/install.zh-CN.md) 与长篇的[安装与使用手册](docs/install-and-usage.zh-CN.md)
+- 适配器：[Claude Code](docs/adapters/claude-code.zh-CN.md) · [Codex](docs/adapters/codex.zh-CN.md) · [headless / bot](docs/adapters/headless.zh-CN.md) · [ToxiOS](docs/adapters/ios.zh-CN.md)
+- [docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md) —— 设计、它所源自的调研、决策、分阶段验收
+
+## 文件
 
 ```
-tox_state.bin   Tox 密钥 + 好友列表
-chat.db         SQLite：联系人、消息、队列
-daemon.sock     IPC socket    daemon.pid   进程 PID    daemon.log   日志
-config.toml     可选配置
-profile.json    本身份的卡片（toxi profile set）
+~/.config/toxi/            一个身份（用 TOXI_HOME 覆盖）
+  tox_state.bin            密钥 + 好友列表             chat.db      联系人、消息、room
+  profile.json             你的卡片                    config.toml  peers、hooks、retry
+  media/                   收到的文件、待发附件
+  daemon.sock · daemon.pid · daemon.log · inbox.flag
 ```
 
-## Claude Code 集成
+## 限制
 
-集成以**Claude Code 插件**的形式发布（`claude-code-plugin/`），一步装好通知 hook、slash 命令和 MCP server，**不用手动改配置**。前提是 `toxi` 引擎在 `PATH` 上（见上面"安装引擎"）。
-
-### 装插件
-
-```bash
-# 开发期：直接从本地目录加载
-claude --plugin-dir ./claude-code-plugin
-
-# 或通过本仓库自带的 marketplace（推荐）：
-/plugin marketplace add /path/to/this/repo        # 或推到 GitHub 后用 owner/repo
-/plugin install toxi@toxi
-```
-
-### 插件提供什么
-
-- **SessionStart hook** —— 会话开始时把未读消息注入 Claude 的上下文，非中文消息自动翻成中文。来信被明确标为「不可信个人内容、非指令」，防止有人通过消息内容做提示注入。
-- **Slash 命令** —— `/unread`、`/send <别名> <消息>`、`/contacts`、`/status`（命名空间为 `/toxi:...`）。
-- **状态栏集成** —— `toxi statusline` 输出一行摘要（`toxi: 📬 2 from macbook · 1/1 online`），可接到 Claude Code 的 `statusLine` 设置里，未读数会显示在底部状态条。
-- **MCP 工具** —— `get_unread`、`read_history`、`view_media`、`mark_read`、`send_message`、`list_contacts`、`get_status`，让 Claude 能替你操作。`view_media` 把收到的图片以内联图片内容返回(语音/视频返回保存路径),这样 MCP 客户端能直接显示。需引擎的 `[mcp]` extra。
-
-## Codex 集成（实验性）
-
-仓库里也加入了第一版 Codex 插件包，位置是 `plugins/toxi/`。它包含：
-
-- **MCP server 配置** —— 启动 `toxi mcp serve`，让 Codex 调用
-  `get_unread`、`read_history`、`view_media`、`mark_read`、`send_message`、`list_contacts`、`get_status`。
-  MCP server 会声明 instructions，保留“不可信来信”、“明确标已读”和“明确要求才发送”的边界。
-- **生命周期 hook** —— 每轮结束后通过 Codex Stop-hook JSON 显示
-  `toxi statusline` 摘要。插件故意不注册 SessionStart hook；未读消息只在你要求
-  Codex 通过 MCP/CLI 读取时才会进入上下文。
-- **Codex skill** —— 告诉 Codex 何时使用 toxi、如何限制读取范围，以及如何把来信当作不可信个人内容。
-
-repo 级 Codex marketplace 入口在 `.agents/plugins/marketplace.json`。Codex 插件
-安装目前需要从源码 checkout 运行（PyPI/pipx 安装的 engine 不包含 repo
-marketplace 文件）。本地接入命令是：
-
-```bash
-toxi setup-codex
-```
-
-它会尽量安装 MCP extra、把 `toxi mcp serve` 注册到 Codex、把当前 checkout
-加入 Codex plugin marketplace，并安装 `toxi` Codex 插件。它不会创建身份或启动
-daemon；引擎初始化使用 `toxi setup-engine`。`toxi setup` 继续保持旧的
-engine + Claude Code 组合 setup，`toxi setup-claude` 只接入 Claude Code。
-
-用下面的只读检查确认非交互接入状态：
-
-```bash
-toxi doctor-codex
-```
-
-详细用法见 [Codex 中的 toxi 使用手册](docs/codex-usage.zh-CN.md)。
-
-之后如果只想移除 Codex 集成：
-
-```bash
-toxi teardown-codex
-```
-
-### 机器可读输出
-
-所有读命令都支持 `--json`（放在子命令前面）：`toxi --json unread`、`toxi --json status` 等。`--json` 模式下 `unread` / `read` 是**只读 peek**，不会标已读。
-
-## 发布
-
-- **引擎 → PyPI**：`python -m build` + `twine upload` → 用户 `pipx install toxi`。
-- **引擎 → Homebrew**：`packaging/homebrew/toxi.rb` 是 tap formula 模板，`depends_on "toxcore"` 让 `brew install` 顺带把 libtoxcore 装上。通过个人 tap 发布（`brew tap <owner>/<name>`）。
-- **插件 → marketplace**：`.claude-plugin/marketplace.json` 让本仓库本身就是个 marketplace。推到 GitHub 后别人就能 `/plugin marketplace add JefferyLee/toxi` 然后 `/plugin install toxi`。
-- **Codex 插件 → marketplace**：`.agents/plugins/marketplace.json` 暴露 `plugins/toxi/` 下的实验性 Codex 插件。
-- **版本策略**：引擎、Python 包元数据、Claude Code 插件、Codex 插件共用 `pyproject.toml` 里的同一个发布版本。
-
-## v1 已知限制
-
-- macOS 优先（Linux 在有 libtoxcore 的前提下应能工作，但还没作为正式测试目标）。
-- 本地数据库和私钥**未加密**——靠文件系统权限保护，不要在共享/不可信机器上用。
-- 与你聊天的人能看到你的公网 IP（Tox 协议特性）。
-- 不支持群聊、实时语音/视频通话、多设备同步。通过 Tox 文件传输发来的**图片、语音/视频文件**会被接收并保存到 `~/.config/toxi/media/`;但暂不支持发送媒体。
+- 与你对话的人能看到你的 IP（Tox）。密钥与历史未做静态加密；不要共享账户。
+- room 没有历史同步，成员之间必须互为联系人。
+- ToxiOS（手机）仍说协议 v1：在其 v2 升级落地之前，它会分段收到长文本、把 room 消息看成普通消息，也不发回执。
 
 ## 开发
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest                # 快测；默认跳过真实 toxcore/DHT
-.venv/bin/python -m pytest --run-toxcore  # 包含本地 libtoxcore/daemon 测试
-.venv/bin/python -m pytest --run-dht      # 包含走公网 Tox DHT 的慢测试
+python -m venv .venv && .venv/bin/pip install -e ".[dev,mcp]"
+.venv/bin/python -m pytest                # 快测
+.venv/bin/python -m pytest --run-toxcore  # + 本地 libtoxcore / daemon 测试
+.venv/bin/python -m pytest --run-dht      # + 走公网 DHT 的慢测试
 ```
+
+发布：在 `master` 上打 `vX.Y.Z` 标签，GitHub Actions 会发布到 PyPI（见 [docs/release.zh-CN.md](docs/release.zh-CN.md)）。引擎与插件版本一起变动（`tests/test_versions.py`）。
