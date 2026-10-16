@@ -32,6 +32,7 @@ def _daemon(tmp_path, monkeypatch):
     d._transfers = {}
     d._hook_msgs, d._hook_due, d._hook_proc, d._hook_started = [], 0.0, None, 0.0
     d._subs, d._parts = [], {}
+    d._out, d._file_meta = {}, {}
     d.tox = FakeTox()
     return d
 

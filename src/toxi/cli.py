@@ -221,28 +221,57 @@ _MEDIA_LABEL = {"image": "📷 image", "voice": "🎤 voice message",
 
 
 def _content(m: dict) -> str:
-    """Render a message body for the terminal; media rows show type + saved path."""
+    """Render a message body for the terminal: thread/kind tags first, media rows
+    show type + saved path."""
+    tag = peers.meta_tag(m).strip()
+    prefix = f"{tag} " if tag else ""
     if m.get("msg_type", "text") == "text":
-        return m["content"]
+        return prefix + m["content"]
     label = _MEDIA_LABEL.get(m["msg_type"], "📎 file")
-    return f"[{label}] {m['content']}"
+    return f"{prefix}[{label}] {m['content']}"
 
 
 @cli.command()
 @click.argument("alias")
-@click.argument("message")
+@click.argument("message", required=False)
+@click.option("--file", "file_path", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Send this file (any MESSAGE goes first as a text in the same thread).")
 @click.option("--session", default=None,
               help="Label of the session/project sending this (default: $TOXI_SESSION, "
                    "else the Claude Code project dir name).")
 @click.option("--wait-read", "wait_read", default=0, metavar="SECONDS",
               help="Wait up to this long for the recipient's read receipt.")
+@click.option("-t", "--thread", default=None, help="Thread / topic id, e.g. pr-123.")
+@click.option("-r", "--reply-to", "reply_to", default=None, metavar="MSG_ID",
+              help="The message id this answers.")
+@click.option("-k", "--kind", type=click.Choice(list(envelope.KINDS)), default="msg",
+              show_default=True,
+              help="request = expects an answer; report = status; ack = 'got it' (never wakes "
+                   "the peer); relay = you are passing on someone else's words.")
+@click.option("--needs-human", is_flag=True,
+              help="Flag that a person, not the peer agent, must decide this.")
+@click.option("--tag", "tags", multiple=True, help="Free-form tag (repeatable), e.g. WARN.")
 @click.pass_context
-def send(ctx, alias, message, session, wait_read):
-    """Send a message: toxi send <alias> <message> (use - to read from stdin)."""
+def send(ctx, alias, message, file_path, session, wait_read, thread, reply_to, kind, needs_human,
+         tags):
+    """Send a message: toxi send <alias> <message> (use - to read from stdin), or a file
+    with --file. Bodies over 64 KB go as a text file automatically."""
     if message == "-":
         message = sys.stdin.read().rstrip("\n")
-    res = _call("send_message", {"alias": alias, "body": message,
-                                 "session": session or _default_session()})
+    if message is None and not file_path:
+        raise click.UsageError("give a MESSAGE, or --file PATH, or both")
+    meta = {"session": session or _default_session(), "thread": thread, "reply_to": reply_to,
+            "kind": kind, "needs_human": needs_human, "tags": list(tags)}
+    if message is not None:
+        res = _call("send_message", {"alias": alias, "body": message, **meta})
+    if file_path:
+        fres = _call("send_file", {"alias": alias, "path": file_path, **meta})
+        if message is None:
+            res = fres
+        elif not _emit_quiet(ctx):
+            click.echo(f"✓ file {fres['name']} ({fres['size']} bytes): {fres['status']}")
+    if res.get("as_file"):
+        click.echo(f"ℹ body over 64 KB — sent as a text file ({res['size']} bytes)", err=True)
     if wait_read > 0:
         res["status"] = _wait_status(res["msg_uuid"], wait_read)
         res["read"] = res["status"] == "read"
@@ -256,6 +285,10 @@ def send(ctx, alias, message, session, wait_read):
             f" — not read within {wait_read}s" if wait_read > 0 else ""))
     else:
         click.echo(f"✓ {alias} is offline — queued{parts} (will send when they come online)")
+
+
+def _emit_quiet(ctx) -> bool:
+    return bool(ctx.obj and ctx.obj.get("json"))
 
 
 def _wait_status(msg_uuid: str, seconds: int) -> str:
@@ -367,10 +400,17 @@ def unread(ctx, alias):
 @click.option("--limit", default=20, help="How many recent messages to show.")
 @click.option("--oldest-first", is_flag=True,
               help="With --json, list oldest first (the terminal view always does).")
+@click.option("-t", "--thread", default=None, help="Only this thread.")
+@click.option("--room", default=None, help="Messages of this room (ALIAS may be -).")
 @click.pass_context
-def read(ctx, alias, limit, oldest_first):
-    """Show conversation history with a contact."""
-    msgs = _call("get_messages", {"alias": alias, "limit": limit})["messages"]
+def read(ctx, alias, limit, oldest_first, thread, room):
+    """Show conversation history with a contact (or, with --room, a room)."""
+    params = {"limit": limit, "thread": thread}
+    if room:
+        params["room"] = room
+    if alias and alias != "-":
+        params["alias"] = alias
+    msgs = _call("get_messages", params)["messages"]
     if oldest_first:
         msgs = list(reversed(msgs))
     if _emit(ctx, msgs):  # programmatic peek: don't mark read
@@ -382,6 +422,8 @@ def read(ctx, alias, limit, oldest_first):
         return
     for m in reversed(msgs):  # oldest first
         who = "you" if m["direction"] == "out" else _sender(m)
+        if m.get("recipients"):
+            who = "you → " + ", ".join(r["alias"] for r in m["recipients"])
         click.echo(f"  {who} ({_ago(m['created_at'])}): {_content(m)}")
     unread_in = [m["msg_uuid"] for m in msgs if m["direction"] == "in" and m["read_at"] is None]
     if unread_in:
@@ -506,6 +548,141 @@ def join(invite_text, alias):
                f"them online once the DHT connects (usually under a minute).")
 
 
+def _meta_options(fn):
+    for opt in reversed([
+        click.option("-t", "--thread", default=None, help="Thread / topic id, e.g. pr-123."),
+        click.option("-k", "--kind", type=click.Choice(list(envelope.KINDS)), default="msg",
+                     show_default=True, help="request / report / ack / relay (see `toxi send --help`)."),
+        click.option("--needs-human", is_flag=True, help="A person, not the peer agent, must decide this."),
+        click.option("--tag", "tags", multiple=True, help="Free-form tag (repeatable)."),
+        click.option("--session", default=None, help="Label of the sending session."),
+    ]):
+        fn = opt(fn)
+    return fn
+
+
+@cli.group()
+def room():
+    """Rooms: one message to several contacts at once (app-layer fan-out)."""
+
+
+@room.command("create")
+@click.argument("name")
+@click.argument("aliases", nargs=-1, required=True)
+@click.pass_context
+def room_create(ctx, name, aliases):
+    """Create a room with these contacts; each gets a member card (when online)."""
+    res = _call("create_room", {"name": name, "aliases": list(aliases)})
+    if _emit(ctx, res):
+        return
+    told = ", ".join(res["card_sent_to"]) or "nobody yet (offline members get it when they connect)"
+    click.echo(f"✓ room {res['name']} ({res['room_id'][:8]}) with {res['members']} members; "
+               f"card sent to: {told}\n  Members must be contacts of each other to see each "
+               f"other's messages (`toxi introduce` helps).")
+
+
+@room.command("add")
+@click.argument("room_ref", metavar="ROOM")
+@click.argument("aliases", nargs=-1, required=True)
+@click.pass_context
+def room_add(ctx, room_ref, aliases):
+    """Add contacts to a room you created; every member gets the updated card."""
+    res = _call("room_members", {"room": room_ref, "add": list(aliases)})
+    if _emit(ctx, res):
+        return
+    click.echo(f"✓ {res['name']} now has {len(res['members'])} members; card sent to: "
+               f"{', '.join(res['card_sent_to']) or 'nobody online yet'}")
+
+
+@room.command("remove")
+@click.argument("room_ref", metavar="ROOM")
+@click.argument("aliases", nargs=-1, required=True)
+@click.pass_context
+def room_remove(ctx, room_ref, aliases):
+    """Remove contacts from a room you created."""
+    res = _call("room_members", {"room": room_ref, "remove": list(aliases)})
+    if _emit(ctx, res):
+        return
+    click.echo(f"✓ {res['name']} now has {len(res['members'])} members")
+
+
+@room.command("list")
+@click.pass_context
+def room_list(ctx):
+    """Your rooms with member count, unread and last activity."""
+    rooms = _call("list_rooms", {})["rooms"]
+    if _emit(ctx, rooms):
+        return
+    if not rooms:
+        click.echo("No rooms. Create one: toxi room create <name> <alias>...")
+        return
+    for r in rooms:
+        unread = f" · 📬 {r['unread']}" if r["unread"] else ""
+        last = f" · {_ago(r['last_at'])}" if r["last_at"] else ""
+        mine = " · yours" if r["mine"] else ""
+        click.echo(f"  {r['name']:20} {r['room_id'][:8]}  {r['members']} members{unread}{last}{mine}")
+
+
+@room.command("show")
+@click.argument("room_ref", metavar="ROOM")
+@click.pass_context
+def room_show(ctx, room_ref):
+    """Members of a room and whether you can reach them."""
+    r = _call("get_room", {"room": room_ref})["room"]
+    if _emit(ctx, r):
+        return
+    click.echo(f"{r['name']} ({r['room_id']}){' · yours' if r['mine'] else ''}")
+    for m in r["members"]:
+        if m["me"]:
+            click.echo(f"  • {m['name'] or 'me'} (you)")
+        elif m["alias"]:
+            click.echo(f"  {'✓' if m['online'] else '○'} {m['alias']} ({m['name']})")
+        else:
+            click.echo(f"  ✗ {m['name'] or m['public_key'][:8]} — not your contact; you will not "
+                       f"see each other's messages until you are")
+
+
+@room.command("send")
+@click.argument("room_ref", metavar="ROOM")
+@click.argument("message")
+@_meta_options
+@click.pass_context
+def room_send(ctx, room_ref, message, thread, kind, needs_human, tags, session):
+    """Send a message to every member of a room (use - to read from stdin)."""
+    if message == "-":
+        message = sys.stdin.read().rstrip("\n")
+    res = _call("send_room", {"room": room_ref, "body": message, "thread": thread, "kind": kind,
+                              "needs_human": needs_human, "tags": list(tags),
+                              "session": session or _default_session()})
+    if _emit(ctx, res):
+        return
+    done = ", ".join(f"{s['alias']} ({s['status']})" for s in res["sent"]) or "nobody"
+    click.echo(f"✓ {res['name']}: {done}")
+    if res["unreachable"]:
+        click.echo(f"⚠ not your contacts, skipped: {', '.join(res['unreachable'])}")
+
+
+@cli.command()
+@click.argument("alias", required=False)
+@click.pass_context
+def threads(ctx, alias):
+    """Threads in your conversations: messages, unread, pending decisions, last activity."""
+    rows = _call("list_threads", {"alias": alias})["threads"]
+    if _emit(ctx, rows):
+        return
+    if not rows:
+        click.echo("No threads yet (send with -t <thread> to start one).")
+        return
+    for r in rows:
+        flags = []
+        if r["unread"]:
+            flags.append(f"📬 {r['unread']}")
+        if r["needs_human"]:
+            flags.append(f"⚑ {r['needs_human']} needs your decision")
+        click.echo(f"  #{r['thread']:20} {r['alias']:12} {r['count']:3} msgs · "
+                   f"{_ago(r['last_at'])}" + (" · " + " · ".join(flags) if flags else ""))
+
+
 @cli.command()
 @click.argument("msg_uuid")
 @click.pass_context
@@ -581,10 +758,13 @@ def service_install():
 @service_cmd.command("uninstall")
 def service_uninstall():
     """Stop and remove the background service (identity and history are kept)."""
-    if service.uninstall():
-        click.echo("✓ service removed (the daemon is stopped; `toxi daemon start` runs it by hand)")
-    else:
+    if not service.uninstall():
         click.echo("no service installed for this identity")
+    elif bootstrap.daemon_running():
+        click.echo("✓ service definition removed; the daemon was not under a service manager "
+                   "and keeps running")
+    else:
+        click.echo("✓ service removed (the daemon is stopped; `toxi daemon start` runs it by hand)")
 
 
 @service_cmd.command("restart")

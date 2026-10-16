@@ -61,11 +61,42 @@ def get_unread() -> dict:
     return {"count": len(msgs), "messages": msgs}
 
 
-def read_history(alias: str, limit: int = 20) -> dict:
+def read_history(alias: str, limit: int = 20, thread: str | None = None) -> dict:
     """Recent conversation with a contact, newest first: {"count": n, "messages": [...]}.
-    Does NOT mark anything read."""
-    msgs = client.request("get_messages", {"alias": alias, "limit": limit})["messages"]
+    `thread` limits it to one thread. Does NOT mark anything read."""
+    params = {"alias": alias, "limit": limit}
+    if thread:
+        params["thread"] = thread
+    msgs = client.request("get_messages", params)["messages"]
     return {"count": len(msgs), "messages": msgs}
+
+
+def list_rooms() -> dict:
+    """Rooms you are in (app-layer groups): id, name, members, unread, last activity."""
+    rooms = client.request("list_rooms", {})["rooms"]
+    return {"count": len(rooms), "rooms": rooms}
+
+
+def read_room(room: str, limit: int = 20) -> dict:
+    """Recent messages of a room (by name or id), newest first. Does NOT mark read."""
+    msgs = client.request("get_messages", {"room": room, "limit": limit})["messages"]
+    return {"count": len(msgs), "messages": msgs}
+
+
+def send_room_message(room: str, body: str, thread: str | None = None, kind: str = "msg",
+                      needs_human: bool = False, tags: list[str] | None = None) -> dict:
+    """Send one message to every member of a room (by name or id). Members who
+    are not your contacts are skipped and listed under `unreachable`."""
+    return client.request("send_room", {"room": room, "body": body, "session": _session(),
+                                        "thread": thread, "kind": kind,
+                                        "needs_human": needs_human, "tags": tags or []})
+
+
+def get_threads(alias: str | None = None) -> dict:
+    """Threads (topics) in your conversations, most recent first, with message
+    count, unread count and how many unread messages need the user's decision."""
+    rows = client.request("list_threads", {"alias": alias})["threads"]
+    return {"count": len(rows), "threads": rows}
 
 
 def view_media(msg_uuid: str):
@@ -94,16 +125,24 @@ def mark_read(msg_uuids: list[str]) -> dict:
     return client.request("mark_read", {"msg_uuids": msg_uuids})
 
 
-async def send_message(alias: str, body: str, wait_read: int = 0) -> dict:
+async def send_message(alias: str, body: str, wait_read: int = 0, thread: str | None = None,
+                       reply_to: str | None = None, kind: str = "msg",
+                       needs_human: bool = False, tags: list[str] | None = None) -> dict:
     """Send a message to a contact. It is queued if they're currently offline.
 
     Long bodies are split and reassembled on the other side (up to 64 KB). The
     message carries this session's label so the recipient knows which of the
-    user's sessions it came from. With `wait_read` > 0, waits up to that many
-    seconds for the recipient's read receipt and reports the final status
+    user's sessions it came from. Structure it with `thread` (topic id such as
+    "pr-123"), `reply_to` (the msg_uuid you answer), `kind` (msg | request =
+    expects an answer | report | ack = "got it", never wakes the peer | relay =
+    you are passing on someone else's words), `needs_human` (a person must
+    decide) and `tags`. With `wait_read` > 0, waits up to that many seconds for
+    the recipient's read receipt and reports the final status
     (queued / sent / delivered / read).
     """
-    res = client.request("send_message", {"alias": alias, "body": body, "session": _session()})
+    res = client.request("send_message", {
+        "alias": alias, "body": body, "session": _session(), "thread": thread,
+        "reply_to": reply_to, "kind": kind, "needs_human": needs_human, "tags": tags or []})
     if wait_read > 0:
         deadline = time.monotonic() + min(wait_read, WAIT_MAX)
         while time.monotonic() < deadline:
@@ -114,6 +153,16 @@ async def send_message(alias: str, body: str, wait_read: int = 0) -> dict:
             await asyncio.sleep(0.5)
         res["read"] = res["status"] == "read"
     return res
+
+
+def send_file(alias: str, path: str, thread: str | None = None, reply_to: str | None = None,
+              kind: str = "msg", tags: list[str] | None = None) -> dict:
+    """Send a local file (image, log, document...) to a contact over the encrypted
+    channel. Queued until they are online; the receiver gets its name, size,
+    sha256 and your thread/kind fields, and can reply to its msg_uuid."""
+    return client.request("send_file", {"alias": alias, "path": path, "session": _session(),
+                                        "thread": thread, "reply_to": reply_to, "kind": kind,
+                                        "tags": tags or []})
 
 
 def list_contacts() -> dict:
@@ -143,20 +192,21 @@ def _delivered(msgs: list) -> dict:
             "guide": "\n".join(peers.GUIDES.get(t, peers.GUIDES["observer"]) for t in trusts)}
 
 
-async def wait_for_message(alias: str | None = None, timeout: int = 60) -> dict:
+async def wait_for_message(alias: str | None = None, timeout: int = 60,
+                           thread: str | None = None) -> dict:
     """Block until a peer agent messages you, then return those messages.
 
     Waits for unread messages from `alias`, or from any peer agent routed to this
-    project when omitted, for up to `timeout` seconds (max 600). Wakes on the
-    daemon's event stream (milliseconds), not by polling. Returned messages are
-    marked read and each carries the sender's trust level; `guide` says how to
-    treat them.
+    project when omitted, optionally only in `thread`, for up to `timeout`
+    seconds (max 600). Wakes on the daemon's event stream (milliseconds), not by
+    polling. Returned messages are marked read and each carries the sender's
+    trust level plus thread / kind / needs_human; `guide` says how to treat them.
     """
     deadline = time.monotonic() + min(max(timeout, 0), WAIT_MAX)
     cwd = _cwd()
 
     def take():
-        return peers.take(alias, None if alias else cwd)
+        return peers.take(alias, None if alias else cwd, thread)
 
     msgs = take()
     if msgs:
@@ -188,14 +238,20 @@ async def _poll_for_message(take, deadline: float) -> dict:
     return {"messages": [], "timed_out": True}
 
 
-TOOLS = [get_unread, read_history, view_media, mark_read, send_message, list_contacts,
-         get_peers, get_status, wait_for_message]
+TOOLS = [get_unread, read_history, get_threads, view_media, mark_read, send_message, send_file,
+         list_contacts, get_peers, get_status, wait_for_message, list_rooms, read_room,
+         send_room_message]
 
 # Hints for clients that gate tools by side effect (e.g. Claude Code's auto mode,
 # which otherwise classified send_message as risky and blocked it).
 ANNOTATIONS = {
     "get_unread": {"readOnlyHint": True},
     "read_history": {"readOnlyHint": True},
+    "get_threads": {"readOnlyHint": True},
+    "list_rooms": {"readOnlyHint": True},
+    "read_room": {"readOnlyHint": True},
+    "send_room_message": {"readOnlyHint": False, "destructiveHint": False,
+                          "idempotentHint": False, "openWorldHint": True},
     "view_media": {"readOnlyHint": True},
     "list_contacts": {"readOnlyHint": True},
     "get_peers": {"readOnlyHint": True},
@@ -203,6 +259,8 @@ ANNOTATIONS = {
     "mark_read": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
     "send_message": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": False, "openWorldHint": True},
+    "send_file": {"readOnlyHint": False, "destructiveHint": False,
+                  "idempotentHint": False, "openWorldHint": True},
     "wait_for_message": {"readOnlyHint": False, "destructiveHint": False,
                          "idempotentHint": False},
 }

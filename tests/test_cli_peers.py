@@ -80,7 +80,7 @@ def test_send_tags_session_from_env(monkeypatch):
     monkeypatch.delenv("TOXI_SESSION", raising=False)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/w/OnesVibe")
     CliRunner().invoke(cli, ["send", "bob", "hi"])
-    assert calls[-1][1] == {"alias": "bob", "body": "hi", "session": "OnesVibe"}
+    assert calls[-1][1] | {"alias": "bob", "body": "hi", "session": "OnesVibe"} == calls[-1][1]
     CliRunner().invoke(cli, ["send", "bob", "hi", "--session", "ops"])
     assert calls[-1][1]["session"] == "ops"
     monkeypatch.delenv("CLAUDE_PROJECT_DIR")

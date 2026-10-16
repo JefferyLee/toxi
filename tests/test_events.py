@@ -48,6 +48,7 @@ def _daemon(tmp_path, monkeypatch, caps=ALL_CAPS, status=2):
     d._hook_msgs, d._hook_due, d._hook_proc, d._hook_started = [], 0.0, None, 0.0
     d._subs, d._parts, d._sel = [], {}, selectors.DefaultSelector()
     d._dropped_parts = deque(maxlen=200)
+    d._transfers, d._out, d._file_meta = {}, {}, {}
     prof = json.dumps({"kind": "agent", "caps": list(caps)}) if caps is not None else None
     d.db.execute("INSERT INTO contacts (public_key, alias, added_at, friend_number, is_online, "
                  "profile_json) VALUES ('CC', 'bob', 1, 5, 1, ?)", (prof,))
@@ -222,13 +223,6 @@ def test_send_uses_parts_for_capable_peers_and_prefix_for_others(tmp_path, monke
     bodies = [e["data"]["body"] for _, e in old.tox.sent]
     assert bodies[0].startswith("[1/2] ") and all("part" not in e["data"] for _, e in old.tox.sent)
     assert len(old._get_messages({"alias": "bob"})["messages"]) == 2
-
-
-def test_send_refuses_bodies_over_limit(tmp_path, monkeypatch):
-    d = _daemon(tmp_path, monkeypatch)
-    with pytest.raises(RpcError) as e:
-        d._send_message({"alias": "bob", "body": "x" * (MAX_BODY_BYTES + 1)})
-    assert e.value.code == "MESSAGE_TOO_LONG"
 
 
 def test_presence_comes_from_toxcore_not_the_db(tmp_path, monkeypatch):

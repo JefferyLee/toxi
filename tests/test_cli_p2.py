@@ -99,6 +99,10 @@ def test_service_commands(monkeypatch, tmp_path):
     assert "✓ daemon restarted" in r.invoke(cli, ["service", "restart"]).output
     assert "service removed" in r.invoke(cli, ["service", "uninstall"]).output
     assert "no service installed" in r.invoke(cli, ["service", "uninstall"]).output
+    # A stale definition on a box without a manager: the daemon keeps running.
+    state.update(installed=True, running=True)
+    monkeypatch.setattr(service, "uninstall", lambda: state.update(installed=False) or True)
+    assert "keeps running" in r.invoke(cli, ["service", "uninstall"]).output
 
 
 def test_daemon_running_treats_half_closed_socket_as_down(monkeypatch):

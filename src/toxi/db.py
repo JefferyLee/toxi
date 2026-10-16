@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS invites (
     used_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS rooms (
+    room_id TEXT PRIMARY KEY,               -- app-layer room (design §4.5): fan-out, no transport group
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL,               -- public key of the creator
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS room_members (
+    room_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    name TEXT,                              -- display name as given on the room card
+    PRIMARY KEY (room_id, public_key)
+);
+
 CREATE TABLE IF NOT EXISTS pending_introductions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_contact_id INTEGER NOT NULL,
@@ -81,7 +95,15 @@ _ADDED_COLUMNS = {
                  ("part_id", "TEXT"),                 # multi-part text: shared id (design §4.3)
                  ("part_i", "INTEGER"),
                  ("part_n", "INTEGER"),
-                 ("read_receipt_at", "INTEGER")],     # outgoing: when the peer reported it read
+                 ("read_receipt_at", "INTEGER"),      # outgoing: when the peer reported it read
+                 ("thread", "TEXT"),                  # design §4.5: conversation thread / topic
+                 ("reply_to", "TEXT"),                # msg_uuid this answers
+                 ("kind", "TEXT"),                    # msg | request | report | ack | relay
+                 ("needs_human", "INTEGER DEFAULT 0"),
+                 ("tags", "TEXT"),                    # JSON list of free-form tags
+                 ("room_id", "TEXT"),                 # app-layer room this message belongs to
+                 ("room_msg_id", "TEXT"),             # id shared by the fan-out copies of one room message
+                 ("sha256", "TEXT")],                 # files: digest declared by the sender / verified by us
 }
 
 

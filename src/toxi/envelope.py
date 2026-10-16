@@ -18,19 +18,85 @@ CAPS = ["profile", "session", "receipt", "part"]
 PROFILE_KEYS = ("kind", "name", "runtime", "model", "host", "operator", "role", "proto", "caps")
 PROFILE_KINDS = ("agent", "human", "service")
 
+# Structured fields a text may carry besides its body (design §4.5).
+KINDS = ("msg", "request", "report", "ack", "relay")
+META_KEYS = ("thread", "reply_to", "kind", "needs_human", "tags", "room", "room_msg")
+
+
+def clean_meta(raw) -> dict:
+    """Validated, bounded thread/reply_to/kind/needs_human/tags; {} when none set."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    thread = str(raw.get("thread") or "").strip()[:64]
+    if thread:
+        out["thread"] = thread
+    reply_to = str(raw.get("reply_to") or "").strip()[:64]
+    if reply_to:
+        out["reply_to"] = reply_to
+    kind = str(raw.get("kind") or "").strip().lower()
+    if kind in KINDS and kind != "msg":
+        out["kind"] = kind
+    if raw.get("needs_human"):
+        out["needs_human"] = True
+    tags = raw.get("tags")
+    if isinstance(tags, list):
+        tags = [str(t).strip()[:24] for t in tags[:8] if str(t).strip()]
+        if tags:
+            out["tags"] = tags
+    for k in ("room", "room_msg"):  # app-layer rooms (design §4.5): room id, shared msg id
+        v = str(raw.get(k) or "").strip()[:64]
+        if v:
+            out[k] = v
+    return out
+
+
+def make_file_meta(data: dict) -> dict:
+    """What is about to arrive as a Tox file transfer: name, size, sha256, the
+    sender's msg_uuid, plus thread/kind/... (design §4.6)."""
+    return {"v": VERSION, "uuid": str(_uuid.uuid4()), "type": "file", "ts": int(time.time()),
+            "data": data}
+
+
+def make_room(room_id: str, name: str, members: list) -> dict:
+    """Room card: who is in a room. `members` = [{"pk": <64 hex>, "name": str}, ...]."""
+    return {"v": VERSION, "uuid": str(_uuid.uuid4()), "type": "room", "ts": int(time.time()),
+            "data": {"op": "create", "id": room_id, "name": name, "members": members}}
+
+
+def clean_room(raw) -> dict | None:
+    """Validated room card data, or None."""
+    if not isinstance(raw, dict):
+        return None
+    rid = str(raw.get("id") or "").strip()[:64]
+    name = str(raw.get("name") or "").strip()[:64]
+    members = []
+    for m in (raw.get("members") or [])[:64]:
+        if not isinstance(m, dict):
+            continue
+        pk = str(m.get("pk") or "").strip().upper()
+        if len(pk) == 64 and all(c in "0123456789ABCDEF" for c in pk):
+            members.append({"pk": pk, "name": str(m.get("name") or "").strip()[:64]})
+    if not rid or not name or not members:
+        return None
+    return {"id": rid, "name": name, "members": members}
+
 
 def text_envelope(uuid: str, ts: int, body: str, session: str | None = None,
-                  part: dict | None = None) -> dict:
+                  part: dict | None = None, meta: dict | None = None) -> dict:
     data = {"body": body}
     if session:
         data["from_session"] = session
     if part:
         data["part"] = {"id": part["id"], "i": part["i"], "n": part["n"]}
+    if meta:
+        data.update(clean_meta(meta))
     return {"v": VERSION, "uuid": uuid, "type": "text", "ts": ts, "data": data}
 
 
-def make_text(body: str, session: str | None = None, part: dict | None = None) -> dict:
-    return text_envelope(str(_uuid.uuid4()), int(time.time()), body, session, part)
+def make_text(body: str, session: str | None = None, part: dict | None = None,
+              meta: dict | None = None) -> dict:
+    return text_envelope(str(_uuid.uuid4()), int(time.time()), body, session, part, meta)
 
 
 def make_receipt(ref_uuid: str, kind: str = "read") -> dict:
@@ -97,20 +163,22 @@ def encode(envelope: dict) -> bytes:
 _PART_STUB = {"id": "x" * 36, "i": 99999, "n": 99999}  # worst-case size of a `part` field
 
 
-def split_text(body: str, limit: int, session: str | None = None, parts: bool = False) -> list[str]:
+def split_text(body: str, limit: int, session: str | None = None, parts: bool = False,
+               meta: dict | None = None) -> list[str]:
     """Split `body` into chunks whose text envelopes each encode to <= `limit` bytes.
 
     A body that fits is returned as is. Otherwise, with `parts=False` (v1 peers)
     each chunk gets an "[i/n] " prefix; with `parts=True` chunks are returned
     bare and the caller sends them with a `part` field for reassembly. Splits
-    fall on character boundaries.
+    fall on character boundaries. `meta` (thread etc.) rides on every chunk and
+    is budgeted for.
     """
-    if len(encode(make_text(body, session))) <= limit:
+    if len(encode(make_text(body, session, None, meta))) <= limit:
         return [body]
     if parts:
-        budget = limit - len(encode(make_text("", session, _PART_STUB)))
+        budget = limit - len(encode(make_text("", session, _PART_STUB, meta)))
     else:
-        budget = limit - len(encode(make_text("", session))) - len("[999/999] ")
+        budget = limit - len(encode(make_text("", session, None, meta))) - len("[999/999] ")
     chunks, cur, size = [], "", 0
     for ch in body:
         cost = len(json.dumps(ch, ensure_ascii=False).encode("utf-8")) - 2

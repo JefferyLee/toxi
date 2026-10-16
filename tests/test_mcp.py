@@ -34,7 +34,8 @@ def test_tools_call_expected_rpcs(monkeypatch):
     monkeypatch.setenv("TOXI_SESSION", "toxi-tests")
     import asyncio
     assert asyncio.run(mcp_server.send_message("bob", "hi"))["status"] == "queued"
-    assert ("send_message", {"alias": "bob", "body": "hi", "session": "toxi-tests"}) in calls
+    sent = next(p for m, p in calls if m == "send_message")
+    assert (sent["alias"], sent["body"], sent["session"]) == ("bob", "hi", "toxi-tests")
 
     assert mcp_server.list_contacts() == {"count": 0, "contacts": []}
     assert mcp_server.get_status() == {"queue_size": 0}
@@ -184,7 +185,7 @@ def test_wait_for_message_wakes_on_event(tmp_path, monkeypatch):
     _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
     calls = []
 
-    def take(alias=None, cwd=None):
+    def take(alias=None, cwd=None, thread=None):
         calls.append((alias, cwd))
         return [] if len(calls) == 1 else [{"msg_uuid": "1", "alias": "codex", "msg_type": "text",
                                             "content": "hi", "trust": "observer"}]
@@ -206,7 +207,7 @@ def test_wait_for_message_polls_when_daemon_cannot_stream(tmp_path, monkeypatch)
     _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
     n = {"take": 0}
 
-    def take(alias=None, cwd=None):
+    def take(alias=None, cwd=None, thread=None):
         n["take"] += 1
         return [] if n["take"] < 2 else [{"msg_uuid": "1", "alias": "codex", "msg_type": "text",
                                           "content": "late", "trust": "observer"}]

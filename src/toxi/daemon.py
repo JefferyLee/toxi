@@ -5,6 +5,7 @@ loop both drives `tox_iterate` and serves IPC requests from one thread: we wait
 on `accept()` with a timeout derived from `tox_iteration_interval`, so we never
 block the protocol for long. This sidesteps all locking.
 """
+import hashlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from .tox import (
     FILE_CONTROL_RESUME,
     FILE_KIND_DATA,
     MAX_MESSAGE_LENGTH,
+    NO_FILE,
     NO_FRIEND,
     Tox,
 )
@@ -36,7 +38,8 @@ TEXT_RATE_LIMIT = 60  # incoming texts accepted per contact per minute (PRD §4.
 REQUEST_RATE_LIMIT = 5  # incoming friend requests accepted per minute
 INVITE_TTL = 600  # seconds a `toxi pair` invite stays valid
 PART_TIMEOUT = 60  # seconds to wait for the rest of a multi-part text before storing it partial
-MAX_BODY_BYTES = 64 * 1024  # largest text body (after reassembly); bigger payloads should be files
+MAX_BODY_BYTES = 64 * 1024  # largest text body (after reassembly); bigger bodies go as a file
+FILE_META_TTL = 300  # seconds a `file` meta waits for its transfer (or the other way round)
 
 # Map a filename extension to one of our media msg_types (PRD: image/voice/video).
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "tiff", "tif", "svg"}
@@ -53,6 +56,14 @@ def _classify_media(filename: str) -> str:
     if ext in _VIDEO_EXTS:
         return "video"
     return "file"
+
+
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _safe_filename(raw: bytes) -> str:
@@ -94,7 +105,7 @@ def _harden_permissions() -> None:
 
 
 def _with_profile(row) -> dict:
-    """Row -> dict, with the contact's profile_json column parsed into `profile`."""
+    """Row -> dict: profile_json parsed into `profile`, meta columns normalised."""
     d = dict(row)
     pj = d.pop("profile_json", None)
     if "profile" not in d:
@@ -102,7 +113,60 @@ def _with_profile(row) -> dict:
             d["profile"] = json.loads(pj) if pj else None
         except ValueError:
             d["profile"] = None
+    if "kind" in d:
+        d["kind"] = d["kind"] or "msg"
+    if "needs_human" in d:
+        d["needs_human"] = bool(d["needs_human"])
+    if "tags" in d:
+        try:
+            d["tags"] = json.loads(d["tags"]) if d["tags"] else []
+        except ValueError:
+            d["tags"] = []
     return d
+
+
+def _row_meta(row) -> dict:
+    """The structured fields stored on an outgoing row, for re-encoding."""
+    keys = row.keys()
+    raw = {k: row[k] for k in envelope.META_KEYS if k in keys}
+    if "room_id" in keys:
+        raw["room"], raw["room_msg"] = row["room_id"], row["room_msg_id"]
+    if raw.get("tags"):
+        try:
+            raw["tags"] = json.loads(raw["tags"])
+        except ValueError:
+            raw["tags"] = None
+    return envelope.clean_meta(raw)
+
+
+def _meta_values(meta: dict) -> tuple:
+    """(thread, reply_to, kind, needs_human, tags_json, room_id, room_msg_id) for an INSERT."""
+    return (meta.get("thread"), meta.get("reply_to"), meta.get("kind"),
+            1 if meta.get("needs_human") else 0,
+            json.dumps(meta["tags"], ensure_ascii=False) if meta.get("tags") else None,
+            meta.get("room"), meta.get("room_msg"))
+
+
+def _merge_room_sends(msgs: list) -> list:
+    """Collapse the fan-out copies of one outgoing room message (same room_msg_id)
+    into a single row carrying `recipients: [{alias, status}]`."""
+    out, groups = [], {}
+    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "failed": -1}
+    for m in msgs:
+        rid = m.get("room_msg_id")
+        if not rid or m.get("direction") != "out":
+            out.append(m)
+            continue
+        g = groups.get(rid)
+        if g is None:
+            g = groups[rid] = dict(m, recipients=[])
+            out.append(g)
+        g["recipients"].append({"alias": m["alias"], "status": m["status"]})
+        if rank.get(m["status"], 0) < rank.get(g["status"], 0):
+            g["status"] = m["status"]
+    for g in groups.values():
+        g["recipients"].sort(key=lambda r: r["alias"])
+    return out
 
 
 def _caps(row) -> list:
@@ -118,7 +182,8 @@ def _row_payload(row) -> bytes:
     part = ({"id": row["part_id"], "i": row["part_i"], "n": row["part_n"]}
             if row["part_id"] else None)
     return envelope.encode(envelope.text_envelope(
-        row["msg_uuid"], row["created_at"], row["content"], row["from_session"], part))
+        row["msg_uuid"], row["created_at"], row["content"], row["from_session"], part,
+        _row_meta(row)))
 
 
 def _merge_parts(msgs: list) -> list:
@@ -182,6 +247,8 @@ class Daemon:
         self._last_sweep = 0.0
         self._started_at = time.time()
         self._transfers: dict[tuple[int, int], dict] = {}  # in-flight incoming files
+        self._out: dict[tuple[int, int], dict] = {}  # in-flight outgoing files (design §4.6)
+        self._file_meta: dict[tuple[int, str, int], dict] = {}  # `file` metas awaiting a transfer
         self._hook_msgs: list[dict] = []  # new messages awaiting the on_message hook
         self._hook_due = 0.0
         self._hook_proc: subprocess.Popen | None = None
@@ -213,6 +280,13 @@ class Daemon:
             "get_profile": self._get_profile,
             "set_profile": self._set_profile,
             "create_invite": self._create_invite,
+            "list_threads": self._list_threads,
+            "create_room": self._create_room,
+            "list_rooms": self._list_rooms,
+            "get_room": self._get_room,
+            "send_room": self._send_room,
+            "room_members": self._room_members_rpc,
+            "send_file": self._send_file,
             "shutdown": self._shutdown,
         }
 
@@ -230,6 +304,7 @@ class Daemon:
         tox.on_file_recv(self._on_file_recv)
         tox.on_file_recv_chunk(self._on_file_recv_chunk)
         tox.on_file_recv_control(self._on_file_recv_control)
+        tox.on_file_chunk_request(self._on_file_chunk_request)
         log.info("Tox ID: %s", tox.self_get_address_hex())
         return tox
 
@@ -283,20 +358,26 @@ class Daemon:
             return
         self._emit("contact.online" if online else "contact.offline",
                    {"alias": row["alias"]}, row["alias"])
+        if not online:
+            self._abort_outgoing(friend_number)
         if online:
             self._send_profile(friend_number)
+            self._send_room_cards(friend_number)
             self._flush_queue(row["id"], friend_number)
 
     def _flush_queue(self, contact_id: int, friend_number: int) -> None:
         """Resend this friend's queued messages in send order (PRD §4.3.4).
         Stop at the first failure so ordering is preserved for the next attempt."""
         rows = self.db.execute(
-            "SELECT msg_uuid, content, created_at, from_session, part_id, part_i, part_n "
-            "FROM messages WHERE contact_id=? AND direction='out' AND status='queued' "
+            "SELECT * FROM messages WHERE contact_id=? AND direction='out' AND status='queued' "
             "ORDER BY created_at ASC, id ASC",
             (contact_id,),
         ).fetchall()
         for row in rows:
+            if row["msg_type"] != "text":
+                if not self._start_file_transfer(row, friend_number):
+                    break
+                continue
             if not self.tox.friend_send_message(friend_number, _row_payload(row)):
                 break
             self.db.execute(
@@ -311,6 +392,12 @@ class Daemon:
         """Resend 'sent' messages still unacked past ack_timeout (if the friend is
         online), and give up on ones older than fail_after (PRD §4.4.1, simplified)."""
         now = int(time.time())
+        # File rows marked sent whose transfer is no longer running (daemon restart,
+        # link drop toxcore did not report): queue them again so the flush restarts them.
+        active = [t["msg_uuid"] for t in self._out.values()] or [""]
+        self.db.execute(
+            f"UPDATE messages SET status='queued' WHERE direction='out' AND msg_type!='text' "
+            f"AND status='sent' AND msg_uuid NOT IN ({','.join('?' * len(active))})", active)
         # Queued rows for friends who are online (toxcore refused a send earlier).
         for c in self.db.execute(
             "SELECT id, friend_number FROM contacts WHERE is_online=1 AND friend_number IS NOT NULL"
@@ -318,9 +405,11 @@ class Daemon:
             self._flush_queue(c["id"], c["friend_number"])
         rows = self.db.execute(
             "SELECT m.msg_uuid, m.content, m.created_at, m.last_attempt_at, m.from_session, "
-            "m.part_id, m.part_i, m.part_n, c.friend_number, c.is_online FROM messages m "
+            "m.part_id, m.part_i, m.part_n, m.thread, m.reply_to, m.kind, m.needs_human, m.tags, "
+            "m.room_id, m.room_msg_id, c.friend_number, c.is_online FROM messages m "
             "JOIN contacts c ON c.id=m.contact_id "
-            "WHERE m.direction='out' AND m.status='sent' AND m.delivered_at IS NULL"
+            "WHERE m.direction='out' AND m.msg_type='text' AND m.status='sent' "
+            "AND m.delivered_at IS NULL"
         ).fetchall()
         for r in rows:
             if now - r["created_at"] > self.fail_after:
@@ -365,6 +454,14 @@ class Daemon:
             self._receive_profile(friend_number, env)
             return
 
+        if etype == "room":
+            self._receive_room(friend_number, env)
+            return
+
+        if etype == "file":
+            self._receive_file_meta(friend_number, env)
+            return
+
         if etype != "text":
             return
 
@@ -384,18 +481,19 @@ class Daemon:
             return
         body = data.get("body", "")
         session = str(data.get("from_session") or "")[:64] or None
+        meta = envelope.clean_meta(data)
         # INSERT OR IGNORE: msg_uuid is UNIQUE, so a re-delivered message is dropped.
         cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
-            "content, created_at, received_at, status, from_session) "
-            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?)",
+            "content, created_at, received_at, status, from_session, "
+            "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id) "
+            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?)",
             (env["uuid"], row["id"], body, env.get("ts", int(time.time())), int(time.time()),
-             session),
+             session, *_meta_values(meta)),
         )
         self.db.commit()
         if cur.rowcount:
-            self._queue_hook(row["alias"], env["uuid"], "text")
-            self._announce(env["uuid"], row["alias"])
+            self._stored(env["uuid"], row["alias"], meta)
         # ACK even for a duplicate, so the sender can clear it (PRD §4.4.1).
         self.tox.friend_send_message(friend_number, envelope.encode(envelope.make_ack(env["uuid"])))
 
@@ -432,6 +530,7 @@ class Daemon:
                 "n": n, "got": {}, "first": time.time(), "contact_id": row["id"],
                 "alias": row["alias"], "ts": env.get("ts", int(time.time())),
                 "session": str(data.get("from_session") or "")[:64] or None, "size": 0,
+                "meta": envelope.clean_meta(data),
             }
         if i not in buf["got"]:
             body = str(data.get("body", ""))
@@ -455,19 +554,30 @@ class Daemon:
         now = int(time.time())
         cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
-            "content, created_at, received_at, status, from_session) "
-            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?)",
-            (key[1], buf["contact_id"], body, buf["ts"], now, buf["session"]),
+            "content, created_at, received_at, status, from_session, "
+            "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id) "
+            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (key[1], buf["contact_id"], body, buf["ts"], now, buf["session"],
+             *_meta_values(buf["meta"])),
         )
         self.db.commit()
         if cur.rowcount:
-            self._queue_hook(buf["alias"], key[1], "text")
-            self._announce(key[1], buf["alias"])
+            self._stored(key[1], buf["alias"], buf["meta"])
+
+    def _stored(self, msg_uuid: str, alias: str, meta: dict) -> None:
+        """A text was stored: wake hooks and flag unless it is a mere `ack`
+        (design §4.5: acknowledgements never wake anyone), always tell subscribers."""
+        wake = meta.get("kind") != "ack"
+        if wake:
+            self._queue_hook(alias, msg_uuid, "text")
+        self._announce(msg_uuid, alias, wake=wake)
 
     def _tick_parts(self) -> None:
         now = time.time()
         for key in [k for k, b in self._parts.items() if now - b["first"] > PART_TIMEOUT]:
             self._finish_parts(key, complete=False)
+        for key in [k for k, m in self._file_meta.items() if now - m["ts"] > FILE_META_TTL]:
+            del self._file_meta[key]
 
     # --- read receipts (design §4.3) ---
     def _receive_receipt(self, friend_number: int, env: dict) -> None:
@@ -501,12 +611,14 @@ class Daemon:
                     r["friend_number"], envelope.encode(envelope.make_receipt(r["msg_uuid"])))
 
     # --- event stream for subscribers (design §4.3) ---
-    def _announce(self, msg_uuid: str, alias: str) -> None:
-        """A new incoming message was stored: bump inbox.flag and tell subscribers."""
-        try:
-            paths.inbox_flag_path().touch()
-        except OSError:
-            log.exception("could not touch inbox.flag")
+    def _announce(self, msg_uuid: str, alias: str, wake: bool = True) -> None:
+        """A new incoming message was stored: bump inbox.flag (unless `wake` is
+        off) and tell subscribers."""
+        if wake:
+            try:
+                paths.inbox_flag_path().touch()
+            except OSError:
+                log.exception("could not touch inbox.flag")
         msg = self._get_message({"msg_uuid": msg_uuid}).get("message")
         if msg:
             self._emit("message.new", msg, alias)
@@ -629,6 +741,188 @@ class Daemon:
             prof["proto"], prof["caps"] = envelope.VERSION, list(envelope.CAPS)
         return prof
 
+    # --- rooms (design §4.5): app-layer fan-out, members identified by public key ---
+    def _my_pk(self) -> str:
+        return self.tox.self_get_address_hex()[:64]
+
+    def _resolve_room(self, ref: str):
+        ref = (ref or "").strip()
+        row = self.db.execute(
+            "SELECT * FROM rooms WHERE room_id=? OR name=? OR room_id LIKE ? "
+            "ORDER BY created_at DESC", (ref, ref, ref + "%"),
+        ).fetchall()
+        if not row:
+            raise RpcError("ROOM_NOT_FOUND", f"no room named or starting with {ref!r}")
+        if len(row) > 1 and not any(r["room_id"] == ref or r["name"] == ref for r in row):
+            raise RpcError("AMBIGUOUS", f"{ref!r} matches several rooms")
+        return next((r for r in row if r["room_id"] == ref or r["name"] == ref), row[0])
+
+    def _room_card(self, room_id: str) -> bytes:
+        room = self.db.execute("SELECT name FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        members = [{"pk": r["public_key"], "name": r["name"] or ""} for r in self.db.execute(
+            "SELECT public_key, name FROM room_members WHERE room_id=?", (room_id,)).fetchall()]
+        return envelope.encode(envelope.make_room(room_id, room["name"], members))
+
+    def _create_room(self, params: dict) -> dict:
+        name = str(params.get("name") or "").strip()[:64]
+        aliases = [str(a).strip() for a in params.get("aliases") or [] if str(a).strip()]
+        if not name or not aliases:
+            raise RpcError("INVALID_ROOM", "a room needs a name and at least one member alias")
+        qs = ",".join("?" * len(aliases))
+        rows = self.db.execute(
+            f"SELECT alias, public_key, friend_number, is_online, profile_json FROM contacts "
+            f"WHERE alias IN ({qs})", aliases).fetchall()
+        found = {r["alias"]: r for r in rows}
+        missing = [a for a in aliases if a not in found]
+        if missing:
+            raise RpcError("CONTACT_NOT_FOUND", f"not a contact: {', '.join(missing)}")
+        room_id, now = str(_uuid.uuid4()), int(time.time())
+        me = self.profile.get("name") or self.tox.self_get_name().decode("utf-8", "replace")
+        members = [(self._my_pk(), me)]
+        for r in rows:
+            prof = {}
+            try:
+                prof = json.loads(r["profile_json"]) if r["profile_json"] else {}
+            except ValueError:
+                pass
+            members.append((r["public_key"], prof.get("name") or r["alias"]))
+        self.db.execute("INSERT INTO rooms (room_id, name, created_by, created_at) VALUES (?,?,?,?)",
+                        (room_id, name, self._my_pk(), now))
+        self.db.executemany("INSERT OR REPLACE INTO room_members (room_id, public_key, name) "
+                            "VALUES (?, ?, ?)", [(room_id, pk, n) for pk, n in members])
+        self.db.commit()
+        card = self._room_card(room_id)
+        told = [r["alias"] for r in rows
+                if r["friend_number"] is not None and r["is_online"]
+                and self.tox.friend_send_message(r["friend_number"], card)]
+        return {"room_id": room_id, "name": name, "members": len(members), "card_sent_to": told}
+
+    def _room_members_rpc(self, params: dict) -> dict:
+        """Add or remove members of a room I created; every member gets the new card."""
+        room = self._resolve_room(params.get("room", ""))
+        if room["created_by"] != self._my_pk():
+            raise RpcError("NOT_ROOM_OWNER", "only the room's creator can change its members")
+        add = [str(a).strip() for a in params.get("add") or [] if str(a).strip()]
+        remove = [str(a).strip() for a in params.get("remove") or [] if str(a).strip()]
+        if not add and not remove:
+            raise RpcError("INVALID_ROOM", "nothing to add or remove")
+        for alias in add + remove:
+            if not self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (alias,)).fetchone():
+                raise RpcError("CONTACT_NOT_FOUND", f"not a contact: {alias}")
+        for alias in add:
+            c = self.db.execute("SELECT public_key, profile_json FROM contacts WHERE alias=?",
+                                (alias,)).fetchone()
+            try:
+                name = (json.loads(c["profile_json"]) if c["profile_json"] else {}).get("name")
+            except ValueError:
+                name = None
+            self.db.execute("INSERT OR REPLACE INTO room_members (room_id, public_key, name) "
+                            "VALUES (?, ?, ?)", (room["room_id"], c["public_key"], name or alias))
+        for alias in remove:
+            self.db.execute("DELETE FROM room_members WHERE room_id=? AND public_key="
+                            "(SELECT public_key FROM contacts WHERE alias=?)", (room["room_id"], alias))
+        self.db.commit()
+        card = self._room_card(room["room_id"])
+        told = []
+        for m in self._room_members(room["room_id"]):
+            if m["me"] or not m["alias"] or not m["online"]:
+                continue
+            fn = self.db.execute("SELECT friend_number FROM contacts WHERE alias=?",
+                                 (m["alias"],)).fetchone()["friend_number"]
+            if fn is not None and self.tox.friend_send_message(fn, card):
+                told.append(m["alias"])
+        # Removed members that are online hear about it too (the card no longer lists them).
+        for alias in remove:
+            c = self.db.execute("SELECT friend_number, is_online FROM contacts WHERE alias=?",
+                                (alias,)).fetchone()
+            if c["friend_number"] is not None and c["is_online"]:
+                self.tox.friend_send_message(c["friend_number"], card)
+        return {"room_id": room["room_id"], "name": room["name"],
+                "members": self._room_members(room["room_id"]), "card_sent_to": told}
+
+    def _send_room_cards(self, friend_number: int) -> None:
+        """A member came online: (re)send the cards of rooms I created that include them."""
+        c = self.db.execute("SELECT public_key FROM contacts WHERE friend_number=?",
+                            (friend_number,)).fetchone()
+        if c is None:
+            return
+        rows = self.db.execute(
+            "SELECT r.room_id FROM rooms r JOIN room_members m ON m.room_id=r.room_id "
+            "WHERE r.created_by=? AND m.public_key=?", (self._my_pk(), c["public_key"])).fetchall()
+        for r in rows:
+            self.tox.friend_send_message(friend_number, self._room_card(r["room_id"]))
+
+    def _receive_room(self, friend_number: int, env: dict) -> None:
+        card = envelope.clean_room(env.get("data"))
+        sender = self.db.execute("SELECT public_key FROM contacts WHERE friend_number=?",
+                                 (friend_number,)).fetchone()
+        if card is None or sender is None:
+            return
+        existing = self.db.execute("SELECT created_by FROM rooms WHERE room_id=?",
+                                   (card["id"],)).fetchone()
+        if existing is not None and existing["created_by"] != sender["public_key"]:
+            log.warning("ignored a room card for %s from a non-creator", card["id"][:8])
+            return
+        now = int(time.time())
+        if self._my_pk() not in {m["pk"] for m in card["members"]}:
+            # The creator took me out: forget the room (history stays).
+            self.db.execute("DELETE FROM room_members WHERE room_id=?", (card["id"],))
+            self.db.execute("DELETE FROM rooms WHERE room_id=?", (card["id"],))
+            self.db.commit()
+            log.info("removed from room %s (%s)", card["name"], card["id"][:8])
+            return
+        self.db.execute("INSERT OR REPLACE INTO rooms (room_id, name, created_by, created_at) "
+                        "VALUES (?, ?, ?, COALESCE((SELECT created_at FROM rooms WHERE room_id=?), ?))",
+                        (card["id"], card["name"], sender["public_key"], card["id"], now))
+        self.db.execute("DELETE FROM room_members WHERE room_id=?", (card["id"],))
+        self.db.executemany("INSERT INTO room_members (room_id, public_key, name) VALUES (?, ?, ?)",
+                            [(card["id"], m["pk"], m["name"]) for m in card["members"]])
+        self.db.commit()
+        log.info("room %s (%s) card from friend %d", card["name"], card["id"][:8], friend_number)
+
+    def _room_members(self, room_id: str) -> list:
+        """Members with their local view: alias (if a contact), presence, is it me."""
+        me = self._my_pk()
+        rows = self.db.execute(
+            "SELECT m.public_key, m.name, c.alias, c.is_online FROM room_members m "
+            "LEFT JOIN contacts c ON c.public_key=m.public_key WHERE m.room_id=?", (room_id,),
+        ).fetchall()
+        return [{"public_key": r["public_key"], "name": r["name"], "alias": r["alias"],
+                 "online": bool(r["is_online"]), "me": r["public_key"] == me} for r in rows]
+
+    def _list_rooms(self, params: dict) -> dict:
+        rows = self.db.execute(
+            "SELECT r.room_id, r.name, r.created_by, r.created_at, "
+            "(SELECT COUNT(*) FROM room_members m WHERE m.room_id=r.room_id) AS members, "
+            "(SELECT COUNT(*) FROM messages x WHERE x.room_id=r.room_id AND x.direction='in' "
+            " AND x.read_at IS NULL) AS unread, "
+            "(SELECT MAX(created_at) FROM messages x WHERE x.room_id=r.room_id) AS last_at "
+            "FROM rooms r ORDER BY COALESCE(last_at, r.created_at) DESC").fetchall()
+        me = self._my_pk()
+        return {"rooms": [dict(r, mine=r["created_by"] == me) for r in rows]}
+
+    def _get_room(self, params: dict) -> dict:
+        room = self._resolve_room(params.get("room", ""))
+        return {"room": dict(room, mine=room["created_by"] == self._my_pk(),
+                             members=self._room_members(room["room_id"]))}
+
+    def _send_room(self, params: dict) -> dict:
+        """Fan a text out to every member of a room that is one of my contacts."""
+        room = self._resolve_room(params.get("room", ""))
+        room_msg = str(_uuid.uuid4())
+        results, unreachable = [], []
+        for m in self._room_members(room["room_id"]):
+            if m["me"]:
+                continue
+            if not m["alias"]:
+                unreachable.append(m["name"] or m["public_key"][:8])
+                continue
+            p = dict(params, alias=m["alias"], room=room["room_id"], room_msg=room_msg)
+            r = self._send_message(p)
+            results.append({"alias": m["alias"], "status": r["status"]})
+        return {"room_msg_id": room_msg, "room_id": room["room_id"], "name": room["name"],
+                "sent": results, "unreachable": unreachable}
+
     # --- invites (design §4.2) ---
     def _accept_invited(self, pk: str, name: str, nonce: str) -> bool:
         """Auto-accept a friend request that answers one of our live invites."""
@@ -712,8 +1006,12 @@ class Daemon:
             self._discard_transfer(key)
 
     def _on_file_recv_control(self, friend_number: int, file_number: int, control: int) -> None:
+        key = (friend_number, file_number)
         if control == FILE_CONTROL_CANCEL:
-            self._discard_transfer((friend_number, file_number))
+            if key in self._out:
+                self._finish_outgoing(key, "failed")  # the receiver declined it
+            else:
+                self._discard_transfer(key)
 
     def _finish_transfer(self, key: tuple[int, int]) -> None:
         tr = self._transfers.pop(key, None)
@@ -721,6 +1019,7 @@ class Daemon:
             return
         try:
             tr["fh"].close()
+            os.chmod(tr["part_path"], 0o600)  # received files are private, like the rest
             os.replace(tr["part_path"], tr["final_path"])
         except OSError:
             log.exception("could not finalize received file")
@@ -733,12 +1032,189 @@ class Daemon:
         )
         self.db.commit()
         if cur.rowcount:
+            uid = tr["uuid"]
+            name = tr["final_path"].name.split("__", 1)[-1]
+            meta = self._file_meta.pop((key[0], name, tr["received"]), None)
+            if meta:
+                uid = self._attach_file_meta(uid, tr["final_path"], meta)
             alias = self.db.execute(
                 "SELECT alias FROM contacts WHERE id=?", (tr["contact_id"],)
             ).fetchone()["alias"]
-            self._queue_hook(alias, tr["uuid"], tr["msg_type"])
-            self._announce(tr["uuid"], alias)
+            self._queue_hook(alias, uid, tr["msg_type"])
+            self._announce(uid, alias)
         log.info("received %s message from contact %d", tr["msg_type"], tr["contact_id"])
+
+    # --- file metadata (design §4.6): rides as a `file` envelope next to the transfer ---
+    def _receive_file_meta(self, friend_number: int, env: dict) -> None:
+        d = env.get("data") or {}
+        name = _safe_filename(str(d.get("name") or "").encode("utf-8", "replace"))
+        try:
+            size = int(d.get("size") or 0)
+        except (TypeError, ValueError):
+            return
+        meta = {"msg_uuid": str(d.get("msg_uuid") or "")[:64],
+                "sha256": str(d.get("sha256") or "")[:64].lower(),
+                "session": str(d.get("from_session") or "")[:64] or None,
+                "meta": envelope.clean_meta(d), "ts": time.time()}
+        if not meta["msg_uuid"]:
+            return
+        # The (small) meta can arrive after the transfer finished: attach it then.
+        row = self.db.execute(
+            "SELECT m.msg_uuid, m.content FROM messages m JOIN contacts c ON c.id=m.contact_id "
+            "WHERE c.friend_number=? AND m.direction='in' AND m.msg_type!='text' "
+            "AND m.content LIKE ? AND m.received_at>=? AND m.sha256 IS NULL "
+            "ORDER BY m.id DESC LIMIT 1",
+            (friend_number, f"%__{name}", int(time.time()) - FILE_META_TTL),
+        ).fetchone()
+        if row is not None:
+            try:
+                if Path(row["content"]).stat().st_size == size:
+                    self._attach_file_meta(row["msg_uuid"], Path(row["content"]), meta)
+                    return
+            except OSError:
+                pass
+        self._file_meta[(friend_number, name, size)] = meta
+
+    def _attach_file_meta(self, row_uuid: str, path: Path, meta: dict) -> str:
+        """Give a received file the sender's msg_uuid (so replies and receipts line
+        up), its thread/kind/room fields, and a verified digest. Returns the uuid."""
+        m = dict(meta["meta"])
+        tags = list(m.get("tags") or [])
+        digest = meta["sha256"] or None
+        if digest:
+            try:
+                if _sha256(path) != digest:
+                    tags.append("sha256-mismatch")
+                    log.warning("sha256 mismatch on received file %s", path.name)
+            except OSError:
+                pass
+        if tags:
+            m["tags"] = tags
+        new_uuid = row_uuid
+        taken = self.db.execute("SELECT 1 FROM messages WHERE msg_uuid=?",
+                                (meta["msg_uuid"],)).fetchone()
+        if not taken:
+            new_uuid = meta["msg_uuid"]
+        self.db.execute(
+            "UPDATE messages SET msg_uuid=?, sha256=?, from_session=?, thread=?, reply_to=?, "
+            "kind=?, needs_human=?, tags=?, room_id=?, room_msg_id=? WHERE msg_uuid=?",
+            (new_uuid, digest, meta.get("session"), *_meta_values(m), row_uuid),
+        )
+        self.db.commit()
+        return new_uuid
+
+    # --- outgoing files (design §4.6) ---
+    def _send_file(self, params: dict) -> dict:
+        alias = params.get("alias", "").strip()
+        path = Path(str(params.get("path") or "")).expanduser()
+        contact = self.db.execute(
+            "SELECT id, friend_number FROM contacts WHERE alias=?", (alias,)).fetchone()
+        if contact is None:
+            raise RpcError("CONTACT_NOT_FOUND", f"no contact named {alias!r}")
+        if not path.is_file():
+            raise RpcError("FILE_NOT_FOUND", f"no such file: {path}")
+        size = path.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise RpcError("FILE_TOO_LARGE",
+                           f"{size} bytes; the limit is {MAX_FILE_BYTES // (1024 * 1024)} MB")
+        meta = envelope.clean_meta(params)
+        session = str(params.get("session") or "").strip()[:64] or None
+        uid, now = str(_uuid.uuid4()), int(time.time())
+        digest = _sha256(path)
+        kind = _classify_media(path.name)
+        self.db.execute(
+            "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, created_at, "
+            "status, from_session, sha256, thread, reply_to, kind, needs_human, tags, room_id, "
+            "room_msg_id) VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uid, contact["id"], kind, str(path.resolve()), now, session, digest,
+             *_meta_values(meta)),
+        )
+        self.db.commit()
+        fn = contact["friend_number"]
+        started = False
+        if fn is not None and self.tox.friend_get_connection_status(fn) != 0:
+            row = self.db.execute("SELECT * FROM messages WHERE msg_uuid=?", (uid,)).fetchone()
+            started = self._start_file_transfer(row, fn)
+        return {"msg_uuid": uid, "status": "sent" if started else "queued", "msg_type": kind,
+                "name": path.name, "size": size, "sha256": digest}
+
+    def _start_file_transfer(self, row, friend_number: int) -> bool:
+        """Announce the file's metadata, then offer the transfer. False if it could
+        not start (the row stays queued, or is failed when the file is gone)."""
+        path = Path(row["content"])
+        if not path.is_file():
+            self.db.execute("UPDATE messages SET status='failed' WHERE msg_uuid=?", (row["msg_uuid"],))
+            self.db.commit()
+            log.warning("file to send is gone: %s", path)
+            return False
+        size = path.stat().st_size
+        data = {"msg_uuid": row["msg_uuid"], "name": path.name, "size": size,
+                "sha256": row["sha256"], "from_session": row["from_session"], **_row_meta(row)}
+        self.tox.friend_send_message(friend_number, envelope.encode(envelope.make_file_meta(data)))
+        number = self.tox.file_send(friend_number, FILE_KIND_DATA, size, path.name.encode("utf-8"))
+        if number == NO_FILE:
+            return False
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            log.exception("could not open %s for sending", path)
+            self.tox.file_control(friend_number, number, FILE_CONTROL_CANCEL)
+            return False
+        self._out[(friend_number, number)] = {"fh": fh, "msg_uuid": row["msg_uuid"],
+                                              "size": size, "path": str(path)}
+        self.db.execute("UPDATE messages SET status='sent', last_attempt_at=? WHERE msg_uuid=?",
+                        (int(time.time()), row["msg_uuid"]))
+        self.db.commit()
+        log.info("sending %s (%d bytes) to friend %d", path.name, size, friend_number)
+        return True
+
+    def _on_file_chunk_request(self, friend_number: int, file_number: int, position: int,
+                               length: int) -> None:
+        key = (friend_number, file_number)
+        tr = self._out.get(key)
+        if tr is None:
+            return
+        if length == 0:  # the receiver has the whole file
+            self._finish_outgoing(key, "delivered")
+            return
+        try:
+            tr["fh"].seek(position)
+            data = tr["fh"].read(length)
+        except OSError:
+            log.exception("could not read %s while sending", tr["path"])
+            self.tox.file_control(friend_number, file_number, FILE_CONTROL_CANCEL)
+            self._finish_outgoing(key, "failed")
+            return
+        self.tox.file_send_chunk(friend_number, file_number, position, data)
+
+    def _finish_outgoing(self, key: tuple[int, int], status: str) -> None:
+        tr = self._out.pop(key, None)
+        if tr is None:
+            return
+        try:
+            tr["fh"].close()
+        except OSError:
+            pass
+        now = int(time.time())
+        if status == "delivered":
+            self.db.execute("UPDATE messages SET status='delivered', delivered_at=? "
+                            "WHERE msg_uuid=? AND status='sent'", (now, tr["msg_uuid"]))
+        elif status == "queued":  # link dropped: start over when they are back
+            self.db.execute("UPDATE messages SET status='queued' WHERE msg_uuid=? AND status='sent'",
+                            (tr["msg_uuid"],))
+        else:
+            self.db.execute("UPDATE messages SET status='failed' WHERE msg_uuid=?", (tr["msg_uuid"],))
+        self.db.commit()
+        alias = self._alias_of(key[0])
+        if status == "delivered":
+            self._emit("delivery", {"msg_uuid": tr["msg_uuid"], "alias": alias}, alias)
+        elif status == "failed":
+            self._emit("send.failed", {"msg_uuid": tr["msg_uuid"], "alias": alias,
+                                       "reason": "file transfer cancelled by the receiver"}, alias)
+
+    def _abort_outgoing(self, friend_number: int) -> None:
+        for key in [k for k in self._out if k[0] == friend_number]:
+            self._finish_outgoing(key, "queued")
 
     # --- on_message hook ---
     def _queue_hook(self, alias: str, msg_uuid: str, msg_type: str) -> None:
@@ -1059,11 +1535,19 @@ class Daemon:
             raise RpcError("CONTACT_NOT_FOUND", f"no contact named {alias!r}")
         size = len(body.encode("utf-8"))
         if size > MAX_BODY_BYTES:
-            raise RpcError("MESSAGE_TOO_LONG",
-                           f"body is {size} bytes; the limit is {MAX_BODY_BYTES // 1024} KB — "
-                           f"send it as a file instead")
+            # Too big for a text: ship it as a file (one transfer, one ack) instead.
+            out = paths.ensure_media_dir() / "outgoing"
+            out.mkdir(exist_ok=True)
+            os.chmod(out, 0o700)
+            p = out / f"{_uuid.uuid4()}.txt"
+            p.write_text(body, encoding="utf-8")
+            os.chmod(p, 0o600)
+            res = self._send_file(dict(params, path=str(p)))
+            res["as_file"] = str(p)
+            return res
 
         session = str(params.get("session") or "").strip()[:64] or None
+        meta = envelope.clean_meta(params)
         fn = contact["friend_number"]
         # Presence straight from toxcore: the DB flag can lag behind a dropped link.
         online = fn is not None and self.tox.friend_get_connection_status(fn) != 0
@@ -1073,19 +1557,22 @@ class Daemon:
         # A body too long for one Tox message goes out in parts: reassembled by
         # peers that advertise the `part` cap, "[i/n] "-prefixed for older ones.
         use_parts = "part" in _caps(contact)
-        chunks = envelope.split_text(body, MAX_MESSAGE_LENGTH, session, parts=use_parts)
+        chunks = envelope.split_text(body, MAX_MESSAGE_LENGTH, session, parts=use_parts,
+                                     meta=meta)
         part_id = str(_uuid.uuid4()) if use_parts and len(chunks) > 1 else None
         uuids = []
         for i, chunk in enumerate(chunks, 1):
             part = {"id": part_id, "i": i, "n": len(chunks)} if part_id else None
-            env = envelope.make_text(chunk, session, part)
+            env = envelope.make_text(chunk, session, part, meta)
             # Persist first (status 'queued'), then try to send (PRD §4.3.3).
             self.db.execute(
                 "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
-                "created_at, status, from_session, part_id, part_i, part_n) "
-                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?, ?, ?, ?)",
+                "created_at, status, from_session, part_id, part_i, part_n, "
+                "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id) "
+                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (env["uuid"], contact["id"], chunk, env["ts"], session, part_id,
-                 i if part_id else None, len(chunks) if part_id else None),
+                 i if part_id else None, len(chunks) if part_id else None,
+                 *_meta_values(meta)),
             )
             self.db.commit()
             uuids.append(env["uuid"])
@@ -1111,22 +1598,32 @@ class Daemon:
         if params.get("alias"):
             conds.append("c.alias=?")
             args.append(params["alias"])
+        if params.get("thread"):
+            conds.append("m.thread=?")
+            args.append(params["thread"])
+        if params.get("room"):
+            conds.append("m.room_id=?")
+            args.append(self._resolve_room(params["room"])["room_id"])
         if params.get("unread_only"):
             conds.append("m.direction='in' AND m.read_at IS NULL")
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                  "m.status, m.read_at, m.from_session, m.part_id, m.part_i, m.part_n, "
-                 "c.profile_json FROM messages m JOIN contacts c ON c.id=m.contact_id")
+                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
+                 "r.name AS room_name, c.profile_json FROM messages m "
+                 "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id")
         if conds:
             query += " WHERE " + " AND ".join(conds)
         query += " ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
         args.append(int(params.get("limit", 20)))
         rows = [_with_profile(r) for r in self.db.execute(query, args).fetchall()]
-        return {"messages": _merge_parts(rows)}
+        return {"messages": _merge_room_sends(_merge_parts(rows))}
 
     def _get_message(self, params: dict) -> dict:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                 "m.status, m.read_at, m.from_session, m.part_id, m.part_i, m.part_n, "
-                "c.profile_json FROM messages m JOIN contacts c ON c.id=m.contact_id ")
+                "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
+                "r.name AS room_name, c.profile_json FROM messages m "
+                "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id ")
         rows = self.db.execute(cols + "WHERE m.msg_uuid=?", (params.get("msg_uuid"),)).fetchall()
         if not rows:  # the id of a multi-part text we sent: its parts share it
             rows = self.db.execute(cols + "WHERE m.part_id=? ORDER BY m.part_i DESC",
@@ -1230,6 +1727,23 @@ class Daemon:
         self.db.commit()
         self._save_state()
         return {"alias": alias}
+
+    def _list_threads(self, params: dict) -> dict:
+        """Threads seen with a contact (or all): message count, unread, last activity."""
+        conds, args = ["m.thread IS NOT NULL"], []
+        if params.get("alias"):
+            conds.append("c.alias=?")
+            args.append(params["alias"])
+        rows = self.db.execute(
+            "SELECT c.alias, m.thread, COUNT(*) AS count, MAX(m.created_at) AS last_at, "
+            "SUM(CASE WHEN m.direction='in' AND m.read_at IS NULL THEN 1 ELSE 0 END) AS unread, "
+            "SUM(CASE WHEN m.needs_human=1 AND m.direction='in' AND m.read_at IS NULL "
+            "THEN 1 ELSE 0 END) AS needs_human "
+            "FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE " + " AND ".join(conds) +
+            " GROUP BY c.alias, m.thread ORDER BY last_at DESC LIMIT ?",
+            (*args, int(params.get("limit", 50))),
+        ).fetchall()
+        return {"threads": [dict(r) for r in rows]}
 
     def _get_profile(self, params: dict) -> dict:
         return {"profile": self.profile}
