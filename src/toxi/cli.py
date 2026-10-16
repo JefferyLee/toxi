@@ -3,14 +3,16 @@ IPC and exits. Only `init` and `daemon start` touch the filesystem/process
 directly; everything else goes through the daemon.
 """
 import json
+import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
 
 import click
 
-from . import __version__, bootstrap, client, paths, peers
+from . import __version__, bootstrap, client, envelope, invite, paths, peers
 from .tox import Tox
 
 _CONNECTION = {0: "offline", 1: "connected (TCP)", 2: "connected (UDP)"}
@@ -32,6 +34,20 @@ def _emit(ctx, data) -> bool:
         click.echo(json.dumps(data, ensure_ascii=False))
         return True
     return False
+
+
+def _default_session() -> str | None:
+    """Label of the session sending a message (design §4.1): $TOXI_SESSION, else
+    the Claude Code project dir name. The CLI never guesses from the cwd."""
+    s = os.environ.get("TOXI_SESSION")
+    if not s and os.environ.get("CLAUDE_PROJECT_DIR"):
+        s = os.path.basename(os.path.normpath(os.environ["CLAUDE_PROJECT_DIR"]))
+    return (s or "")[:64] or None
+
+
+def _sender(m: dict) -> str:
+    """`alias` or `alias@session` when the sender tagged the message with a session."""
+    return f"{m['alias']}@{m['from_session']}" if m.get("from_session") else m["alias"]
 
 
 @click.group()
@@ -57,6 +73,7 @@ def init():
     t = Tox()
     address = t.self_get_address_hex()
     sp.write_bytes(t.get_savedata())
+    sp.chmod(0o600)
     t.kill()
     click.echo(
         f"Initialized toxi.\n"
@@ -214,12 +231,16 @@ def _content(m: dict) -> str:
 @cli.command()
 @click.argument("alias")
 @click.argument("message")
+@click.option("--session", default=None,
+              help="Label of the session/project sending this (default: $TOXI_SESSION, "
+                   "else the Claude Code project dir name).")
 @click.pass_context
-def send(ctx, alias, message):
+def send(ctx, alias, message, session):
     """Send a message: toxi send <alias> <message> (use - to read from stdin)."""
     if message == "-":
         message = sys.stdin.read().rstrip("\n")
-    res = _call("send_message", {"alias": alias, "body": message})
+    res = _call("send_message", {"alias": alias, "body": message,
+                                 "session": session or _default_session()})
     if _emit(ctx, res):
         return
     parts = f" ({res['parts']} parts)" if res.get("parts") else ""
@@ -317,7 +338,7 @@ def unread(ctx, alias):
         return
     click.echo(f"[{len(msgs)} unread]")
     for m in reversed(msgs):  # oldest first
-        click.echo(f"  {m['alias']} ({_ago(m['created_at'])}): {_content(m)}")
+        click.echo(f"  {_sender(m)} ({_ago(m['created_at'])}): {_content(m)}")
     _call("mark_read", {"msg_uuids": [m["msg_uuid"] for m in msgs]})
 
 
@@ -334,7 +355,7 @@ def read(ctx, alias, limit):
         click.echo("No messages yet.")
         return
     for m in reversed(msgs):  # oldest first
-        who = "you" if m["direction"] == "out" else m["alias"]
+        who = "you" if m["direction"] == "out" else _sender(m)
         click.echo(f"  {who} ({_ago(m['created_at'])}): {_content(m)}")
     unread_in = [m["msg_uuid"] for m in msgs if m["direction"] == "in" and m["read_at"] is None]
     if unread_in:
@@ -351,6 +372,112 @@ def peer_inbox(ctx, alias, cwd):
     if _emit(ctx, msgs) or not msgs:
         return
     click.echo(peers.as_prompt(msgs))
+
+
+@cli.command(name="peers")
+@click.pass_context
+def peers_cmd(ctx):
+    """Peer agents: trust level, presence, profile card, unread count."""
+    try:
+        rows = peers.overview()
+    except client.DaemonNotRunning as e:
+        raise click.ClickException(str(e))
+    if _emit(ctx, rows):
+        return
+    if not rows:
+        click.echo("No peers configured. Add a [peers.<alias>] table to config.toml.")
+        return
+    for r in rows:
+        mark = "✓" if r["online"] else "○"
+        prof = r.get("profile") or {}
+        card = "/".join(x for x in (prof.get("kind"), prof.get("runtime")) if x)
+        if prof.get("host"):
+            card += f" @ {prof['host']}"
+        if prof.get("operator"):
+            card += f" · operator {prof['operator']}"
+        if prof.get("role"):
+            card += f" · {prof['role']}"
+        extra = f" · 📬 {r['unread']}" if r["unread"] else ""
+        if not r["known"]:
+            extra += " (not a contact yet)"
+        click.echo(f"  {mark} {r['alias']:12} {(r['trust'] or 'contact'):12} "
+                   f"{card or '(no profile card yet)'}{extra}")
+        if r["dirs"]:
+            click.echo(f"      ↳ delivered only to sessions started in: {', '.join(r['dirs'])}")
+
+
+@cli.group()
+def profile():
+    """This identity's profile card: who you are, what runtime, who operates you."""
+
+
+@profile.command("show")
+@click.pass_context
+def profile_show(ctx):
+    """Show the card friends receive from you."""
+    prof = _call("get_profile")["profile"]
+    if _emit(ctx, prof):
+        return
+    if not prof:
+        click.echo("No profile yet. Set one with, e.g.:\n"
+                   "  toxi profile set --kind agent --runtime claude-code --operator <you>")
+        return
+    for k in envelope.PROFILE_KEYS:
+        if k in prof:
+            v = prof[k]
+            click.echo(f"  {k:9} {', '.join(v) if isinstance(v, list) else v}")
+
+
+@profile.command("set")
+@click.option("--kind", type=click.Choice(list(envelope.PROFILE_KINDS)))
+@click.option("--name", help="Display name (default: your Tox name).")
+@click.option("--runtime", help="claude-code | codex | grok | toxi-cli | toxios | other")
+@click.option("--model")
+@click.option("--host", help="Machine name (default: this hostname).")
+@click.option("--operator", help="Who runs this identity.")
+@click.option("--role", help="One line on what this identity does.")
+def profile_set(**fields):
+    """Set or update fields of your card; online friends get it immediately."""
+    fields = {k: v for k, v in fields.items() if v is not None}
+    if not fields:
+        raise click.UsageError("nothing to set — see `toxi profile set --help`")
+    if "host" not in fields and not _call("get_profile")["profile"].get("host"):
+        fields["host"] = socket.gethostname()
+    res = _call("set_profile", {"profile": fields})
+    click.echo(f"✓ profile updated (sent to {res['sent_to']} online contact(s))")
+
+
+@cli.command()
+@click.option("--ttl", default=600, show_default=True, help="Seconds the invite stays valid.")
+@click.pass_context
+def pair(ctx, ttl):
+    """Mint a one-time invite; the other side runs `toxi join <invite>` and you're friends."""
+    res = _call("create_invite", {"ttl": ttl})
+    if _emit(ctx, res):
+        return
+    click.echo(f"Invite (valid {ttl // 60} min, single use) — share it over a channel you trust:\n"
+               f"\n  {res['invite']}\n\nOn the other machine:\n  toxi join {res['invite']}")
+
+
+@cli.command()
+@click.argument("invite_text", metavar="INVITE")
+@click.option("--as", "alias", default=None,
+              help="Local alias for them (default: the name in the invite).")
+def join(invite_text, alias):
+    """Accept a `toxi pair` invite: adds them, and their daemon accepts automatically."""
+    try:
+        data = invite.decode(invite_text)
+    except invite.InvalidInvite as e:
+        raise click.ClickException(str(e))
+    alias = alias or (invite.safe_alias(data["name"]) if data.get("name") else None)
+    if not alias:
+        raise click.ClickException("the invite carries no name — pass --as <alias>")
+    me = (_call("get_profile")["profile"].get("name") or _call("get_me")["name"]
+          or socket.gethostname())
+    _call("add_contact", {"alias": alias, "tox_id": data["tox_id"],
+                          "request_msg": invite.request_message(data["nonce"], me)})
+    click.echo(f"✓ Added {alias}. Their daemon accepts automatically; `toxi contacts` shows "
+               f"them online once the DHT connects (usually under a minute).")
 
 
 @cli.command()

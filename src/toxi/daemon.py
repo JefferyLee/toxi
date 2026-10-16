@@ -8,13 +8,16 @@ block the protocol for long. This sidesteps all locking.
 import json
 import logging
 import os
+import secrets
 import socket
 import subprocess
 import time
 import uuid as _uuid
+from collections import deque
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
-from . import client, config, db, envelope, ipc, paths
+from . import client, config, db, envelope, invite, ipc, paths
 from .tox import (
     FILE_CONTROL_CANCEL,
     FILE_CONTROL_RESUME,
@@ -28,6 +31,9 @@ SWEEP_INTERVAL = 30  # seconds between ACK-timeout retry sweeps
 MAX_FILE_BYTES = 100 * 1024 * 1024  # cap on an accepted incoming file (100 MB)
 HOOK_DEBOUNCE = 2.0  # quiet seconds before [hooks] on_message fires; coalesces bursts
 HOOK_TIMEOUT = 30  # seconds before a still-running on_message hook is killed
+TEXT_RATE_LIMIT = 60  # incoming texts accepted per contact per minute (PRD §4.9.4)
+REQUEST_RATE_LIMIT = 5  # incoming friend requests accepted per minute
+INVITE_TTL = 600  # seconds a `toxi pair` invite stays valid
 
 # Map a filename extension to one of our media msg_types (PRD: image/voice/video).
 _IMAGE_EXTS = {"jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "tiff", "tif", "svg"}
@@ -61,6 +67,40 @@ def _is_hex(s: str) -> bool:
     except ValueError:
         return False
 
+
+def _within_rate(times: deque, limit: int, now: float, window: float = 60.0) -> bool:
+    """Sliding-window counter: record `now` and return True if under `limit`."""
+    while times and now - times[0] > window:
+        times.popleft()
+    if len(times) >= limit:
+        return False
+    times.append(now)
+    return True
+
+
+def _harden_permissions() -> None:
+    """Keys, history and config are private: dirs 0700, files 0600 (PRD §4.9)."""
+    for d in (paths.config_dir(), paths.media_dir()):
+        if d.is_dir():
+            os.chmod(d, 0o700)
+    dbp = paths.db_path()
+    for f in (paths.tox_state_path(), dbp, Path(f"{dbp}-wal"), Path(f"{dbp}-shm"),
+              paths.config_path(), paths.profile_path()):
+        if f.exists():
+            os.chmod(f, 0o600)
+
+
+def _with_profile(row) -> dict:
+    """Row -> dict, with the contact's profile_json column parsed into `profile`."""
+    d = dict(row)
+    pj = d.pop("profile_json", None)
+    if "profile" not in d:
+        try:
+            d["profile"] = json.loads(pj) if pj else None
+        except ValueError:
+            d["profile"] = None
+    return d
+
 log = logging.getLogger("toxi.daemon")
 
 # A few long-lived public DHT nodes (PRD §4.8 will later move these to bootstrap.json).
@@ -82,6 +122,9 @@ class Daemon:
         paths.ensure_config_dir()
         _setup_logging()
         self.db = db.connect(paths.db_path())
+        self.profile = self._load_profile()
+        self._text_times: dict[int, deque] = {}  # per-friend incoming text timestamps
+        self._request_times: deque = deque()  # incoming friend-request timestamps
         rc = config.retry_config()
         self.ack_timeout = rc["ack_timeout_minutes"] * 60
         self.fail_after = rc["fail_after_hours"] * 3600
@@ -95,6 +138,7 @@ class Daemon:
         self.tox = self._init_tox()
         self._remap_friend_numbers()
         self._save_state()  # ensure tox_state.bin exists from first run
+        _harden_permissions()
         self._bootstrap()
         self.sock: socket.socket | None = None
         self.running = False
@@ -115,6 +159,9 @@ class Daemon:
             "introduce": self._introduce,
             "list_introductions": self._list_introductions,
             "accept_introduction": self._accept_introduction,
+            "get_profile": self._get_profile,
+            "set_profile": self._set_profile,
+            "create_invite": self._create_invite,
             "shutdown": self._shutdown,
         }
 
@@ -150,6 +197,19 @@ class Daemon:
     # --- tox callbacks (fire during tox.iterate() on this thread) ---
     def _on_friend_request(self, public_key: bytes, message: bytes) -> None:
         pk = public_key.hex().upper()
+        now = int(time.time())
+        if not _within_rate(self._request_times, REQUEST_RATE_LIMIT, now):
+            log.warning("rate limit: ignored a friend request from %s", pk[:8])
+            return
+        reply = invite.parse_request(message)
+        if reply:
+            nonce, name = reply
+            valid = self.db.execute(
+                "SELECT 1 FROM invites WHERE nonce=? AND used_at IS NULL AND expires_at>=?",
+                (nonce, now),
+            ).fetchone()
+            if valid and self._accept_invited(pk, name, nonce):
+                return
         self.db.execute(
             "INSERT OR IGNORE INTO friend_requests (public_key, message, received_at, status) "
             "VALUES (?, ?, ?, 'pending')",
@@ -170,21 +230,21 @@ class Daemon:
                 "SELECT id FROM contacts WHERE friend_number=?", (friend_number,)
             ).fetchone()
             if row is not None:
+                self._send_profile(friend_number)
                 self._flush_queue(row["id"], friend_number)
 
     def _flush_queue(self, contact_id: int, friend_number: int) -> None:
         """Resend this friend's queued messages in send order (PRD §4.3.4).
         Stop at the first failure so ordering is preserved for the next attempt."""
         rows = self.db.execute(
-            "SELECT msg_uuid, content, created_at FROM messages "
+            "SELECT msg_uuid, content, created_at, from_session FROM messages "
             "WHERE contact_id=? AND direction='out' AND status='queued' "
             "ORDER BY created_at ASC, id ASC",
             (contact_id,),
         ).fetchall()
         for row in rows:
-            payload = envelope.encode(
-                envelope.text_envelope(row["msg_uuid"], row["created_at"], row["content"])
-            )
+            payload = envelope.encode(envelope.text_envelope(
+                row["msg_uuid"], row["created_at"], row["content"], row["from_session"]))
             if not self.tox.friend_send_message(friend_number, payload):
                 break
             self.db.execute(
@@ -200,7 +260,7 @@ class Daemon:
         online), and give up on ones older than fail_after (PRD §4.4.1, simplified)."""
         now = int(time.time())
         rows = self.db.execute(
-            "SELECT m.msg_uuid, m.content, m.created_at, m.last_attempt_at, "
+            "SELECT m.msg_uuid, m.content, m.created_at, m.last_attempt_at, m.from_session, "
             "c.friend_number, c.is_online FROM messages m "
             "JOIN contacts c ON c.id=m.contact_id "
             "WHERE m.direction='out' AND m.status='sent' AND m.delivered_at IS NULL"
@@ -211,9 +271,8 @@ class Daemon:
                     "UPDATE messages SET status='failed' WHERE msg_uuid=?", (r["msg_uuid"],)
                 )
             elif r["is_online"] and now - (r["last_attempt_at"] or r["created_at"]) > self.ack_timeout:
-                payload = envelope.encode(
-                    envelope.text_envelope(r["msg_uuid"], r["created_at"], r["content"])
-                )
+                payload = envelope.encode(envelope.text_envelope(
+                    r["msg_uuid"], r["created_at"], r["content"], r["from_session"]))
                 if self.tox.friend_send_message(r["friend_number"], payload):
                     self.db.execute(
                         "UPDATE messages SET last_attempt_at=? WHERE msg_uuid=?",
@@ -240,6 +299,10 @@ class Daemon:
             self._receive_contact_share(friend_number, env)
             return
 
+        if etype == "profile":
+            self._receive_profile(friend_number, env)
+            return
+
         if etype != "text":
             return
 
@@ -249,13 +312,20 @@ class Daemon:
         if row is None:
             log.warning("message from unknown friend_number %d", friend_number)
             return
-        body = env.get("data", {}).get("body", "")
+        times = self._text_times.setdefault(friend_number, deque())
+        if not _within_rate(times, TEXT_RATE_LIMIT, time.time()):
+            log.warning("rate limit: dropped a text from friend %d", friend_number)
+            return
+        data = env.get("data", {})
+        body = data.get("body", "")
+        session = str(data.get("from_session") or "")[:64] or None
         # INSERT OR IGNORE: msg_uuid is UNIQUE, so a re-delivered message is dropped.
         cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
-            "content, created_at, received_at, status) "
-            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received')",
-            (env["uuid"], row["id"], body, env.get("ts", int(time.time())), int(time.time())),
+            "content, created_at, received_at, status, from_session) "
+            "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?)",
+            (env["uuid"], row["id"], body, env.get("ts", int(time.time())), int(time.time()),
+             session),
         )
         self.db.commit()
         if cur.rowcount:
@@ -287,6 +357,68 @@ class Daemon:
                  int(time.time())),
             )
             self.db.commit()
+
+    # --- profile cards (design §4.1) ---
+    def _receive_profile(self, friend_number: int, env: dict) -> None:
+        prof = envelope.clean_profile(env.get("data"))
+        if not prof:
+            return
+        self.db.execute(
+            "UPDATE contacts SET profile_json=?, profile_at=?, proto=? WHERE friend_number=?",
+            (json.dumps(prof, ensure_ascii=False), int(time.time()),
+             int(prof.get("proto") or 1), friend_number),
+        )
+        self.db.commit()
+
+    def _send_profile(self, friend_number: int) -> bool:
+        if not self.profile:
+            return False
+        return self.tox.friend_send_message(
+            friend_number, envelope.encode(envelope.make_profile(self.profile)))
+
+    def _broadcast_profile(self) -> int:
+        rows = self.db.execute(
+            "SELECT friend_number FROM contacts WHERE is_online=1 AND friend_number IS NOT NULL"
+        ).fetchall()
+        return sum(1 for r in rows if self._send_profile(r["friend_number"]))
+
+    def _load_profile(self) -> dict:
+        p = paths.profile_path()
+        if not p.exists():
+            return {}
+        try:
+            return envelope.clean_profile(json.loads(p.read_text()))
+        except (OSError, ValueError):
+            log.warning("profile.json is unreadable; ignoring it")
+            return {}
+
+    # --- invites (design §4.2) ---
+    def _accept_invited(self, pk: str, name: str, nonce: str) -> bool:
+        """Auto-accept a friend request that answers one of our live invites."""
+        if self.db.execute("SELECT 1 FROM contacts WHERE public_key=?", (pk,)).fetchone():
+            return False
+        fn = self.tox.friend_add_norequest(bytes.fromhex(pk))
+        if fn == NO_FRIEND:
+            return False
+        alias = self._free_alias(name or pk[:8].lower())
+        now = int(time.time())
+        self.db.execute(
+            "INSERT INTO contacts (public_key, alias, added_at, added_by, friend_number) "
+            "VALUES (?, ?, ?, 'invite', ?)",
+            (pk, alias, now, fn),
+        )
+        self.db.execute("UPDATE invites SET used_at=? WHERE nonce=?", (now, nonce))
+        self.db.commit()
+        self._save_state()
+        log.info("accepted invited friend %s as %r", pk[:8], alias)
+        return True
+
+    def _free_alias(self, name: str) -> str:
+        base = invite.safe_alias(name)
+        alias, n = base, 2
+        while self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (alias,)).fetchone():
+            alias, n = f"{base}-{n}", n + 1
+        return alias
 
     # --- incoming file transfers (image/voice/video, fired during tox.iterate()) ---
     def _on_file_recv(self, friend_number: int, file_number: int, kind: int,
@@ -435,6 +567,7 @@ class Daemon:
         data = self.tox.get_savedata()
         tmp = paths.tox_state_path().with_suffix(".tmp")
         tmp.write_bytes(data)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, paths.tox_state_path())
 
     def _bootstrap(self) -> None:
@@ -650,11 +783,12 @@ class Daemon:
         return {"alias": alias, "public_key": pk}
 
     def _list_contacts(self, params: dict) -> dict:
-        query = "SELECT alias, public_key, tox_id, is_online, last_seen FROM contacts"
+        query = ("SELECT alias, public_key, tox_id, is_online, last_seen, proto, profile_json "
+                 "FROM contacts")
         if params.get("online_only"):
             query += " WHERE is_online=1"
         query += " ORDER BY alias"
-        return {"contacts": [dict(r) for r in self.db.execute(query).fetchall()]}
+        return {"contacts": [_with_profile(r) for r in self.db.execute(query).fetchall()]}
 
     def _list_requests(self, params: dict) -> dict:
         rows = self.db.execute(
@@ -672,16 +806,18 @@ class Daemon:
         if contact is None:
             raise RpcError("CONTACT_NOT_FOUND", f"no contact named {alias!r}")
 
+        session = str(params.get("session") or "").strip()[:64] or None
         # A body too long for one Tox message goes out as several "[i/n] " parts.
         online = bool(contact["is_online"])
         uuids = []
-        for part in envelope.split_text(body, MAX_MESSAGE_LENGTH):
-            env = envelope.make_text(part)
+        for part in envelope.split_text(body, MAX_MESSAGE_LENGTH, session):
+            env = envelope.make_text(part, session)
             # Persist first (status 'queued'), then try to send (PRD §4.3.3).
             self.db.execute(
                 "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
-                "created_at, status) VALUES (?, ?, 'out', 'text', ?, ?, 'queued')",
-                (env["uuid"], contact["id"], part, env["ts"]),
+                "created_at, status, from_session) "
+                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?)",
+                (env["uuid"], contact["id"], part, env["ts"], session),
             )
             self.db.commit()
             uuids.append(env["uuid"])
@@ -707,20 +843,22 @@ class Daemon:
         if params.get("unread_only"):
             conds.append("m.direction='in' AND m.read_at IS NULL")
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                 "m.status, m.read_at FROM messages m JOIN contacts c ON c.id=m.contact_id")
+                 "m.status, m.read_at, m.from_session, c.profile_json "
+                 "FROM messages m JOIN contacts c ON c.id=m.contact_id")
         if conds:
             query += " WHERE " + " AND ".join(conds)
         query += " ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
         args.append(int(params.get("limit", 20)))
-        return {"messages": [dict(r) for r in self.db.execute(query, args).fetchall()]}
+        return {"messages": [_with_profile(r) for r in self.db.execute(query, args).fetchall()]}
 
     def _get_message(self, params: dict) -> dict:
         row = self.db.execute(
             "SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-            "m.read_at FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE m.msg_uuid=?",
+            "m.read_at, m.from_session, c.profile_json "
+            "FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE m.msg_uuid=?",
             (params.get("msg_uuid"),),
         ).fetchone()
-        return {"message": dict(row) if row else None}
+        return {"message": _with_profile(row) if row else None}
 
     def _mark_read(self, params: dict) -> dict:
         now = int(time.time())
@@ -816,6 +954,40 @@ class Daemon:
         self.db.commit()
         self._save_state()
         return {"alias": alias}
+
+    def _get_profile(self, params: dict) -> dict:
+        return {"profile": self.profile}
+
+    def _set_profile(self, params: dict) -> dict:
+        """Merge fields into this identity's card, persist it, and tell online friends."""
+        prof = dict(self.profile)
+        prof.update(envelope.clean_profile(params.get("profile")))
+        prof = envelope.clean_profile(prof)
+        prof["proto"] = envelope.VERSION
+        prof["caps"] = list(envelope.CAPS)
+        if not prof.get("name"):
+            prof["name"] = self.tox.self_get_name().decode("utf-8", "replace") or None
+            if not prof["name"]:
+                del prof["name"]
+        p = paths.profile_path()
+        p.write_text(json.dumps(prof, ensure_ascii=False, indent=2) + "\n")
+        os.chmod(p, 0o600)
+        self.profile = prof
+        return {"profile": prof, "sent_to": self._broadcast_profile()}
+
+    def _create_invite(self, params: dict) -> dict:
+        ttl = int(params.get("ttl") or INVITE_TTL)
+        now = int(time.time())
+        nonce = secrets.token_hex(16)
+        self.db.execute(
+            "INSERT INTO invites (nonce, created_at, expires_at) VALUES (?, ?, ?)",
+            (nonce, now, now + ttl),
+        )
+        self.db.commit()
+        name = self.profile.get("name") or self.tox.self_get_name().decode("utf-8", "replace")
+        data = {"v": 1, "tox_id": self.tox.self_get_address_hex(), "name": name,
+                "nonce": nonce, "exp": now + ttl}
+        return {"invite": invite.encode(data), "expires_at": now + ttl, "name": name}
 
     def _shutdown(self, params: dict) -> dict:
         self.running = False

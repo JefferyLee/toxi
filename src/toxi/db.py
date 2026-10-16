@@ -52,6 +52,13 @@ CREATE TABLE IF NOT EXISTS friend_requests (
     status TEXT NOT NULL                     -- 'pending' / 'accepted' / 'rejected'
 );
 
+CREATE TABLE IF NOT EXISTS invites (
+    nonce TEXT PRIMARY KEY,                 -- one-time `toxi pair` invite (design §4.2)
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS pending_introductions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_contact_id INTEGER NOT NULL,
@@ -65,6 +72,23 @@ CREATE TABLE IF NOT EXISTS pending_introductions (
 """
 
 
+# Columns added after v0.3.0; applied idempotently to databases created earlier.
+_ADDED_COLUMNS = {
+    "contacts": [("profile_json", "TEXT"),          # peer's self-described card (design §4.1)
+                 ("profile_at", "INTEGER"),
+                 ("proto", "INTEGER DEFAULT 1")],   # envelope version the peer speaks
+    "messages": [("from_session", "TEXT")],          # sender's session/project label
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, cols in _ADDED_COLUMNS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in cols:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def connect(path: Path | str) -> sqlite3.Connection:
     """Open the database, applying schema and pragmas. Idempotent."""
     conn = sqlite3.connect(path)
@@ -72,5 +96,6 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn

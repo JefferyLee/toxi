@@ -22,3 +22,35 @@ def test_parse_fills_missing_uuid_and_ts():
     assert parsed["uuid"]
     assert parsed["ts"]
     assert parsed["data"]["body"] == "hi"
+
+
+def test_v2_text_carries_optional_session():
+    assert envelope.VERSION == 2
+    assert "from_session" not in envelope.make_text("hi")["data"]
+    env = envelope.make_text("hi", "powerup-chess")
+    assert env["data"] == {"body": "hi", "from_session": "powerup-chess"}
+    assert envelope.parse(envelope.encode(env))["data"]["from_session"] == "powerup-chess"
+
+
+def test_split_text_budget_accounts_for_session():
+    body = "x" * 3000
+    parts = envelope.split_text(body, 1372, session="a-long-session-label")
+    assert len(parts) > 1
+    for part in parts:
+        assert len(envelope.encode(envelope.make_text(part, "a-long-session-label"))) <= 1372
+    assert "".join(p.split("] ", 1)[1] for p in parts) == body
+
+
+def test_profile_envelope_and_cleaning():
+    env = envelope.make_profile({"kind": "agent", "runtime": "grok"})
+    assert env["type"] == "profile" and env["v"] == 2
+    assert envelope.parse(envelope.encode(env))["data"]["runtime"] == "grok"
+
+    raw = {"kind": "robot", "name": "n" * 500, "runtime": "codex", "proto": "2",
+           "caps": list(range(40)), "secret": "x", "host": ""}
+    prof = envelope.clean_profile(raw)
+    assert "kind" not in prof            # unknown kind dropped
+    assert len(prof["name"]) == 120      # strings bounded
+    assert prof["proto"] == 2 and len(prof["caps"]) == 16
+    assert "secret" not in prof and "host" not in prof
+    assert envelope.clean_profile("junk") == {} and envelope.clean_profile(None) == {}

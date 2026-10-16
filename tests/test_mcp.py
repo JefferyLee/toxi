@@ -26,13 +26,16 @@ def test_tools_call_expected_rpcs(monkeypatch):
 
     monkeypatch.setattr(mcp_server.client, "request", fake_request)
 
-    assert mcp_server.get_unread() == [{"alias": "bob", "content": "hi"}]
+    # Dict results: an empty list would render as *no* content in FastMCP, and an
+    # agent could not tell "nothing unread" from a failed call.
+    assert mcp_server.get_unread() == {"count": 1, "messages": [{"alias": "bob", "content": "hi"}]}
     assert ("get_messages", {"unread_only": True, "limit": 100}) in calls
 
+    monkeypatch.setenv("TOXI_SESSION", "toxi-tests")
     assert mcp_server.send_message("bob", "hi")["status"] == "queued"
-    assert ("send_message", {"alias": "bob", "body": "hi"}) in calls
+    assert ("send_message", {"alias": "bob", "body": "hi", "session": "toxi-tests"}) in calls
 
-    assert mcp_server.list_contacts() == []
+    assert mcp_server.list_contacts() == {"count": 0, "contacts": []}
     assert mcp_server.get_status() == {"queue_size": 0}
     mcp_server.read_history("bob", 5)
     assert ("get_messages", {"alias": "bob", "limit": 5}) in calls
@@ -109,7 +112,8 @@ def test_build_server_passes_instructions(monkeypatch):
 
     assert created["name"] == "toxi"
     assert created["instructions"] == mcp_server.SERVER_INSTRUCTIONS
-    assert "untrusted personal content" in created["instructions"]
+    assert "untrusted content" in created["instructions"]
+    assert "observer" in created["instructions"] and "collaborator" in created["instructions"]
     assert "send_message" in created["instructions"]
     assert set(server.tools) == {fn.__name__ for fn in mcp_server.TOOLS}
 
@@ -135,3 +139,24 @@ def test_build_server_supports_fastmcp_without_instructions(monkeypatch):
     server = mcp_server.build_server()
 
     assert server.name == "toxi"
+
+
+def test_session_label_falls_back_to_project_dir(monkeypatch):
+    monkeypatch.delenv("TOXI_SESSION", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/w/Power-Up-Chess/")
+    assert mcp_server._session() == "Power-Up-Chess"
+
+
+def test_real_server_registers_annotations():
+    pytest.importorskip("mcp.types")
+    import asyncio
+    tools = {t.name: t for t in asyncio.run(mcp_server.build_server().list_tools())}
+    assert set(tools) == {fn.__name__ for fn in mcp_server.TOOLS}
+    assert tools["get_unread"].annotations.readOnlyHint is True
+    assert tools["send_message"].annotations.readOnlyHint is False
+    assert tools["send_message"].annotations.destructiveHint is False
+
+
+def test_get_peers_reports_count(monkeypatch):
+    monkeypatch.setattr(mcp_server.peers, "overview", lambda: [{"alias": "codex"}])
+    assert mcp_server.get_peers() == {"count": 1, "peers": [{"alias": "codex"}]}

@@ -29,9 +29,38 @@ def daemon_log_level() -> str:
     return _load().get("daemon", {}).get("log_level", "info")
 
 
+TRUST_LEVELS = ("observer", "collaborator")
+
+
+def peer_config() -> dict[str, dict]:
+    """Peer agents by alias: {"dirs": [...], "trust": "observer" | "collaborator"}.
+
+    Read from `[peers.<alias>]` (`dirs = [...]`, `trust = "..."`). The legacy
+    `[agents] peers = [...]` + `[agents.dirs]` form is still honoured and means
+    trust = "collaborator". An unknown trust level degrades to "observer".
+    """
+    cfg = _load()
+    out: dict[str, dict] = {}
+    agents = cfg.get("agents", {})
+    legacy_dirs = agents.get("dirs", {})
+    for alias in agents.get("peers", []):
+        d = legacy_dirs.get(alias)
+        out[alias] = {"dirs": [d] if d else [], "trust": "collaborator"}
+    for alias, spec in cfg.get("peers", {}).items():
+        if not isinstance(spec, dict):
+            continue
+        dirs = spec.get("dirs", [])
+        if isinstance(dirs, str):
+            dirs = [dirs]
+        trust = spec.get("trust", "collaborator")
+        out[alias] = {"dirs": [str(d) for d in dirs],
+                      "trust": trust if trust in TRUST_LEVELS else "observer"}
+    return out
+
+
 def agent_peers() -> list[str]:
-    """Aliases of contacts that are peer AI agents (`[agents] peers = [...]`)."""
-    return list(_load().get("agents", {}).get("peers", []))
+    """Aliases of contacts that are peer AI agents."""
+    return list(peer_config())
 
 
 def on_message_hook() -> str | None:
@@ -39,7 +68,7 @@ def on_message_hook() -> str | None:
     return _load().get("hooks", {}).get("on_message") or None
 
 
-def agent_dirs() -> dict[str, str]:
-    """Per-peer project dirs (`[agents.dirs]`): Stop hooks deliver that peer's
-    messages only to sessions started in exactly that dir."""
-    return dict(_load().get("agents", {}).get("dirs", {}))
+def agent_dirs() -> dict[str, list[str]]:
+    """Per-peer project dirs: Stop hooks deliver that peer's messages only to
+    sessions started in exactly one of those dirs."""
+    return {a: spec["dirs"] for a, spec in peer_config().items() if spec["dirs"]}

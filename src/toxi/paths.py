@@ -64,3 +64,8 @@ def ensure_media_dir() -> Path:
 
 def bootstrap_path() -> Path:
     return config_dir() / "bootstrap.json"
+
+
+def profile_path() -> Path:
+    # This identity's self-described profile card (design §4.1), sent to friends.
+    return config_dir() / "profile.json"
