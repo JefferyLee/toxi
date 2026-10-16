@@ -75,6 +75,9 @@ def _setup_signatures(lib: _C.CDLL) -> None:
     lib.tox_bootstrap.argtypes = [_C.c_void_p, _C.c_char_p, _C.c_uint16, _C.c_char_p, _C.c_void_p]
 
     lib.tox_self_get_address.argtypes = [_C.c_void_p, _C.c_char_p]
+    lib.tox_self_get_dht_id.argtypes = [_C.c_void_p, _C.c_char_p]
+    lib.tox_self_get_udp_port.restype = _C.c_uint16
+    lib.tox_self_get_udp_port.argtypes = [_C.c_void_p, _C.c_void_p]
     lib.tox_self_get_connection_status.restype = _C.c_int
     lib.tox_self_get_connection_status.argtypes = [_C.c_void_p]
 
@@ -195,6 +198,15 @@ class Tox:
 
     def self_get_connection_status(self) -> int:
         return _lib.tox_self_get_connection_status(self._ptr)
+
+    def self_get_dht_id_hex(self) -> str:
+        """This node's DHT public key: what another node bootstraps to (with our UDP port)."""
+        buf = _C.create_string_buffer(PUBLIC_KEY_SIZE)
+        _lib.tox_self_get_dht_id(self._ptr, buf)
+        return buf.raw.hex().upper()
+
+    def self_get_udp_port(self) -> int:
+        return _lib.tox_self_get_udp_port(self._ptr, None)
 
     def is_connected(self) -> bool:
         return self.self_get_connection_status() != CONNECTION_NONE

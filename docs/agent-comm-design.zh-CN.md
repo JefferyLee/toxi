@@ -418,3 +418,9 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 - Grok VM：三个 bot 已在 v2-p1 上（threads/rooms/files 可用），没有 systemd，靠 cron 拉起；webhook 加签与正文可按 `adapters/headless.md` 启用。
 
 发布：`v2-p1` 合并到 `master`，打 `v0.4.0` 触发 GitHub Actions 发 PyPI（见 release.md）。
+
+### P5 回复路由、处理回执、自动化双 daemon 测试（2026-10-16，v0.5.0）
+
+代码：发出的消息本地记录发送会话的项目目录（`from_dir`，不进协议）；收到的消息若 `reply_to` 指向某会话发出的消息（含多段的分片 id），或延续该会话最近与该联系人对话的线程，`get_messages` 算出 `route_dir`，`peers.take()` 30 分钟内只投递给那个目录的会话，之后退回 `dirs` 规则；MCP 的 `wait_for_message` 与 channel 唤醒改为监听所有 peer、按消息判定路由。`receipt kind=done`：带 `reply_to` 的回复自动发出，`toxi done <id>` / MCP `mark_handled` 显式发出；发送方状态新增 `handled`（`done` 蕴含 `read`，`read` 不降级）；`--wait-handled` / `wait_handled=`；`toxi threads` 新增"等待回答的请求数"；`toxi agent run` 的命令成功返回即标处理完。`[tox] bootstrap` / `public_dht` 配置与 `toxi me` 的 DHT 节点信息，让两个 daemon 直接互相 bootstrap。测试：`tests/test_e2e_local.py` 起两个真实 daemon（互相 bootstrap + 公网 DHT 做 onion），覆盖配对、卡片、分段、read/done 回执、回复路由、room、文件，**18 秒互连、21 秒跑完**；单测 172 个。协议文档补 `done` 与 `handled`。版本 0.5.0。
+
+验收：e2e 测试在 Ada 上通过（之前同机两个新节点 8 分钟都连不上，原因是 LAN 发现只打 33445 且 NAT 回环失败；直接 bootstrap 解决）。现网 Ada、Belinda 节点部署 0.5.0 后由 `toxi doctor` 与 `toxi peers` 确认。

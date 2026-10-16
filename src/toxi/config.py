@@ -58,6 +58,26 @@ def peer_config() -> dict[str, dict]:
     return out
 
 
+def tox_config() -> dict:
+    """`[tox]`: extra DHT bootstrap nodes and whether to use the public ones.
+
+        [tox]
+        public_dht = true                       # false = only the nodes below
+        bootstrap = [{ host = "127.0.0.1", port = 33447, key = "<64 hex DHT id>" }]
+
+    Lets two daemons on one LAN (or one machine) find each other directly —
+    `toxi me` prints a node's DHT id and UDP port.
+    """
+    t = _load().get("tox", {})
+    nodes = []
+    for n in t.get("bootstrap", []) or []:
+        if isinstance(n, dict) and n.get("host") and n.get("port") and n.get("key"):
+            nodes.append((str(n["host"]), int(n["port"]), str(n["key"])))
+        elif isinstance(n, (list, tuple)) and len(n) == 3:
+            nodes.append((str(n[0]), int(n[1]), str(n[2])))
+    return {"bootstrap": nodes, "public_dht": bool(t.get("public_dht", True))}
+
+
 def agent_peers() -> list[str]:
     """Aliases of contacts that are peer AI agents."""
     return list(peer_config())

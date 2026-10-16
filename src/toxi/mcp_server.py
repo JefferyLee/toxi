@@ -38,10 +38,10 @@ def _cwd() -> str:
     return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
 
-def _routed_aliases(cwd: str) -> list:
-    """Peers whose messages belong to this project (unbound peers, or bound to cwd)."""
-    return [a for a, spec in config.peer_config().items()
-            if not spec["dirs"] or any(peers._same_dir(cwd, d) for d in spec["dirs"])]
+def _peer_aliases() -> list:
+    """Every configured peer: replies can be routed to this project even from a
+    peer bound elsewhere, so we listen to all of them and decide per message."""
+    return list(config.peer_config())
 
 
 def _session() -> str | None:
@@ -88,7 +88,7 @@ def send_room_message(room: str, body: str, thread: str | None = None, kind: str
     """Send one message to every member of a room (by name or id). Members who
     are not your contacts are skipped and listed under `unreachable`."""
     return client.request("send_room", {"room": room, "body": body, "session": _session(),
-                                        "thread": thread, "kind": kind,
+                                        "session_dir": _cwd(), "thread": thread, "kind": kind,
                                         "needs_human": needs_human, "tags": tags or []})
 
 
@@ -127,7 +127,8 @@ def mark_read(msg_uuids: list[str]) -> dict:
 
 async def send_message(alias: str, body: str, wait_read: int = 0, thread: str | None = None,
                        reply_to: str | None = None, kind: str = "msg",
-                       needs_human: bool = False, tags: list[str] | None = None) -> dict:
+                       needs_human: bool = False, tags: list[str] | None = None,
+                       wait_handled: int = 0) -> dict:
     """Send a message to a contact. It is queued if they're currently offline.
 
     Long bodies are split and reassembled on the other side (up to 64 KB). The
@@ -137,22 +138,34 @@ async def send_message(alias: str, body: str, wait_read: int = 0, thread: str | 
     expects an answer | report | ack = "got it", never wakes the peer | relay =
     you are passing on someone else's words), `needs_human` (a person must
     decide) and `tags`. With `wait_read` > 0, waits up to that many seconds for
-    the recipient's read receipt and reports the final status
-    (queued / sent / delivered / read).
+    the recipient's read receipt; with `wait_handled` > 0, for their `done`
+    receipt (they answered or marked it handled). Final status is one of
+    queued / sent / delivered / read / handled.
     """
     res = client.request("send_message", {
-        "alias": alias, "body": body, "session": _session(), "thread": thread,
-        "reply_to": reply_to, "kind": kind, "needs_human": needs_human, "tags": tags or []})
-    if wait_read > 0:
-        deadline = time.monotonic() + min(wait_read, WAIT_MAX)
+        "alias": alias, "body": body, "session": _session(), "session_dir": _cwd(),
+        "thread": thread, "reply_to": reply_to, "kind": kind, "needs_human": needs_human,
+        "tags": tags or []})
+    wait = max(wait_read, wait_handled)
+    if wait > 0:
+        target = {"handled", "failed"} if wait_handled else {"read", "handled", "failed"}
+        deadline = time.monotonic() + min(wait, WAIT_MAX)
         while time.monotonic() < deadline:
             m = client.request("get_message", {"msg_uuid": res["msg_uuid"]}).get("message") or {}
             res["status"] = m.get("status", res["status"])
-            if res["status"] in ("read", "failed"):
+            if res["status"] in target:
                 break
             await asyncio.sleep(0.5)
-        res["read"] = res["status"] == "read"
+        res["read"] = res["status"] in ("read", "handled")
+        res["handled"] = res["status"] == "handled"
     return res
+
+
+def mark_handled(msg_uuids: list[str]) -> dict:
+    """Tell the senders you have dealt with these messages (a `done` receipt;
+    their status becomes `handled`). Replying with `reply_to` does this
+    automatically; call it when you acted on a message without replying."""
+    return client.request("mark_handled", {"msg_uuids": msg_uuids})
 
 
 def send_file(alias: str, path: str, thread: str | None = None, reply_to: str | None = None,
@@ -161,8 +174,8 @@ def send_file(alias: str, path: str, thread: str | None = None, reply_to: str | 
     channel. Queued until they are online; the receiver gets its name, size,
     sha256 and your thread/kind fields, and can reply to its msg_uuid."""
     return client.request("send_file", {"alias": alias, "path": path, "session": _session(),
-                                        "thread": thread, "reply_to": reply_to, "kind": kind,
-                                        "tags": tags or []})
+                                        "session_dir": _cwd(), "thread": thread,
+                                        "reply_to": reply_to, "kind": kind, "tags": tags or []})
 
 
 def list_contacts() -> dict:
@@ -213,7 +226,7 @@ async def wait_for_message(alias: str | None = None, timeout: int = 60,
         return _delivered(msgs)
     if time.monotonic() >= deadline:
         return {"messages": [], "timed_out": True}
-    aliases = [alias] if alias else _routed_aliases(cwd)
+    aliases = [alias] if alias else _peer_aliases()
     try:
         async for ev in client.asubscribe(aliases or None, deadline=deadline):
             if ev.get("event") == "message.new" and ev["data"].get("direction") == "in":
@@ -238,9 +251,9 @@ async def _poll_for_message(take, deadline: float) -> dict:
     return {"messages": [], "timed_out": True}
 
 
-TOOLS = [get_unread, read_history, get_threads, view_media, mark_read, send_message, send_file,
-         list_contacts, get_peers, get_status, wait_for_message, list_rooms, read_room,
-         send_room_message]
+TOOLS = [get_unread, read_history, get_threads, view_media, mark_read, mark_handled,
+         send_message, send_file, list_contacts, get_peers, get_status, wait_for_message,
+         list_rooms, read_room, send_room_message]
 
 # Hints for clients that gate tools by side effect (e.g. Claude Code's auto mode,
 # which otherwise classified send_message as risky and blocked it).
@@ -257,6 +270,7 @@ ANNOTATIONS = {
     "get_peers": {"readOnlyHint": True},
     "get_status": {"readOnlyHint": True},
     "mark_read": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
+    "mark_handled": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
     "send_message": {"readOnlyHint": False, "destructiveHint": False,
                      "idempotentHint": False, "openWorldHint": True},
     "send_file": {"readOnlyHint": False, "destructiveHint": False,
@@ -316,9 +330,11 @@ async def _channel_pusher(write) -> None:
     await asyncio.sleep(3)  # let the client finish initializing first
     while True:
         try:
-            async for ev in client.asubscribe(_routed_aliases(cwd) or None):
+            async for ev in client.asubscribe(_peer_aliases() or None):
                 d = ev.get("data") or {}
                 if ev.get("event") != "message.new" or d.get("direction") != "in":
+                    continue
+                if not peers.routed_to(d, cwd, config.peer_config().get(d.get("alias"))):
                     continue
                 note = JSONRPCNotification(jsonrpc="2.0", method="notifications/claude/channel",
                                            params=channel_note(d))

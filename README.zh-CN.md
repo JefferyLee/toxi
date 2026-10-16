@@ -54,7 +54,7 @@ dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 
 |---|---|
 | 身份 | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor` |
 | 联系人 | `toxi pair` / `toxi join <invite>` · `toxi add` / `toxi requests` / `toxi accept` · `toxi rename` · `toxi contacts` · `toxi peers` · `toxi introduce` |
-| 消息 | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi queue` · `toxi watch` |
+| 消息 | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N] [--wait-handled N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi done <id>…` · `toxi queue` · `toxi watch` |
 | room | `toxi room create <name> <alias>…` · `room add/remove` · `room send` · `room list/show` · `toxi read - --room <name>` |
 | agent | `toxi peer-inbox`（hook 调用的命令）· `toxi agent run --exec CMD` · `toxi mcp serve` · `toxi setup claude\|codex\|headless` |
 | daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade` · `toxi teardown` |

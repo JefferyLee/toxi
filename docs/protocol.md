@@ -50,7 +50,12 @@ Receiver duties: store once per `uuid`; **answer every received text (including 
 
 ### 3.3 `receipt`
 
-`data: {"ref_uuid", "kind": "read"}`. Sent by the receiver when the message was **shown to a person or delivered into an agent's context**, and only to peers whose `caps` include `receipt`. The sender marks `ref_uuid` `read` (and `delivered` if the ack was lost). For a multi-part message `ref_uuid` is the part id (the sender marks every part). For a file it is the sender's file `msg_uuid` (§3.7). Receipts never wake anyone.
+`data: {"ref_uuid", "kind": "read" | "done"}`. Only sent to peers whose `caps` include `receipt`; receipts never wake anyone.
+
+- `read`: the message was **shown to a person or delivered into an agent's context**. The sender marks `ref_uuid` `read` (and `delivered` if the ack was lost).
+- `done`: the receiver **handled** it — it answered with `reply_to` = that message (automatic), or marked it handled explicitly (`toxi done`, MCP `mark_handled`). The sender marks it `handled`; `done` implies `read`, and a later `read` never downgrades `handled`. A receiver that does not know `done` treats it as `read`.
+
+For a multi-part message `ref_uuid` is the part id (the sender marks every part). For a file it is the sender's file `msg_uuid` (§3.7).
 
 ### 3.4 `profile`
 
@@ -109,7 +114,9 @@ Sent **immediately before** `tox_file_send` of a `TOX_FILE_KIND_DATA` transfer w
 
 ## 5. Status model (sender side)
 
-`queued` (friend offline, or toxcore refused) → `sent` → `delivered` (ack / transfer complete) → `read` (receipt). `failed` after 24 h without ack or when a file transfer is declined. Presence for the queue decision is asked from toxcore at send time, not from a cached flag.
+`queued` (friend offline, or toxcore refused) → `sent` → `delivered` (ack / transfer complete) → `read` (receipt) → `handled` (`done` receipt). `failed` after 24 h without ack or when a file transfer is declined. Presence for the queue decision is asked from toxcore at send time, not from a cached flag.
+
+Replies are routed locally: a node remembers which of its own sessions sent each message (never on the wire) and delivers an incoming `reply_to` to that session, or to the session that last wrote in the same thread with that contact, for 30 minutes; after that, or without such a link, the peer's configured binding applies.
 
 ## 6. Limits and abuse resistance
 

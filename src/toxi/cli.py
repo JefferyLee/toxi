@@ -46,6 +46,11 @@ def _default_session() -> str | None:
     return (s or "")[:64] or None
 
 
+def _default_session_dir() -> str | None:
+    """The project dir of the session sending this, for reply routing (local only)."""
+    return os.environ.get("CLAUDE_PROJECT_DIR") or None
+
+
 def _sender(m: dict) -> str:
     """`alias` or `alias@session` when the sender tagged the message with a session."""
     return f"{m['alias']}@{m['from_session']}" if m.get("from_session") else m["alias"]
@@ -95,6 +100,9 @@ def me(ctx):
     if info["name"]:
         click.echo(f"Display name: {info['name']}")
     click.echo(f"Connection: {_CONNECTION.get(info['connection'], 'unknown')}")
+    if info.get("dht_id"):
+        click.echo(f"DHT node: {info['dht_id']} udp {info['udp_port']}  "
+                   f"(another daemon can [tox] bootstrap to this)")
 
 
 @cli.command(name="set-name")
@@ -242,6 +250,8 @@ def _content(m: dict) -> str:
                    "else the Claude Code project dir name).")
 @click.option("--wait-read", "wait_read", default=0, metavar="SECONDS",
               help="Wait up to this long for the recipient's read receipt.")
+@click.option("--wait-handled", "wait_handled", default=0, metavar="SECONDS",
+              help="Wait up to this long for the recipient's `done` receipt (answered / handled).")
 @click.option("-t", "--thread", default=None, help="Thread / topic id, e.g. pr-123.")
 @click.option("-r", "--reply-to", "reply_to", default=None, metavar="MSG_ID",
               help="The message id this answers.")
@@ -253,16 +263,17 @@ def _content(m: dict) -> str:
               help="Flag that a person, not the peer agent, must decide this.")
 @click.option("--tag", "tags", multiple=True, help="Free-form tag (repeatable), e.g. WARN.")
 @click.pass_context
-def send(ctx, alias, message, file_path, session, wait_read, thread, reply_to, kind, needs_human,
-         tags):
+def send(ctx, alias, message, file_path, session, wait_read, wait_handled, thread, reply_to, kind,
+         needs_human, tags):
     """Send a message: toxi send <alias> <message> (use - to read from stdin), or a file
     with --file. Bodies over 64 KB go as a text file automatically."""
     if message == "-":
         message = sys.stdin.read().rstrip("\n")
     if message is None and not file_path:
         raise click.UsageError("give a MESSAGE, or --file PATH, or both")
-    meta = {"session": session or _default_session(), "thread": thread, "reply_to": reply_to,
-            "kind": kind, "needs_human": needs_human, "tags": list(tags)}
+    meta = {"session": session or _default_session(), "session_dir": _default_session_dir(),
+            "thread": thread, "reply_to": reply_to, "kind": kind, "needs_human": needs_human,
+            "tags": list(tags)}
     if message is not None:
         res = _call("send_message", {"alias": alias, "body": message, **meta})
     if file_path:
@@ -273,14 +284,21 @@ def send(ctx, alias, message, file_path, session, wait_read, thread, reply_to, k
             click.echo(f"✓ file {fres['name']} ({fres['size']} bytes): {fres['status']}")
     if res.get("as_file"):
         click.echo(f"ℹ body over 64 KB — sent as a text file ({res['size']} bytes)", err=True)
-    if wait_read > 0:
-        res["status"] = _wait_status(res["msg_uuid"], wait_read)
-        res["read"] = res["status"] == "read"
+    if wait_handled > 0:
+        res["status"] = _wait_status(res["msg_uuid"], wait_handled, ("handled", "failed"))
+    elif wait_read > 0:
+        res["status"] = _wait_status(res["msg_uuid"], wait_read, ("read", "handled", "failed"))
+    if wait_read or wait_handled:
+        res["read"] = res["status"] in ("read", "handled")
+        res["handled"] = res["status"] == "handled"
     if _emit(ctx, res):
         return
     parts = f" ({res['parts']} parts)" if res.get("parts") else ""
-    if res["status"] == "read":
-        click.echo(f"✓ read by {alias}{parts}")
+    if res["status"] == "handled":
+        click.echo(f"✓ handled by {alias}{parts}")
+    elif res["status"] == "read":
+        click.echo(f"✓ read by {alias}{parts}" + (
+            f" — not handled within {wait_handled}s" if wait_handled > 0 else ""))
     elif res["status"] == "sent" or res["status"] == "delivered":
         click.echo(f"✓ {res['status']}{parts}" + (
             f" — not read within {wait_read}s" if wait_read > 0 else ""))
@@ -292,16 +310,25 @@ def _emit_quiet(ctx) -> bool:
     return bool(ctx.obj and ctx.obj.get("json"))
 
 
-def _wait_status(msg_uuid: str, seconds: int) -> str:
-    """Poll a sent message until it is read (or failed) or `seconds` pass."""
+def _wait_status(msg_uuid: str, seconds: int, until=("read", "handled", "failed")) -> str:
+    """Poll a sent message until its status is one of `until` or `seconds` pass."""
     deadline = time.monotonic() + seconds
     status = "sent"
     while True:
         m = _call("get_message", {"msg_uuid": msg_uuid}).get("message") or {}
         status = m.get("status", status)
-        if status in ("read", "failed") or time.monotonic() >= deadline:
+        if status in until or time.monotonic() >= deadline:
             return status
         time.sleep(0.5)
+
+
+@cli.command()
+@click.argument("msg_uuids", nargs=-1, required=True)
+def done(msg_uuids):
+    """Mark incoming messages handled: the senders get a `done` receipt. (A reply
+    with -r <id> does this automatically.)"""
+    res = _call("mark_handled", {"msg_uuids": list(msg_uuids)})
+    click.echo(f"✓ {res['handled']} message(s) marked handled")
 
 
 _RESET = "\033[0m"
@@ -654,7 +681,8 @@ def room_send(ctx, room_ref, message, thread, kind, needs_human, tags, session):
         message = sys.stdin.read().rstrip("\n")
     res = _call("send_room", {"room": room_ref, "body": message, "thread": thread, "kind": kind,
                               "needs_human": needs_human, "tags": list(tags),
-                              "session": session or _default_session()})
+                              "session": session or _default_session(),
+                              "session_dir": _default_session_dir()})
     if _emit(ctx, res):
         return
     done = ", ".join(f"{s['alias']} ({s['status']})" for s in res["sent"]) or "nobody"
@@ -680,6 +708,8 @@ def threads(ctx, alias):
             flags.append(f"📬 {r['unread']}")
         if r["needs_human"]:
             flags.append(f"⚑ {r['needs_human']} needs your decision")
+        if r.get("open_requests"):
+            flags.append(f"⏳ {r['open_requests']} awaiting an answer")
         click.echo(f"  #{r['thread']:20} {r['alias']:12} {r['count']:3} msgs · "
                    f"{_ago(r['last_at'])}" + (" · " + " · ".join(flags) if flags else ""))
 
@@ -844,7 +874,9 @@ def agent_run(command, aliases, context, session, timeout):
         if reply:
             _call("send_message", {"alias": m["alias"], "body": reply, "session": session,
                                    "thread": m.get("thread"), "reply_to": m["msg_uuid"],
-                                   "kind": "report"})
+                                   "kind": "report"})  # the reply_to also sends `done`
+        elif r.returncode == 0:
+            _call("mark_handled", {"msg_uuids": [m["msg_uuid"]]})
         note = " replied" if reply else ""
         click.echo(f"{time.strftime('%H:%M:%S')} {m['alias']}: {m['content'][:60]!r} "
                    f"-> rc={r.returncode}{note}")

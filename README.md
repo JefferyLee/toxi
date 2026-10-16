@@ -54,7 +54,7 @@ Every injected line looks like `castle-op [agent/grok @ grok-vm · operator jeff
 |---|---|
 | identity | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor` |
 | contacts | `toxi pair` / `toxi join <invite>` · `toxi add` / `toxi requests` / `toxi accept` · `toxi rename` · `toxi contacts` · `toxi peers` · `toxi introduce` |
-| messages | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi queue` · `toxi watch` |
+| messages | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N] [--wait-handled N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi done <id>…` · `toxi queue` · `toxi watch` |
 | rooms | `toxi room create <name> <alias>…` · `room add/remove` · `room send` · `room list/show` · `toxi read - --room <name>` |
 | agents | `toxi peer-inbox` (what hooks call) · `toxi agent run --exec CMD` · `toxi mcp serve` · `toxi setup claude\|codex\|headless` |
 | daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade` · `toxi teardown` |

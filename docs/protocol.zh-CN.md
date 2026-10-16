@@ -50,7 +50,12 @@
 
 ### 3.3 `receipt`
 
-`data: {"ref_uuid", "kind": "read"}`。接收方在消息**被人看到或被送进 agent 上下文**时发出，且只发给 `caps` 含 `receipt` 的对端。发送方把 `ref_uuid` 标为 `read`（若 ack 丢了也顺带标 `delivered`）。多段消息的 `ref_uuid` 是分片 id（发送方把所有段都标上）；文件的是发送方的文件 `msg_uuid`（§3.7）。回执绝不唤醒任何人。
+`data: {"ref_uuid", "kind": "read" | "done"}`。只发给 `caps` 含 `receipt` 的对端；回执绝不唤醒任何人。
+
+- `read`：消息**被人看到或被送进 agent 上下文**。发送方把 `ref_uuid` 标为 `read`（若 ack 丢了也顺带标 `delivered`）。
+- `done`：接收方**处理完了**——用 `reply_to` 指向该消息回复了（自动），或显式标记处理完（`toxi done`、MCP `mark_handled`）。发送方标为 `handled`；`done` 蕴含 `read`，之后到来的 `read` 不会把 `handled` 降级。不认识 `done` 的接收方把它当 `read`。
+
+多段消息的 `ref_uuid` 是分片 id（发送方把所有段都标上）；文件的是发送方的文件 `msg_uuid`（§3.7）。
 
 ### 3.4 `profile`
 
@@ -109,7 +114,9 @@
 
 ## 5. 状态模型（发送方）
 
-`queued`（对方离线，或 toxcore 拒发）→ `sent` → `delivered`（ack / 传输完成）→ `read`（回执）。24 小时无 ack 或文件被拒收则 `failed`。是否入队由发送时向 toxcore 询问在线状态决定，而不是缓存的标志。
+`queued`（对方离线，或 toxcore 拒发）→ `sent` → `delivered`（ack / 传输完成）→ `read`（回执）→ `handled`（`done` 回执）。24 小时无 ack 或文件被拒收则 `failed`。是否入队由发送时向 toxcore 询问在线状态决定，而不是缓存的标志。
+
+回复在本地路由：节点记住自己哪个会话发出了每条消息（不上线路），收到 `reply_to` 指向它的消息时投递给那个会话，或投递给最近在同一线程里与该联系人对话的会话，有效期 30 分钟；之后或没有这种关联时，按该对端配置的绑定投递。
 
 ## 6. 上限与防滥用
 

@@ -103,7 +103,9 @@ _ADDED_COLUMNS = {
                  ("tags", "TEXT"),                    # JSON list of free-form tags
                  ("room_id", "TEXT"),                 # app-layer room this message belongs to
                  ("room_msg_id", "TEXT"),             # id shared by the fan-out copies of one room message
-                 ("sha256", "TEXT")],                 # files: digest declared by the sender / verified by us
+                 ("sha256", "TEXT"),                  # files: digest declared by the sender / verified by us
+                 ("from_dir", "TEXT"),                # outgoing: project dir of the sending session (local only)
+                 ("handled_at", "INTEGER")],          # `done` receipt (out) / we marked it handled (in)
 }
 
 

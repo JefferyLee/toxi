@@ -118,6 +118,19 @@ def _harden_permissions() -> None:
             os.chmod(f, 0o600)
 
 
+# Which of the user's sessions an incoming message belongs to (design: reply
+# routing): the session that sent the message it answers, else the session that
+# last wrote in the same thread with that contact. Local project dirs only.
+_ROUTE_DIR_SQL = (
+    "CASE WHEN m.direction='in' THEN COALESCE("
+    "(SELECT o.from_dir FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
+    " AND m.reply_to IS NOT NULL AND (o.msg_uuid=m.reply_to OR o.part_id=m.reply_to) LIMIT 1),"
+    "(SELECT o.from_dir FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
+    " AND m.thread IS NOT NULL AND o.thread=m.thread AND o.contact_id=m.contact_id "
+    " ORDER BY o.created_at DESC, o.id DESC LIMIT 1)) END"
+)
+
+
 def _with_profile(row) -> dict:
     """Row -> dict: profile_json parsed into `profile`, meta columns normalised."""
     d = dict(row)
@@ -165,7 +178,7 @@ def _merge_room_sends(msgs: list) -> list:
     """Collapse the fan-out copies of one outgoing room message (same room_msg_id)
     into a single row carrying `recipients: [{alias, status}]`."""
     out, groups = [], {}
-    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "failed": -1}
+    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "handled": 4, "failed": -1}
     for m in msgs:
         rid = m.get("room_msg_id")
         if not rid or m.get("direction") != "out":
@@ -205,7 +218,7 @@ def _merge_parts(msgs: list) -> list:
     single message: content joined in order, msg_uuid = part_id, status = the
     least advanced part. Rows arrive newest first and leave newest first."""
     out, groups = [], {}
-    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "failed": -1}
+    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "handled": 4, "failed": -1}
     for m in msgs:
         pid = m.get("part_id")
         if not pid:
@@ -302,6 +315,7 @@ class Daemon:
             "room_members": self._room_members_rpc,
             "send_file": self._send_file,
             "rename_contact": self._rename_contact,
+            "mark_handled": self._mark_handled,
             "shutdown": self._shutdown,
         }
 
@@ -596,23 +610,37 @@ class Daemon:
 
     # --- read receipts (design §4.3) ---
     def _receive_receipt(self, friend_number: int, env: dict) -> None:
-        ref = str(env.get("data", {}).get("ref_uuid") or "")
+        """`read`: the peer saw it. `done`: the peer handled it (answered, or marked
+        it handled) — implies read. Never downgrades a status."""
+        data = env.get("data", {})
+        ref = str(data.get("ref_uuid") or "")[:64]
+        kind = "done" if data.get("kind") == "done" else "read"
         if not ref:
             return
         now = int(time.time())
-        cur = self.db.execute(
-            "UPDATE messages SET status='read', read_receipt_at=?, "
-            "delivered_at=COALESCE(delivered_at, ?) "
-            "WHERE direction='out' AND read_receipt_at IS NULL AND (msg_uuid=? OR part_id=?)",
-            (now, now, ref, ref),
-        )
+        if kind == "done":
+            cur = self.db.execute(
+                "UPDATE messages SET status='handled', handled_at=?, "
+                "read_receipt_at=COALESCE(read_receipt_at, ?), delivered_at=COALESCE(delivered_at, ?) "
+                "WHERE direction='out' AND handled_at IS NULL AND (msg_uuid=? OR part_id=?)",
+                (now, now, now, ref, ref),
+            )
+        else:
+            cur = self.db.execute(
+                "UPDATE messages SET status='read', read_receipt_at=?, "
+                "delivered_at=COALESCE(delivered_at, ?) "
+                "WHERE direction='out' AND read_receipt_at IS NULL AND status!='handled' "
+                "AND (msg_uuid=? OR part_id=?)",
+                (now, now, ref, ref),
+            )
         self.db.commit()
         if cur.rowcount:
             alias = self._alias_of(friend_number)
-            self._emit("receipt", {"msg_uuid": ref, "alias": alias, "kind": "read"}, alias)
+            self._emit("receipt", {"msg_uuid": ref, "alias": alias, "kind": kind}, alias)
 
-    def _send_receipts(self, uuids: list) -> None:
-        """Tell senders that advertise the `receipt` cap that we have read these."""
+    def _send_receipts(self, uuids: list, kind: str = "read") -> None:
+        """Tell senders that advertise the `receipt` cap that we have read (or
+        handled) these messages."""
         if not uuids:
             return
         qs = ",".join("?" * len(uuids))
@@ -623,7 +651,35 @@ class Daemon:
         for r in rows:
             if r["friend_number"] is not None and r["is_online"] and "receipt" in _caps(r):
                 self.tox.friend_send_message(
-                    r["friend_number"], envelope.encode(envelope.make_receipt(r["msg_uuid"])))
+                    r["friend_number"],
+                    envelope.encode(envelope.make_receipt(r["msg_uuid"], kind)))
+
+    def _mark_handled(self, params: dict) -> dict:
+        """We (or our agent) dealt with these incoming messages: mark them read and
+        handled locally and send `done` receipts (design: processing receipt)."""
+        now = int(time.time())
+        uuids = [str(u)[:64] for u in params.get("msg_uuids", [])]
+        done = []
+        for u in uuids:
+            cur = self.db.execute(
+                "UPDATE messages SET handled_at=?, read_at=COALESCE(read_at, ?), "
+                "status=CASE WHEN status='received' THEN 'read' ELSE status END "
+                "WHERE msg_uuid=? AND direction='in' AND handled_at IS NULL", (now, now, u))
+            if cur.rowcount:
+                done.append(u)
+        self.db.commit()
+        self._send_receipts(done, "done")
+        return {"handled": len(done)}
+
+    def _auto_done(self, contact_id: int, reply_to) -> None:
+        """A reply that references one of this contact's messages handles it."""
+        if not reply_to:
+            return
+        row = self.db.execute(
+            "SELECT msg_uuid FROM messages WHERE msg_uuid=? AND contact_id=? AND direction='in' "
+            "AND handled_at IS NULL", (str(reply_to)[:64], contact_id)).fetchone()
+        if row:
+            self._mark_handled({"msg_uuids": [row["msg_uuid"]]})
 
     # --- event stream for subscribers (design §4.3) ---
     def _announce(self, msg_uuid: str, alias: str, wake: bool = True) -> None:
@@ -1134,17 +1190,19 @@ class Daemon:
                            f"{size} bytes; the limit is {MAX_FILE_BYTES // (1024 * 1024)} MB")
         meta = envelope.clean_meta(params)
         session = str(params.get("session") or "").strip()[:64] or None
+        from_dir = str(params.get("session_dir") or "").strip()[:512] or None
         uid, now = str(_uuid.uuid4()), int(time.time())
         digest = _sha256(path)
         kind = _classify_media(path.name)
         self.db.execute(
             "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, created_at, "
             "status, from_session, sha256, thread, reply_to, kind, needs_human, tags, room_id, "
-            "room_msg_id) VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "room_msg_id, from_dir) VALUES (?, ?, 'out', ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (uid, contact["id"], kind, str(path.resolve()), now, session, digest,
-             *_meta_values(meta)),
+             *_meta_values(meta), from_dir),
         )
         self.db.commit()
+        self._auto_done(contact["id"], meta.get("reply_to"))
         fn = contact["friend_number"]
         started = False
         if fn is not None and self.tox.friend_get_connection_status(fn) != 0:
@@ -1330,8 +1388,15 @@ class Daemon:
         os.replace(tmp, paths.tox_state_path())
 
     def _bootstrap(self) -> None:
-        for host, port, key in DEFAULT_BOOTSTRAP:
-            self.tox.bootstrap(host, port, key)
+        cfg = config.tox_config()
+        nodes = (DEFAULT_BOOTSTRAP if cfg["public_dht"] else []) + cfg["bootstrap"]
+        for host, port, key in nodes:
+            try:
+                self.tox.bootstrap(host, port, key)
+            except ValueError:
+                log.warning("bad bootstrap node %s:%s", host, port)
+        if not cfg["public_dht"]:
+            log.info("public DHT disabled; %d private bootstrap node(s)", len(cfg["bootstrap"]))
 
     def _listen(self) -> None:
         sp = paths.socket_path()
@@ -1434,6 +1499,8 @@ class Daemon:
             "tox_id": self.tox.self_get_address_hex(),
             "name": self.tox.self_get_name().decode("utf-8", "replace"),
             "connection": self.tox.self_get_connection_status(),
+            "dht_id": self.tox.self_get_dht_id_hex(),
+            "udp_port": self.tox.self_get_udp_port(),
         }
 
     def _set_name(self, params: dict) -> dict:
@@ -1605,6 +1672,7 @@ class Daemon:
             return res
 
         session = str(params.get("session") or "").strip()[:64] or None
+        from_dir = str(params.get("session_dir") or "").strip()[:512] or None
         meta = envelope.clean_meta(params)
         fn = contact["friend_number"]
         # Presence straight from toxcore: the DB flag can lag behind a dropped link.
@@ -1626,11 +1694,11 @@ class Daemon:
             self.db.execute(
                 "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
                 "created_at, status, from_session, part_id, part_i, part_n, "
-                "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id) "
-                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, from_dir) "
+                "VALUES (?, ?, 'out', 'text', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (env["uuid"], contact["id"], chunk, env["ts"], session, part_id,
                  i if part_id else None, len(chunks) if part_id else None,
-                 *_meta_values(meta)),
+                 *_meta_values(meta), from_dir),
             )
             self.db.commit()
             uuids.append(env["uuid"])
@@ -1646,6 +1714,7 @@ class Daemon:
             self._emit("send.failed", {"msg_uuid": part_id or uuids[0], "alias": alias,
                                        "reason": "toxcore refused the message; queued for retry"},
                        alias)
+        self._auto_done(contact["id"], meta.get("reply_to"))
         res = {"msg_uuid": part_id or uuids[0], "status": "sent" if online else "queued"}
         if len(uuids) > 1:
             res.update(parts=len(uuids), msg_uuids=uuids)
@@ -1665,9 +1734,10 @@ class Daemon:
         if params.get("unread_only"):
             conds.append("m.direction='in' AND m.read_at IS NULL")
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                 "m.status, m.read_at, m.from_session, m.part_id, m.part_i, m.part_n, "
+                 "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                  "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                 "r.name AS room_name, c.profile_json FROM messages m "
+                 "r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
+                 "FROM messages m "
                  "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id")
         if conds:
             query += " WHERE " + " AND ".join(conds)
@@ -1678,9 +1748,10 @@ class Daemon:
 
     def _get_message(self, params: dict) -> dict:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                "m.status, m.read_at, m.from_session, m.part_id, m.part_i, m.part_n, "
+                "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                "r.name AS room_name, c.profile_json FROM messages m "
+                "r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
+                "FROM messages m "
                 "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id ")
         rows = self.db.execute(cols + "WHERE m.msg_uuid=?", (params.get("msg_uuid"),)).fetchall()
         if not rows:  # the id of a multi-part text we sent: its parts share it
@@ -1796,7 +1867,9 @@ class Daemon:
             "SELECT c.alias, m.thread, COUNT(*) AS count, MAX(m.created_at) AS last_at, "
             "SUM(CASE WHEN m.direction='in' AND m.read_at IS NULL THEN 1 ELSE 0 END) AS unread, "
             "SUM(CASE WHEN m.needs_human=1 AND m.direction='in' AND m.read_at IS NULL "
-            "THEN 1 ELSE 0 END) AS needs_human "
+            "THEN 1 ELSE 0 END) AS needs_human, "
+            "SUM(CASE WHEN m.direction='out' AND m.kind='request' AND m.status NOT IN "
+            "('handled','failed') THEN 1 ELSE 0 END) AS open_requests "
             "FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE " + " AND ".join(conds) +
             " GROUP BY c.alias, m.thread ORDER BY last_at DESC LIMIT ?",
             (*args, int(params.get("limit", 50))),
