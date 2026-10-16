@@ -32,6 +32,7 @@ def test_install_status_uninstall_macos(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("TOXI_HOME", raising=False)
     monkeypatch.setattr(service, "is_macos", lambda: True)
+    monkeypatch.setattr(service, "manager", lambda: "/bin/launchctl")
     calls = []
 
     def fake_run(cmd):
@@ -52,9 +53,10 @@ def test_install_status_uninstall_macos(tmp_path, monkeypatch):
     assert service.status()["installed"] is False
 
 
-def test_install_failure_is_reported(tmp_path, monkeypatch):
+def test_install_failure_is_reported_and_leaves_no_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(service, "is_macos", lambda: False)
+    monkeypatch.setattr(service, "manager", lambda: "/bin/systemctl")
     monkeypatch.setattr(service, "_run", lambda cmd: subprocess.CompletedProcess(cmd, 1, "", "no systemd"))
     try:
         service.install()
@@ -62,3 +64,29 @@ def test_install_failure_is_reported(tmp_path, monkeypatch):
         assert "no systemd" in str(e)
     else:
         raise AssertionError("expected ServiceError")
+    assert not service.service_path().exists() and service.installed() is False
+
+
+def test_no_service_manager_means_not_installable_and_not_installed(tmp_path, monkeypatch):
+    """A Linux VM without systemd (the Grok bots' case): install refuses up front,
+    a stale unit file from an older build does not count as installed, and
+    uninstall still removes it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(service, "is_macos", lambda: False)
+    monkeypatch.setattr(service, "manager", lambda: None)
+    try:
+        service.install()
+    except service.ServiceError as e:
+        assert "systemctl not found" in str(e)
+    else:
+        raise AssertionError("expected ServiceError")
+    assert not service.service_path().exists()
+    service.service_path().parent.mkdir(parents=True)
+    service.service_path().write_text("[Unit]\n")  # left behind by the buggy build
+    assert service.installed() is False
+    assert service.uninstall() is True and not service.service_path().exists()
+
+
+def test_run_reports_a_missing_manager_binary():
+    r = service._run(["definitely-not-a-command-xyz", "--user"])
+    assert r.returncode == 127 and "command not found" in r.stderr

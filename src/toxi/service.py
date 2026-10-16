@@ -9,6 +9,7 @@ import os
 import platform
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -52,8 +53,15 @@ def service_path() -> Path:
     return plist_path() if is_macos() else unit_path()
 
 
+def manager() -> str | None:
+    """Path of the service manager CLI (launchctl / systemctl), or None if absent."""
+    return shutil.which("launchctl" if is_macos() else "systemctl")
+
+
 def installed() -> bool:
-    return service_path().exists()
+    # A definition file without a manager to run it (e.g. a Linux box without
+    # systemd) does not count: nothing would restart the daemon.
+    return service_path().exists() and manager() is not None
 
 
 def _program() -> list[str]:
@@ -106,7 +114,10 @@ class ServiceError(RuntimeError):
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: command not found")
 
 
 def _check(r: subprocess.CompletedProcess, what: str) -> None:
@@ -119,32 +130,50 @@ def _domain() -> str:
 
 
 def install() -> Path:
-    """Write the service definition and start it. Idempotent."""
+    """Write the service definition and start it. Idempotent.
+
+    Probes for the service manager first and removes the definition again if
+    activation fails, so a failed install never leaves a file that would make
+    `installed()` lie later (e.g. a Linux VM without systemd).
+    """
+    if manager() is None:
+        raise ServiceError("no service manager here: " + (
+            "launchctl not found" if is_macos()
+            else "systemctl not found (no systemd user session on this machine); "
+                 "keep starting the daemon with `toxi daemon start` (e.g. from cron)"))
     p = service_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    if is_macos():
-        if p.exists():
-            _run(["launchctl", "bootout", f"{_domain()}/{label()}"])
-        p.write_bytes(render_plist())
-        _check(_run(["launchctl", "bootstrap", _domain(), str(p)]), "launchctl bootstrap")
-    else:
-        p.write_text(render_unit())
-        _check(_run(["systemctl", "--user", "daemon-reload"]), "systemctl daemon-reload")
-        _check(_run(["systemctl", "--user", "enable", "--now", unit_name()]), "systemctl enable")
+    existed = p.exists()
+    try:
+        if is_macos():
+            if existed:
+                _run(["launchctl", "bootout", f"{_domain()}/{label()}"])
+            p.write_bytes(render_plist())
+            _check(_run(["launchctl", "bootstrap", _domain(), str(p)]), "launchctl bootstrap")
+        else:
+            p.write_text(render_unit())
+            _check(_run(["systemctl", "--user", "daemon-reload"]), "systemctl daemon-reload")
+            _check(_run(["systemctl", "--user", "enable", "--now", unit_name()]), "systemctl enable")
+    except ServiceError:
+        if not existed:
+            p.unlink(missing_ok=True)
+        raise
     return p
 
 
 def uninstall() -> bool:
-    """Stop the service and remove its definition. Returns False if none was installed."""
+    """Stop the service and remove its definition (also a stale one left by a
+    failed install). Returns False if there was nothing to remove."""
     p = service_path()
     if not p.exists():
         return False
-    if is_macos():
-        _run(["launchctl", "bootout", f"{_domain()}/{label()}"])
-    else:
-        _run(["systemctl", "--user", "disable", "--now", unit_name()])
+    if manager() is not None:
+        if is_macos():
+            _run(["launchctl", "bootout", f"{_domain()}/{label()}"])
+        else:
+            _run(["systemctl", "--user", "disable", "--now", unit_name()])
     p.unlink()
-    if not is_macos():
+    if not is_macos() and manager() is not None:
         _run(["systemctl", "--user", "daemon-reload"])
     return True
 
