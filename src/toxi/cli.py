@@ -280,7 +280,9 @@ def send(ctx, alias, message, file_path, session, wait_read, wait_handled, threa
         fres = _call("send_file", {"alias": alias, "path": file_path, **meta})
         if message is None:
             res = fres
-        elif not _emit_quiet(ctx):
+        elif _emit_quiet(ctx):
+            res = {"text": res, "file": fres, "msg_uuid": res["msg_uuid"], "status": res["status"]}
+        else:
             click.echo(f"✓ file {fres['name']} ({fres['size']} bytes): {fres['status']}")
     if res.get("as_file"):
         click.echo(f"ℹ body over 64 KB — sent as a text file ({res['size']} bytes)", err=True)

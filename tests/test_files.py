@@ -186,6 +186,8 @@ def test_cli_and_mcp_send_file(monkeypatch, tmp_path):
     assert calls[-1][0] == "send_file" and calls[-1][1]["path"] == str(f) and calls[-1][1]["thread"] == "ui"
     r = CliRunner().invoke(cli, ["send", "bob", "see attached", "--file", str(f)])
     assert [m for m, _ in calls[-2:]] == ["send_message", "send_file"] and "✓ file shot.png" in r.output
+    both = json.loads(CliRunner().invoke(cli, ["--json", "send", "bob", "caption", "--file", str(f)]).output)
+    assert both["text"]["msg_uuid"] == "t" and both["file"]["msg_uuid"] == "f"  # --json reports both
     assert CliRunner().invoke(cli, ["send", "bob"]).exit_code != 0
 
     from toxi import mcp_server
