@@ -180,3 +180,48 @@ def test_cli_done_and_wait_handled(monkeypatch):
     r = CliRunner().invoke(cli, ["send", "codex", "go", "--wait-handled", "5"])
     assert "✓ handled by codex" in r.output
     assert next(p for m, p in calls if m == "send_message")["session_dir"] == "/w/asker"
+
+
+# --- receipts are owed, not fire-and-forget -----------------------------------
+
+def test_receipts_are_queued_until_the_sender_can_take_them(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    q = _incoming(d, "report while you were away", kind="report")
+    d.db.execute("UPDATE contacts SET is_online=0")
+    d.db.commit()
+    d.tox.sent.clear()
+    d._mark_read({"msg_uuids": [q]})
+    assert d.tox.sent == []  # sender offline: nothing goes out yet
+    assert d.db.execute("SELECT receipt_pending FROM messages WHERE msg_uuid=?", (q,)).fetchone()[0] == "read"
+    d._mark_handled({"msg_uuids": [q]})
+    assert d.db.execute("SELECT receipt_pending FROM messages WHERE msg_uuid=?", (q,)).fetchone()[0] == "done"
+    # the sender comes back: exactly one receipt, the strongest kind, then nothing owed
+    d._on_friend_connection_status(5, 2)
+    receipts = [e["data"] for _, e in d.tox.sent if e["type"] == "receipt"]
+    assert receipts == [{"ref_uuid": q, "kind": "done"}]
+    assert d.db.execute("SELECT receipt_pending FROM messages WHERE msg_uuid=?", (q,)).fetchone()[0] is None
+    d.tox.sent.clear()
+    d._retry_sweep()
+    assert not [e for _, e in d.tox.sent if e["type"] == "receipt"]
+
+
+def test_receipt_stays_owed_when_toxcore_refuses_and_goes_when_the_peer_learns_the_cap(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    q = _incoming(d, "hi")
+    d.tox.friend_send_message = lambda fn, payload, msg_type=0: False  # connected but refused
+    d._mark_read({"msg_uuids": [q]})
+    assert d.db.execute("SELECT receipt_pending FROM messages WHERE msg_uuid=?", (q,)).fetchone()[0] == "read"
+    sent = []
+    d.tox.friend_send_message = lambda fn, payload, msg_type=0: sent.append(envelope.parse(payload)) or True
+    d._retry_sweep()
+    assert [e["data"]["kind"] for e in sent if e["type"] == "receipt"] == ["read"]
+    # a peer without the cap owes nothing until its card says `receipt`
+    d2 = _daemon(tmp_path / "nocap", monkeypatch)
+    d2.db.execute("UPDATE contacts SET profile_json=?", (json.dumps({"kind": "agent", "caps": ["profile"]}),))
+    d2.db.commit()
+    q2 = _incoming(d2, "hello")
+    d2.tox.sent.clear()
+    d2._mark_read({"msg_uuids": [q2]})
+    assert d2.tox.sent == []
+    d2._on_friend_message(5, envelope.encode(envelope.make_profile({"kind": "agent", "caps": ["receipt"]})), 0)
+    assert [e["data"]["kind"] for _, e in d2.tox.sent if e["type"] == "receipt"] == ["read"]

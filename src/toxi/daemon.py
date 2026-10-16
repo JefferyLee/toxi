@@ -393,6 +393,7 @@ class Daemon:
             self._send_profile(friend_number)
             self._send_room_cards(friend_number)
             self._flush_queue(row["id"], friend_number)
+            self._flush_receipts(row["id"], friend_number)
 
     def _flush_queue(self, contact_id: int, friend_number: int) -> None:
         """Resend this friend's queued messages in send order (PRD §4.3.4).
@@ -427,11 +428,12 @@ class Daemon:
         self.db.execute(
             f"UPDATE messages SET status='queued' WHERE direction='out' AND msg_type!='text' "
             f"AND status='sent' AND msg_uuid NOT IN ({','.join('?' * len(active))})", active)
-        # Queued rows for friends who are online (toxcore refused a send earlier).
+        # Queued rows and owed receipts for friends who are online.
         for c in self.db.execute(
             "SELECT id, friend_number FROM contacts WHERE is_online=1 AND friend_number IS NOT NULL"
         ).fetchall():
             self._flush_queue(c["id"], c["friend_number"])
+            self._flush_receipts(c["id"], c["friend_number"])
         rows = self.db.execute(
             "SELECT m.msg_uuid, m.content, m.created_at, m.last_attempt_at, m.from_session, "
             "m.part_id, m.part_i, m.part_n, m.thread, m.reply_to, m.kind, m.needs_human, m.tags, "
@@ -639,20 +641,47 @@ class Daemon:
             self._emit("receipt", {"msg_uuid": ref, "alias": alias, "kind": kind}, alias)
 
     def _send_receipts(self, uuids: list, kind: str = "read") -> None:
-        """Tell senders that advertise the `receipt` cap that we have read (or
-        handled) these messages."""
+        """Owe the senders a receipt for these messages and try to send it now.
+
+        The receipt is recorded as pending first and only cleared once toxcore
+        accepted it, so a sender that is offline (or a daemon restart in
+        between) gets it later from _flush_receipts. `done` supersedes `read`.
+        """
         if not uuids:
             return
         qs = ",".join("?" * len(uuids))
+        self.db.execute(
+            f"UPDATE messages SET receipt_pending=? WHERE direction='in' AND msg_uuid IN ({qs}) "
+            f"AND (receipt_pending IS NULL OR receipt_pending='read' OR ?='done')",
+            (kind, *uuids, kind))
+        self.db.commit()
         rows = self.db.execute(
-            f"SELECT m.msg_uuid, c.friend_number, c.is_online, c.profile_json FROM messages m "
-            f"JOIN contacts c ON c.id=m.contact_id WHERE m.msg_uuid IN ({qs})", uuids,
+            f"SELECT DISTINCT c.id, c.friend_number FROM messages m JOIN contacts c "
+            f"ON c.id=m.contact_id WHERE m.msg_uuid IN ({qs}) AND c.is_online=1", uuids,
         ).fetchall()
         for r in rows:
-            if r["friend_number"] is not None and r["is_online"] and "receipt" in _caps(r):
-                self.tox.friend_send_message(
-                    r["friend_number"],
-                    envelope.encode(envelope.make_receipt(r["msg_uuid"], kind)))
+            self._flush_receipts(r["id"], r["friend_number"])
+
+    def _flush_receipts(self, contact_id: int, friend_number) -> int:
+        """Send every receipt still owed to this contact (if it wants receipts)."""
+        if friend_number is None:
+            return 0
+        c = self.db.execute("SELECT profile_json FROM contacts WHERE id=?", (contact_id,)).fetchone()
+        if c is None or "receipt" not in _caps(c):
+            return 0
+        rows = self.db.execute(
+            "SELECT msg_uuid, receipt_pending FROM messages WHERE contact_id=? AND direction='in' "
+            "AND receipt_pending IS NOT NULL ORDER BY id", (contact_id,)).fetchall()
+        sent = 0
+        for r in rows:
+            payload = envelope.encode(envelope.make_receipt(r["msg_uuid"], r["receipt_pending"]))
+            if not self.tox.friend_send_message(friend_number, payload):
+                break  # not connected right now: keep the rest pending
+            self.db.execute("UPDATE messages SET receipt_pending=NULL WHERE msg_uuid=? "
+                            "AND receipt_pending=?", (r["msg_uuid"], r["receipt_pending"]))
+            sent += 1
+        self.db.commit()
+        return sent
 
     def _mark_handled(self, params: dict) -> dict:
         """We (or our agent) dealt with these incoming messages: mark them read and
@@ -784,6 +813,11 @@ class Daemon:
              int(prof.get("proto") or 1), friend_number),
         )
         self.db.commit()
+        if "receipt" in (prof.get("caps") or []):
+            c = self.db.execute("SELECT id FROM contacts WHERE friend_number=?",
+                                (friend_number,)).fetchone()
+            if c is not None:
+                self._flush_receipts(c["id"], friend_number)
 
     def _send_profile(self, friend_number: int) -> bool:
         if not self.profile:
