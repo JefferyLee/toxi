@@ -11,7 +11,10 @@ message history, daemon status, or sending a toxi message.
 ## Workflow
 
 1. Prefer the toxi MCP tools when available: `get_status`, `get_unread`,
-   `read_history`, `mark_read`, `list_contacts`, and `send_message`.
+   `read_history`, `get_threads`, `mark_read`, `list_contacts`, `get_peers`,
+   `send_message` (with `thread`, `reply_to`, `kind` = request | report | ack |
+   relay, `needs_human`, `wait_read`), `send_file`, `list_rooms`, `read_room`,
+   `send_room_message`, and `wait_for_message` (optionally per thread).
 2. If MCP is unavailable, use the CLI: `toxi status`, `toxi --json unread`,
    `toxi contacts`, `toxi read <alias>`, and `toxi send <alias> <message>`.
 3. Start by checking `get_status` or `toxi status` when the daemon state is

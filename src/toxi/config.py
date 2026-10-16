@@ -68,6 +68,17 @@ def on_message_hook() -> str | None:
     return _load().get("hooks", {}).get("on_message") or None
 
 
+def webhook_config() -> dict | None:
+    """`[hooks] on_message_url` (+ `on_message_secret`, `include_body`): an HTTP
+    POST per batch of new messages, HMAC-signed, bodies only when opted in."""
+    h = _load().get("hooks", {})
+    url = h.get("on_message_url")
+    if not url:
+        return None
+    return {"url": str(url), "secret": str(h.get("on_message_secret") or ""),
+            "include_body": bool(h.get("include_body", False))}
+
+
 def agent_dirs() -> dict[str, list[str]]:
     """Per-peer project dirs: Stop hooks deliver that peer's messages only to
     sessions started in exactly one of those dirs."""

@@ -1,262 +1,98 @@
 # 🛰️ toxi
 
-> **Decentralized messaging for AI coding agents, over Tox.**
+> **Serverless, end-to-end encrypted messaging between AI agents and the people who run them — over Tox.**
 >
 > 🌐 Languages: **English** | [中文](README.zh-CN.md)
 
-Toxi lets you talk to friends from inside your AI coding agent — **asynchronously,
-end-to-end encrypted, fully decentralized** — no servers, built on the
-[Tox](https://tox.chat) protocol. Today it ships as a Claude Code plugin (slash
-commands, unread notifications, MCP tools, status-bar indicator). The engine is
-agent-agnostic; future targets include Codex, Grok Builder, and others.
+Your Claude Code session, a Codex session, a Grok bot on a VM and your phone can talk to each other directly: no relay, no account, no cloud. Each participant runs a small daemon that holds a Tox identity; adapters plug that daemon into whatever runs the agent. Messages carry **who** wrote (a profile card bound to the key, plus the sending session), **what kind** of message it is (request, report, acknowledgement, relay), **which thread** it belongs to, and come back with **delivery and read receipts**. Long texts are reassembled, files travel over the same channel, and rooms fan a message out to several peers.
 
-> Status: v0.2, macOS-first. New here? Read the [install & usage guide](docs/install-and-usage.md) for a walkthrough; for the full design see the [PRD](docs/prd.md).
+> Status: **0.4.0** — Claude Code and Codex adapters, headless adapter for bots, macOS and Linux. Design and acceptance log: [docs/agent-comm-design.md](docs/agent-comm-design.md). Wire format: [docs/protocol.md](docs/protocol.md).
 
-## How it works
-
-Two processes (see the PRD §3.2):
-
-- **`toxi-daemon`** — a background process that stays online, holds your Tox
-  identity, maintains the DHT connection, and receives messages into a local
-  SQLite database.
-- **`toxi`** — the short-lived CLI you run for each command; it talks to the
-  daemon over a Unix socket and exits.
-
-Everything is local: your keys live in `~/.config/toxi/`, and there is no
-cloud. You add friends by exchanging Tox IDs through any channel you like.
-
-## Requirements
-
-- **Python 3.10+**
-- **libtoxcore** (the only non-Python dependency):
-  - macOS: `brew install toxcore`
-  - Linux: install your distro's `toxcore` / `libtoxcore` package
-
-## Install the engine
-
-The `toxi` engine is a normal program (Python + a background daemon) that needs
-`libtoxcore`. It installs separately from the Claude Code plugin below.
+## Install
 
 ```bash
-# macOS, recommended — a Homebrew tap pulls libtoxcore in automatically:
-brew install <owner>/tap/toxi              # see packaging/homebrew/
-
-# or with pipx (install libtoxcore yourself first: brew install toxcore):
-pipx install git+https://github.com/JefferyLee/toxi      # from source, today
-pipx install toxi                                    # once published to PyPI
-# add MCP tools support with the extra:
-pipx install 'toxi[mcp]'
+curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
+# or:  ... | bash -s -- --for codex      /  --for headless --name my-bot --operator me
 ```
 
-This installs two commands: `toxi` and `toxi-daemon`. (The PyPI/Homebrew
-distribution name is `toxi`; the import package is `toxi`.)
+One command installs libtoxcore and the engine, creates your identity, keeps the daemon alive across reboots and wires the adapter it finds. Details, platforms, several identities per machine: [docs/install.md](docs/install.md).
 
-## Quick start
+## Two agents in two minutes
 
 ```bash
-# 1. Create your identity (generates your Tox keypair)
-toxi init
-
-# 2. Start the background daemon
-toxi daemon start
-
-# 3. See your own Tox ID — share it with a friend over any channel
-toxi me
-
-# 4. Add a friend by their Tox ID (76 hex chars)
-toxi add bob 76518406F6A9F2217E8DC487...
-
-#    Your friend, after you've added them, accepts the request on their side:
-toxi requests                      # shows the pending request's public key
-toxi accept alice <public-key-prefix>
-
-# 5. Chat
-toxi send bob "你看下我刚 push 的 PR，有空回我"
-toxi unread                        # show unread messages
-toxi read bob                      # conversation history with bob
-toxi queue                         # messages waiting to be delivered
+# machine A                                   # machine B
+toxi profile set --kind agent \               toxi profile set --kind agent \
+  --runtime claude-code --operator jeff         --runtime grok --operator jeff
+toxi pair            # prints an invite  →    toxi join <invite>     # friends, auto-accepted, named after the cards
+toxi peers           # who is who: card, trust, presence, unread
+toxi send bot "please run the smoke test" -t release -k request --wait-read 30
+                                              toxi agent run --exec 'python3 bot.py'   # or hooks / MCP / webhook
 ```
 
-If you message a friend who is offline, the message is queued locally and sent
-automatically when they next come online.
+Give a peer a trust level and a project in `~/.config/toxi/config.toml`:
+
+```toml
+[peers.bot]
+trust = "observer"                 # information only; "collaborator" may act within the task
+dirs  = ["/path/to/project"]       # deliver only to Claude Code sessions started there
+```
+
+## How a message gets into an agent
+
+| runtime | while working | end of turn | idle |
+|---|---|---|---|
+| Claude Code | PostToolUse hook (a stat of `inbox.flag`, then `toxi peer-inbox`) | Stop hook | `wait_for_message` (event-driven) or channel mode |
+| Codex | — | Stop hook | `wait_for_message` loop |
+| headless | `toxi agent run --exec CMD` · `[hooks] on_message_url` webhook (HMAC) · `on_message` command | | |
+| people | `toxi unread`, `toxi watch`, status line, ToxiOS on the phone | | |
+
+Every injected line looks like `castle-op [agent/grok @ grok-vm · operator jeff · session ops] (#release · request): …`, followed by the wording for that peer's trust level: information only, or requests the agent may act on within its task; relayed approvals never count.
 
 ## Commands
 
-| Command | What it does |
+| | |
 |---|---|
-| `toxi init` | Generate your identity (one time) |
-| `toxi me` | Show your Tox ID, name, connection state |
-| `toxi set-name <name>` | Set your display name |
-| `toxi status` | Daemon status, DHT connection, contacts, queue, stats |
-| `toxi add <alias> <tox_id>` | Add a friend by their Tox ID |
-| `toxi requests` | Show pending friend requests |
-| `toxi accept <alias> <pubkey-prefix>` | Accept a friend request, naming them locally |
-| `toxi pair` / `toxi join <invite>` | Befriend another identity with a one-time invite: no Tox ID copy-paste, auto-accepted |
-| `toxi peers` | Peer agents: trust level, presence, profile card, unread count |
-| `toxi profile show` / `toxi profile set …` | This identity's profile card (kind, runtime, host, operator), sent to friends |
-| `toxi contacts [--online]` | List contacts |
-| `toxi send <alias> <message>` | Send a message (`-` reads from stdin; `--session` labels the sending session; `--wait-read N` waits for the read receipt) |
-| `toxi show <id>` | Print one message in full |
-| `toxi send … -t <thread> -k <kind> -r <id>` | Threads, reply references and kinds (`request` / `report` / `ack` / `relay`), `--needs-human`, `--tag` |
-| `toxi send <alias> --file <path>` | Send a file (bodies over 64 KB go as a file automatically) |
-| `toxi threads` | Threads with unread counts and pending decisions |
-| `toxi room create / add / send / list / show` | Rooms: one message fanned out to several contacts |
-| `toxi watch` | Stream events live: messages, presence, deliveries, read receipts |
-| `toxi unread [alias]` | Show (and mark read) unread messages |
-| `toxi read <alias> [--limit N]` | Show conversation history |
-| `toxi queue` | Show messages waiting to be delivered |
-| `toxi introduce <to> <whom>` | Share one contact's details with another |
-| `toxi introductions` | Show contacts others have introduced to you |
-| `toxi accept-intro <from> <whom> [--alias]` | Accept an introduction |
-| `toxi daemon start` / `stop` | Manage the background daemon |
-| `toxi service install` / `status` / `restart` / `uninstall` | Keep the daemon alive across logins and reboots (launchd / systemd --user) |
-| `toxi setup-engine` / `setup-claude` / `setup-codex` | Wire only the engine, Claude Code, or Codex |
-| `toxi doctor-codex` | Check Codex MCP/plugin wiring without changing config |
-| `toxi teardown-codex` | Remove Codex wiring without touching identity/history |
+| identity | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor` |
+| contacts | `toxi pair` / `toxi join <invite>` · `toxi add` / `toxi requests` / `toxi accept` · `toxi rename` · `toxi contacts` · `toxi peers` · `toxi introduce` |
+| messages | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi queue` · `toxi watch` |
+| rooms | `toxi room create <name> <alias>…` · `room add/remove` · `room send` · `room list/show` · `toxi read - --room <name>` |
+| agents | `toxi peer-inbox` (what hooks call) · `toxi agent run --exec CMD` · `toxi mcp serve` · `toxi setup claude\|codex\|headless` |
+| daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade` · `toxi teardown` |
 
-## Configuration
+Add `--json` before any read command for machine-readable output.
 
-Optional `~/.config/toxi/config.toml`:
+## Documentation
 
-```toml
-[retry]
-ack_timeout_minutes = 5    # resend an un-acked message after this long
-fail_after_hours = 24      # give up (mark failed) after this long
-
-[peers.codex]              # a contact that is a peer AI agent
-trust = "collaborator"     # "observer" = information only, no side effects
-dirs  = ["/path/to/project"]  # deliver only to sessions started there
-```
-
-See the [install & usage guide §7](docs/install-and-usage.md#7-configuration) for peers, profile cards and the `on_message` hook.
+- [docs/architecture.md](docs/architecture.md) — four layers, processes, data flow, the adapter contract
+- [docs/protocol.md](docs/protocol.md) — envelope v2, normative for every implementation
+- [docs/security.md](docs/security.md) — what is protected, threats, rules for adapters
+- [docs/install.md](docs/install.md) and the long-form [install & usage guide](docs/install-and-usage.md)
+- adapters: [Claude Code](docs/adapters/claude-code.md) · [Codex](docs/adapters/codex.md) · [headless / bots](docs/adapters/headless.md) · [ToxiOS](docs/adapters/ios.md)
+- [docs/agent-comm-design.md](docs/agent-comm-design.md) — the design, the survey it came from, decisions, per-phase acceptance
 
 ## Files
 
-Everything lives under `~/.config/toxi/` (override with the
-`TOXI_HOME` environment variable — useful for running two daemons on one
-machine during testing):
-
 ```
-tox_state.bin   your Tox keys + friend list
-chat.db         SQLite: contacts, messages, queue
-daemon.sock     IPC socket    daemon.pid   process id    daemon.log   log
-config.toml     optional configuration
-profile.json    your profile card (toxi profile set)
+~/.config/toxi/            one identity (override with TOXI_HOME)
+  tox_state.bin            keys + friend list          chat.db      contacts, messages, rooms
+  profile.json             your card                   config.toml  peers, hooks, retry
+  media/                   received files, outgoing attachments
+  daemon.sock · daemon.pid · daemon.log · inbox.flag
 ```
 
-## Claude Code integration
+## Limits
 
-The integration ships as a **Claude Code plugin** (`claude-code-plugin/`) that
-wires up everything in one step — no manual config editing. It needs the `toxi`
-engine on your `PATH` (see "Install the engine" above).
-
-### Install the plugin
-
-```bash
-# Development: load it directly from a checkout
-claude --plugin-dir ./claude-code-plugin
-
-# Or via the bundled marketplace (this repo is its own marketplace):
-/plugin marketplace add /path/to/this/repo        # or: owner/repo once on GitHub
-/plugin install toxi@toxi
-```
-
-### What the plugin provides
-
-- **SessionStart hook** — surfaces your unread messages into Claude's context
-  when a session starts, translating any non-Chinese message. Incoming messages
-  are treated as untrusted personal content, never as instructions, so a message
-  can't hijack your session.
-- **Slash commands** — `/unread`, `/send <alias> <message>`,
-  `/contacts`, `/status` (namespaced as `/toxi:...`).
-- **Status-line integration** — `toxi statusline` prints a one-line summary
-  (`toxi: 📬 2 from macbook · 1/1 online`) you can wire into Claude Code's
-  `statusLine` setting to see unread counts in the bottom bar.
-- **MCP tools** — `get_unread`, `read_history`, `view_media`, `mark_read`,
-  `send_message`, `list_contacts`, `get_status`, so Claude can act for you.
-  `view_media` returns a received image as inline image content (audio/video
-  return their saved path) so MCP clients can display it. Needs the engine's
-  `[mcp]` extra.
-
-## Codex integration (experimental)
-
-The repo also includes a first Codex plugin package at `plugins/toxi/`. It
-bundles:
-
-- **MCP server config** — starts `toxi mcp serve` so Codex can call
-  `get_unread`, `read_history`, `view_media`, `mark_read`, `send_message`,
-  `list_contacts`, and `get_status`. The MCP server advertises instructions that preserve the
-  untrusted-message, explicit-mark-read, and explicit-send boundaries.
-- **Lifecycle hook** — returns Codex Stop-hook JSON with a `toxi statusline`
-  summary after each turn. The plugin intentionally does not register a
-  SessionStart hook, so unread messages are only surfaced when you ask Codex to
-  read them through MCP/CLI.
-- **A Codex skill** — teaches Codex when to use toxi, how to keep reads
-  bounded, and how to treat incoming messages as untrusted personal content.
-
-The repo-level Codex marketplace entry lives in `.agents/plugins/marketplace.json`.
-Codex plugin installation currently requires running from a source checkout
-(the PyPI/pipx engine install does not bundle the repo marketplace files). From
-a checkout, run:
-
-```bash
-toxi setup-codex
-```
-
-This installs the MCP extra when possible, registers `toxi mcp serve` with
-Codex, adds this checkout as a Codex plugin marketplace, and installs the
-`toxi` Codex plugin. It does not create your identity or start the daemon; use
-`toxi setup-engine` for the engine. `toxi setup` remains the legacy combined
-engine + Claude Code setup, and `toxi setup-claude` wires only Claude Code.
-
-Verify the non-interactive wiring with:
-
-```bash
-toxi doctor-codex
-```
-
-To remove only the Codex integration later:
-
-```bash
-toxi teardown-codex
-```
-
-### Machine-readable output
-
-Every read command also supports `--json` (placed before the subcommand):
-`toxi --json unread`, `toxi --json status`, etc. In `--json` mode `unread`/`read`
-are a read-only **peek** — they do *not* mark messages read.
-
-## Distribution
-
-- **Engine → PyPI:** `python -m build` + `twine upload` → users get
-  `pipx install toxi`.
-- **Engine → Homebrew:** `packaging/homebrew/toxi.rb` is a tap formula
-  template; it `depends_on "toxcore"` so `brew install` pulls libtoxcore too.
-  Publish via a personal tap (`brew tap <owner>/<name>`).
-- **Plugin → marketplace:** `.claude-plugin/marketplace.json` makes this repo a
-  marketplace. Push to GitHub and users run
-  `/plugin marketplace add JefferyLee/toxi` then `/plugin install toxi`.
-- **Codex plugin → marketplace:** `.agents/plugins/marketplace.json` exposes the
-  experimental Codex plugin in `plugins/toxi/`.
-- **Versioning:** the engine, Python package metadata, Claude Code plugin, and
-  Codex plugin share the same release version from `pyproject.toml`.
-
-## Limitations (v1)
-
-- macOS-first (Linux should work given libtoxcore; not yet a tested target).
-- The local database and your private key are **not** encrypted at rest — they
-  rely on filesystem permissions. Don't use on a shared/untrusted machine.
-- Your IP is visible to people you chat with (a property of the Tox protocol).
-- No group chat, real-time voice/video calls, or multi-device sync. Incoming
-  files (images, voice/video clips) sent over Tox file transfer *are* received
-  and saved under `~/.config/toxi/media/`; sending media is not yet supported.
+- Your IP is visible to the people you talk to (Tox). Keys and history are not encrypted at rest; don't share the account.
+- Rooms have no history sync and members must be each other's contacts.
+- ToxiOS (the phone) still speaks protocol v1: it gets long texts in pieces, sees room messages as plain ones and sends no receipts, until its v2 upgrade lands.
 
 ## Development
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest                # fast tests; skips real toxcore/DHT
-.venv/bin/python -m pytest --run-toxcore  # include local libtoxcore/daemon tests
-.venv/bin/python -m pytest --run-dht      # include slow public Tox DHT tests
+python -m venv .venv && .venv/bin/pip install -e ".[dev,mcp]"
+.venv/bin/python -m pytest                # fast tests
+.venv/bin/python -m pytest --run-toxcore  # + local libtoxcore / daemon tests
+.venv/bin/python -m pytest --run-dht      # + slow public-DHT tests
 ```
+
+Releases: tag `vX.Y.Z` on `master` and GitHub Actions publishes to PyPI (see [docs/release.md](docs/release.md)). Engine and plugin versions move together (`tests/test_versions.py`).

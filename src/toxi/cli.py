@@ -11,8 +11,9 @@ import sys
 import time
 
 import click
+from pathlib import Path
 
-from . import __version__, bootstrap, client, envelope, invite, paths, peers, service
+from . import __version__, bootstrap, client, config, envelope, invite, paths, peers, service
 from .tox import Tox
 
 _CONNECTION = {0: "offline", 1: "connected (TCP)", 2: "connected (UDP)"}
@@ -794,6 +795,173 @@ def service_status(ctx):
 
 
 @cli.command()
+@click.argument("alias")
+@click.argument("new_alias")
+def rename(alias, new_alias):
+    """Rename a contact locally (e.g. to match the name on their profile card)."""
+    res = _call("rename_contact", {"alias": alias, "new_alias": new_alias})
+    click.echo(f"✓ {res['was']} is now {res['alias']}")
+    if alias in config.peer_config():
+        click.echo(f"⚠ config.toml still has [peers.{alias}] — rename that table to "
+                   f"[peers.{new_alias}] so routing and trust keep working.")
+
+
+@cli.group()
+def agent():
+    """Run a headless agent (a bot or script) against toxi without MCP or hooks."""
+
+
+@agent.command("run")
+@click.option("--exec", "command", required=True, metavar="CMD",
+              help="Shell command run once per peer message: it gets a JSON payload on stdin "
+                   "and whatever it prints is sent back as the reply, in the same thread.")
+@click.option("--alias", "aliases", multiple=True,
+              help="Only these contacts (default: every peer in config.toml).")
+@click.option("--context", default=5, show_default=True,
+              help="Recent messages with the sender included in the payload.")
+@click.option("--session", default="agent", show_default=True, help="Session label on replies.")
+@click.option("--timeout", default=600, show_default=True, help="Seconds CMD may run.")
+def agent_run(command, aliases, context, session, timeout):
+    """Deliver each incoming peer message to CMD and send its stdout back.
+
+    Payload: {"message": {...alias, content, thread, kind, from_session, profile...},
+    "trust": ..., "guide": ..., "context": [recent messages, oldest first]}.
+    Messages are marked read on delivery (so the sender gets a read receipt);
+    acknowledgements are never delivered. Reconnects if the daemon restarts.
+    """
+    wanted = set(aliases) or None
+
+    def handle(m: dict, ctx: list) -> None:
+        payload = {"message": m, "trust": m.get("trust"),
+                   "guide": peers.GUIDES.get(m.get("trust", "observer")), "context": ctx}
+        try:
+            r = subprocess.run(command, shell=True, input=json.dumps(payload, ensure_ascii=False),
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            click.echo(f"{time.strftime('%H:%M:%S')} {m['alias']}: command timed out", err=True)
+            return
+        reply = r.stdout.strip()
+        if reply:
+            _call("send_message", {"alias": m["alias"], "body": reply, "session": session,
+                                   "thread": m.get("thread"), "reply_to": m["msg_uuid"],
+                                   "kind": "report"})
+        note = " replied" if reply else ""
+        click.echo(f"{time.strftime('%H:%M:%S')} {m['alias']}: {m['content'][:60]!r} "
+                   f"-> rc={r.returncode}{note}")
+        if r.returncode and r.stderr.strip():
+            click.echo(r.stderr.strip()[-400:], err=True)
+
+    def deliverable(alias: str) -> bool:
+        return alias in wanted if wanted else alias in config.peer_config()
+
+    click.echo(f"toxi agent: waiting for messages from {', '.join(sorted(wanted)) if wanted else 'peers'}"
+               f" — Ctrl-C to stop")
+    while True:
+        try:
+            for alias in (sorted(wanted) if wanted else [None]):
+                for m in peers.take(alias):  # anything that arrived while we were down
+                    handle(m, [])
+            for ev in client.subscribe(sorted(wanted) if wanted else None, context):
+                d = ev.get("data") or {}
+                if ev.get("event") != "message.new" or d.get("direction") != "in":
+                    continue
+                if not deliverable(d["alias"]):
+                    continue
+                for m in peers.take(d["alias"]):
+                    handle(m, d.get("context", []))
+        except client.DaemonNotRunning:
+            click.echo("daemon is not running; retrying in 10s", err=True)
+            time.sleep(10)
+        except (client.ipc.IPCError, client.DaemonError, OSError) as e:
+            click.echo(f"connection lost ({e}); reconnecting", err=True)
+            time.sleep(2)
+        except KeyboardInterrupt:
+            return
+
+
+def _doctor_checks() -> list:
+    """Every check as {"ok": True|False|None(info), "check": str, "detail": str}."""
+    out = []
+
+    def add(ok, check, detail=""):
+        out.append({"ok": ok, "check": check, "detail": detail})
+
+    add(True, "engine", f"toxi {__version__} — {sys.executable}")
+    try:
+        from .tox import Tox as _Tox  # noqa: F401
+        add(True, "libtoxcore", "loadable")
+    except Exception as e:  # ToxError or import failure
+        add(False, "libtoxcore", f"{e}")
+    home = paths.config_dir()
+    add(bootstrap.identity_initialized(), "identity", f"{paths.tox_state_path()}"
+        + ("" if bootstrap.identity_initialized() else " — run `toxi init` or `toxi setup engine`"))
+    if os.environ.get("TOXI_HOME"):
+        add(None, "TOXI_HOME", f"{home} — MCP servers and hooks must see the same value")
+    for f in (paths.tox_state_path(), paths.db_path(), paths.config_path(), paths.profile_path()):
+        if f.exists() and (f.stat().st_mode & 0o077):
+            add(False, "permissions", f"{f.name} is group/world readable — the daemon fixes this on start")
+    running = bootstrap.daemon_running()
+    add(running, "daemon", "running" if running else "not running — `toxi daemon start`, or "
+        "`toxi service install` to keep it alive")
+    st = service.status()
+    if st["installed"]:
+        add(st["running"], "service", f"{'running' if st['running'] else 'installed but not running'} — {st['path']}")
+    else:
+        add(None, "service", "not installed — `toxi service install` survives reboots")
+    if running:
+        try:
+            status = _call("get_status")
+            add(bool(status["dht_connected"]), "dht",
+                "connected" if status["dht_connected"] else "not connected yet (give it a minute)")
+            add(None, "contacts", f"{status['contacts_online']}/{status['contacts_total']} online, "
+                f"{status['queue_size']} queued")
+            prof = _call("get_profile")["profile"]
+            add(bool(prof), "profile", (f"{prof.get('kind')}/{prof.get('runtime')} {prof.get('name')}"
+                                        if prof else "none — `toxi profile set --kind agent ...`"))
+            known = {c["alias"] for c in _call("list_contacts")["contacts"]}
+        except (click.ClickException, KeyError) as e:
+            add(False, "daemon rpc", str(e))
+            known = set()
+    else:
+        known = None
+    for alias, spec in config.peer_config().items():
+        problems = [d for d in spec["dirs"] if not Path(d).expanduser().is_dir()]
+        if known is not None and alias not in known:
+            problems.append("not a contact")
+        add(not problems, f"peer {alias}", f"{spec['trust']}" + (f" — {', '.join(problems)}" if problems else ""))
+    plugin = bootstrap.toxi_plugin_cache_root()
+    if plugin.exists():
+        versions = sorted(p.name for p in plugin.iterdir() if p.is_dir())
+        hooks = plugin / (versions[-1] if versions else "") / "hooks" / "hooks.json"
+        has_post = hooks.exists() and "PostToolUse" in hooks.read_text()
+        add(has_post, "claude plugin", f"{versions[-1] if versions else '?'} installed"
+            + ("" if has_post else " — old hooks; rerun install.sh and /reload-plugins"))
+    elif Path.home().joinpath(".claude").exists():
+        add(None, "claude plugin", "not installed — `install.sh --for claude`")
+    if shutil.which("codex"):
+        ok, text = _codex_stdout(["mcp", "list"])
+        add(ok and "toxi" in text, "codex", "MCP server registered" if ok and "toxi" in text
+            else "codex found but toxi MCP not registered — `toxi setup codex`")
+    return out
+
+
+@cli.command()
+@click.pass_context
+def doctor(ctx):
+    """Check this machine's toxi setup end to end and say what to fix."""
+    checks = _doctor_checks()
+    if _emit(ctx, checks):
+        return
+    for c in checks:
+        mark = "✓" if c["ok"] else ("⚠" if c["ok"] is False else "ℹ")
+        click.echo(f"  {mark} {c['check']:14} {c['detail']}")
+    bad = [c for c in checks if c["ok"] is False]
+    click.echo(f"\n{len(bad)} problem(s)." if bad else "\nAll good.")
+    if bad:
+        sys.exit(1)
+
+
+@cli.command()
 @click.pass_context
 def queue(ctx):
     """Show messages waiting to be delivered."""
@@ -1010,7 +1178,7 @@ def _codex_remove_step(args: list[str], ok: str, warning: str, manual: str, abse
     click.echo(f"  Run manually:\n    {manual}")
 
 
-@cli.command(name="setup-codex")
+@cli.command(name="setup-codex", hidden=True)
 def setup_codex():
     """Wire toxi into Codex: MCP server plus the local Codex plugin."""
     codex_root = bootstrap.codex_repo_root()
@@ -1083,7 +1251,7 @@ def setup_codex():
     click.echo("  /plugins  # confirm the toxi plugin is installed and enabled")
 
 
-@cli.command(name="doctor-codex")
+@cli.command(name="doctor-codex", hidden=True)
 def doctor_codex():
     """Check the Codex MCP/plugin wiring without changing Codex config."""
     failures: list[str] = []
@@ -1226,23 +1394,77 @@ def _setup_claude() -> None:
     click.echo("  /plugin install toxi")
 
 
-@cli.command(name="setup-engine")
+@cli.command(name="setup-engine", hidden=True)
 def setup_engine():
-    """Initialize your toxi identity and start the daemon."""
+    """Alias of `toxi setup engine`."""
     _setup_engine()
 
 
-@cli.command(name="setup-claude")
+@cli.command(name="setup-claude", hidden=True)
 def setup_claude():
-    """Wire toxi into Claude Code without touching identity or daemon state."""
+    """Alias of `toxi setup claude`."""
     _setup_claude()
 
 
-@cli.command()
-def setup():
-    """One-shot setup: init identity, start daemon, wire Claude Code statusLine."""
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def setup(ctx):
+    """Wire toxi into this machine: `toxi setup engine|claude|codex|headless`
+    (no target = engine + claude, the original one-shot)."""
+    if ctx.invoked_subcommand is None:
+        _setup_engine()
+        _setup_claude()
+
+
+@setup.command("engine")
+def setup_engine_cmd():
+    """Initialize your identity and start the daemon."""
     _setup_engine()
+
+
+@setup.command("claude")
+def setup_claude_cmd():
+    """Wire Claude Code (statusLine + plugin hints)."""
     _setup_claude()
+
+
+@setup.command("codex")
+@click.pass_context
+def setup_codex_cmd(ctx):
+    """Register the MCP server and plugin with Codex."""
+    ctx.invoke(setup_codex)
+
+
+@setup.command("headless")
+@click.option("--name", help="Name on this identity's card (default: hostname).")
+@click.option("--kind", type=click.Choice(list(envelope.PROFILE_KINDS)), default="agent", show_default=True)
+@click.option("--runtime", default="other", show_default=True, help="e.g. grok, script, cron.")
+@click.option("--operator", help="Who runs this identity.")
+@click.option("--role", help="One line on what it does.")
+@click.option("--no-service", is_flag=True, help="Do not install a launchd/systemd service.")
+def setup_headless(name, kind, runtime, operator, role, no_service):
+    """A bot or script with no Claude/Codex: identity, service, card, pairing hint."""
+    _setup_engine()
+    fields = {"kind": kind, "runtime": runtime, "name": name or socket.gethostname(),
+              "host": socket.gethostname()}
+    if operator:
+        fields["operator"] = operator
+    if role:
+        fields["role"] = role
+    _call("set_profile", {"profile": fields})
+    click.echo(f"✓ profile card: {kind}/{runtime} {fields['name']}")
+    if not no_service:
+        try:
+            service.install()
+            click.echo("✓ service installed (survives reboots)")
+        except service.ServiceError as e:
+            click.echo(f"ℹ {e}\n  keep-alive instead: add to crontab:  */10 * * * * "
+                       f"{shutil.which('toxi') or 'toxi'} daemon start >/dev/null 2>&1")
+    me = _call("get_me")
+    click.echo(f"\nTox ID: {me['tox_id']}\n"
+               "Pair with a peer:  toxi pair   (or join theirs: toxi join <invite>)\n"
+               "Run your bot:      toxi agent run --exec 'python3 my_bot.py'\n"
+               "Or be woken by HTTP: [hooks] on_message_url = \"https://...\" in config.toml")
 
 
 @cli.command()

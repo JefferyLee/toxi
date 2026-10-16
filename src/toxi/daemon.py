@@ -6,6 +6,7 @@ on `accept()` with a timeout derived from `tox_iteration_interval`, so we never
 block the protocol for long. This sidesteps all locking.
 """
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -13,7 +14,9 @@ import secrets
 import selectors
 import socket
 import subprocess
+import threading
 import time
+import urllib.request
 import uuid as _uuid
 from collections import deque
 from logging.handlers import RotatingFileHandler
@@ -56,6 +59,17 @@ def _classify_media(filename: str) -> str:
     if ext in _VIDEO_EXTS:
         return "video"
     return "file"
+
+
+def _post_json(url: str, body: bytes, headers: dict) -> None:
+    """Fire-and-forget HTTP POST for the on_message webhook (runs in a thread)."""
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 300:
+                log.warning("on_message webhook answered %s", resp.status)
+    except Exception as e:  # network errors must never reach the event loop
+        log.warning("on_message webhook failed: %s", e)
 
 
 def _sha256(path) -> str:
@@ -287,6 +301,7 @@ class Daemon:
             "send_room": self._send_room,
             "room_members": self._room_members_rpc,
             "send_file": self._send_file,
+            "rename_contact": self._rename_contact,
             "shutdown": self._shutdown,
         }
 
@@ -1244,6 +1259,7 @@ class Daemon:
         if not self._hook_msgs or time.time() < self._hook_due:
             return
         msgs, self._hook_msgs = self._hook_msgs, []
+        self._post_webhook(msgs)
         cmd = config.on_message_hook()
         if not cmd:
             return
@@ -1263,6 +1279,35 @@ class Daemon:
         except OSError:
             pass  # the command doesn't read stdin
         self._hook_proc, self._hook_started = p, time.time()
+
+    def _post_webhook(self, msgs: list) -> None:
+        """`[hooks] on_message_url`: POST {from, count, messages, ts}. Bodies and
+        thread fields ride along only with `include_body = true` (decision 8);
+        with `on_message_secret` the request carries
+        X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")."""
+        cfg = config.webhook_config()
+        if not cfg:
+            return
+        items = []
+        for m in msgs:
+            item = dict(m)
+            if cfg["include_body"]:
+                full = self._get_message({"msg_uuid": m["msg_uuid"]}).get("message") or {}
+                item.update({k: full.get(k) for k in (
+                    "content", "from_session", "thread", "reply_to", "kind", "needs_human",
+                    "tags", "room_id", "created_at") if k in full})
+            items.append(item)
+        ts = str(int(time.time()))
+        body = json.dumps({"from": list(dict.fromkeys(m["alias"] for m in msgs)),
+                           "count": len(msgs), "messages": items, "ts": int(ts)},
+                          ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json", "User-Agent": "toxi-daemon",
+                   "X-Toxi-Timestamp": ts}
+        if cfg["secret"]:
+            digest = hmac.new(cfg["secret"].encode("utf-8"), ts.encode() + b"." + body,
+                              hashlib.sha256).hexdigest()
+            headers["X-Toxi-Signature"] = f"sha256={digest}"
+        threading.Thread(target=_post_json, args=(cfg["url"], body, headers), daemon=True).start()
 
     def _discard_transfer(self, key: tuple[int, int]) -> None:
         tr = self._transfers.pop(key, None)
@@ -1508,6 +1553,19 @@ class Daemon:
         self.db.commit()
         self._save_state()
         return {"alias": alias, "public_key": pk}
+
+    def _rename_contact(self, params: dict) -> dict:
+        old = (params.get("alias") or "").strip()
+        new = (params.get("new_alias") or "").strip()
+        if not old or not new:
+            raise RpcError("INVALID_ALIAS", "both the current and the new alias are required")
+        if not self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (old,)).fetchone():
+            raise RpcError("CONTACT_NOT_FOUND", f"no contact named {old!r}")
+        if self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (new,)).fetchone():
+            raise RpcError("CONTACT_EXISTS", f"a contact named {new!r} already exists")
+        self.db.execute("UPDATE contacts SET alias=? WHERE alias=?", (new, old))
+        self.db.commit()
+        return {"alias": new, "was": old}
 
     def _list_contacts(self, params: dict) -> dict:
         query = ("SELECT alias, public_key, tox_id, is_online, last_seen, proto, profile_json "
