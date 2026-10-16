@@ -70,19 +70,29 @@ fi
 ok "installer: ${INSTALLER}"
 
 # 3. engine (install or upgrade) -------------------------------------------------
+# From PyPI when the package is published there; otherwise (or with --ref) from
+# GitHub — the latest release tag by default, so users never depend on PyPI.
+if [ -z "$REF" ] && ! curl -fsS -o /dev/null "https://pypi.org/pypi/toxi/json" 2>/dev/null; then
+  REF="$(git ls-remote --tags --refs "${REPO_URL}" 'v*' 2>/dev/null | sed 's|.*/||' | sort -V | tail -1)"
+  [ -n "$REF" ] || REF=master
+  info "toxi is not on PyPI yet — installing release ${REF} from GitHub"
+fi
 if [ -n "$REF" ]; then SPEC="toxi[mcp] @ git+${REPO_URL}@${REF}"; else SPEC="toxi[mcp]"; fi
 info "Installing/upgrading toxi engine (${SPEC})…"
-case "$INSTALLER" in
-  pipx)
-    if pipx list 2>/dev/null | grep -q 'package toxi'; then
-      pipx install --force "$SPEC" >/dev/null 2>&1 || pipx install --force --backend pip "$SPEC" >/dev/null
-    else
-      pipx install "$SPEC" >/dev/null 2>&1 || pipx install --backend pip "$SPEC" >/dev/null
-    fi
-    pipx inject toxi 'mcp>=1.2,<2' >/dev/null 2>&1 || true;;
-  uv)  uv tool install --force "$SPEC" >/dev/null;;
-  pip) python3 -m pip install --user --upgrade "$SPEC" >/dev/null || python3 -m pip install --user --upgrade --break-system-packages "$SPEC" >/dev/null;;
-esac
+engine_install() {
+  case "$INSTALLER" in
+    pipx)
+      if pipx list 2>/dev/null | grep -q 'package toxi'; then
+        pipx install --force "$1" >/dev/null 2>&1 || pipx install --force --backend pip "$1" >/dev/null
+      else
+        pipx install "$1" >/dev/null 2>&1 || pipx install --backend pip "$1" >/dev/null
+      fi
+      pipx inject toxi 'mcp>=1.2,<2' >/dev/null 2>&1 || true;;
+    uv)  uv tool install --force "$1" >/dev/null;;
+    pip) python3 -m pip install --user --upgrade "$1" >/dev/null || python3 -m pip install --user --upgrade --break-system-packages "$1" >/dev/null;;
+  esac
+}
+engine_install "$SPEC"
 have toxi || die "toxi is not on PATH after install — open a new shell (or add ~/.local/bin to PATH) and re-run."
 ok "engine: $(toxi --version 2>/dev/null)"
 

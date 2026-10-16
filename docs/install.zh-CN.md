@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh |
 | 参数 | 效果 |
 |---|---|
 | `--for claude` / `codex` / `headless` / `all` | 接入哪个（些）适配器 |
-| `--ref v2-p1` | 从 git ref 而不是 PyPI 安装引擎 |
+| `--ref v0.4.0` | 从指定 git ref 安装引擎。不带时：PyPI 上有包就用 PyPI，否则用 GitHub 上最新的 release tag |
 | `--name`、`--operator`、`--role`、`--runtime` | headless 身份的卡片（不给则交互式询问） |
 
 ## 手动安装

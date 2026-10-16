@@ -14,7 +14,7 @@ It installs libtoxcore, a Python app installer (pipx, or uv, or pip), the `toxi`
 | flag | effect |
 |---|---|
 | `--for claude` / `codex` / `headless` / `all` | which adapter(s) to wire |
-| `--ref v2-p1` | install the engine from a git ref instead of PyPI |
+| `--ref v0.4.0` | install the engine from a git ref. Without it the script uses PyPI when the package is published there, else the latest GitHub release tag |
 | `--name`, `--operator`, `--role`, `--runtime` | the headless identity's card (asked interactively otherwise) |
 
 ## By hand
