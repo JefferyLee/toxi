@@ -86,6 +86,10 @@ toxi queue                         # 待发送队列
 | `toxi contacts [--online]` | 列出联系人 |
 | `toxi send <别名> <消息>` | 发消息（`-` 表示从 stdin 读；`--session` 标明发送会话；`--wait-read N` 等已读回执） |
 | `toxi show <id>` | 完整打印一条消息 |
+| `toxi send … -t <线程> -k <类型> -r <id>` | 线程、引用回复、消息类型（`request` / `report` / `ack` / `relay`）、`--needs-human`、`--tag` |
+| `toxi send <别名> --file <路径>` | 发文件（超过 64 KB 的正文自动转为文件） |
+| `toxi threads` | 线程列表，含未读与待决定数 |
+| `toxi room create / add / send / list / show` | Room：一条消息扇出给多个联系人 |
 | `toxi watch` | 实时输出事件：消息、上下线、送达、已读回执 |
 | `toxi unread [别名]` | 显示未读消息（并标为已读） |
 | `toxi read <别名> [--limit N]` | 看对话历史 |

@@ -208,6 +208,33 @@ queued ──> sent ──> delivered ──> read
 
 **Long messages.** A body longer than one Tox message (≈1.3 KB) is split, sent in parts and reassembled by the receiving daemon into a single message (up to 64 KB; anything bigger is refused with `MESSAGE_TOO_LONG`). Peers that don't understand parts still get the old `[i/n] ` prefixed pieces. When a long message is injected into an agent it is summarized (first 600 characters plus `toxi show <id>` for the rest).
 
+### 5.2 Threads, kinds, rooms and files
+
+Messages can carry structure so several agents can keep many conversations apart:
+
+```bash
+toxi send codex "please review #412" -t pr-412 -k request      # thread + "expects an answer"
+toxi send codex "LGTM" -t pr-412 -r <msg-id> -k report          # reply in the thread
+toxi send castle-op "the user asked for X" -k relay --needs-human  # hearsay; a person must decide
+toxi send codex "ok" -k ack                                     # "got it": never wakes the peer
+toxi read codex -t pr-412                                       # one thread only
+toxi threads                                                    # all threads, unread, pending decisions
+```
+
+`-k` kinds: `msg` (default), `request`, `report`, `ack`, `relay`. `--needs-human` marks a decision for the user; `--tag` adds free-form labels. Peer messages are injected with these tags, e.g. `codex (#pr-412 · request · needs your decision): ...`, and the guide tells the agent that `needs your decision` items are not for it to act on and that `relay` content is hearsay.
+
+**Rooms** are app-layer groups: the sender fans a message out to every member, no server, no Tox group. Members are identified by public key and must be each other's contacts to see each other's messages.
+
+```bash
+toxi room create ops codex castle-op     # you + those contacts; each gets a member card
+toxi room add ops vibe-op                # creator only; everyone gets the new card
+toxi room send ops "deploy at 10:00" -t release
+toxi read - --room ops                   # the room's history (your own sends collapsed, with per-recipient status)
+toxi room list / toxi room show ops
+```
+
+**Files.** `toxi send <alias> --file path/to/shot.png [-t thread] [message]` sends a file over the encrypted Tox file transfer (up to 100 MB); the receiver stores it under `~/.config/toxi/media/` with your thread/kind fields and the sender's message id, verifies its sha256, and read receipts work as for texts. A text body over 64 KB is sent as a text file automatically.
+
 **Watching live.** `toxi watch` streams daemon events as they happen — new messages, contacts going on/offline, deliveries, read receipts, refused sends (`--alias <a>` to filter, `--json` for scripts, `--context N` to attach the last N messages with the sender to each new message, handy for stateless bots).
 
 ---

@@ -97,6 +97,10 @@ automatically when they next come online.
 | `toxi contacts [--online]` | List contacts |
 | `toxi send <alias> <message>` | Send a message (`-` reads from stdin; `--session` labels the sending session; `--wait-read N` waits for the read receipt) |
 | `toxi show <id>` | Print one message in full |
+| `toxi send … -t <thread> -k <kind> -r <id>` | Threads, reply references and kinds (`request` / `report` / `ack` / `relay`), `--needs-human`, `--tag` |
+| `toxi send <alias> --file <path>` | Send a file (bodies over 64 KB go as a file automatically) |
+| `toxi threads` | Threads with unread counts and pending decisions |
+| `toxi room create / add / send / list / show` | Rooms: one message fanned out to several contacts |
 | `toxi watch` | Stream events live: messages, presence, deliveries, read receipts |
 | `toxi unread [alias]` | Show (and mark read) unread messages |
 | `toxi read <alias> [--limit N]` | Show conversation history |

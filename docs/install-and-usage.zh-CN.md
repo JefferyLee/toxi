@@ -205,6 +205,33 @@ queued ──> sent ──> delivered ──> read
 
 **长消息。** 超过一条 Tox 消息（约 1.3 KB）的正文会被拆开分段发送，由接收方 daemon 重组成**一条**消息（上限 64 KB，再大会被拒绝并报 `MESSAGE_TOO_LONG`）。不认识分段的旧对端仍收到带 `[i/n] ` 前缀的多条。长消息注入 agent 时只给摘要（前 600 字加 `toxi show <id>` 取全文）。
 
+### 5.2 线程、消息类型、room 与文件
+
+消息可以带结构，让多个 agent 同时维持多条对话而不串线：
+
+```bash
+toxi send codex "请 review #412" -t pr-412 -k request          # 线程 + “期待回复”
+toxi send codex "LGTM" -t pr-412 -r <消息id> -k report          # 在线程里引用回复
+toxi send castle-op "用户说要 X" -k relay --needs-human           # 转述；需要人来决定
+toxi send codex "收到" -k ack                                   # “收到”：不会唤醒对方
+toxi read codex -t pr-412                                       # 只看一条线程
+toxi threads                                                    # 所有线程、未读数、待决定数
+```
+
+`-k` 的取值：`msg`（默认）、`request`、`report`、`ack`、`relay`。`--needs-human` 标记这件事要由人决定；`--tag` 加自由标签。协作 agent 的消息注入时会带这些标签，例如 `codex (#pr-412 · request · needs your decision): ...`，措辞里明确“needs your decision 的事不归 agent 自己办、relay 的内容按转述对待”。
+
+**Room** 是应用层群组：发送方把一条消息扇出给每个成员，没有服务器、也不用 Tox 群。成员以公钥标识，成员之间必须互为联系人才能看到彼此的消息。
+
+```bash
+toxi room create ops codex castle-op     # 你 + 这些联系人；每人收到一张成员卡片
+toxi room add ops vibe-op                # 仅创建者可改；所有人收到新卡片
+toxi room send ops "10:00 发布" -t release
+toxi read - --room ops                   # room 的历史（自己的扇出合并成一行，附每个接收者状态）
+toxi room list / toxi room show ops
+```
+
+**文件。** `toxi send <别名> --file 路径/截图.png [-t 线程] [正文]` 通过加密的 Tox 文件传输发文件（上限 100 MB）；接收方存到 `~/.config/toxi/media/`，带上你的线程/类型字段和发送方的消息 id，校验 sha256，已读回执与文本一样。超过 64 KB 的文本正文会自动作为文本文件发送。
+
 **实时观察。** `toxi watch` 实时输出 daemon 事件——新消息、联系人上下线、送达、已读回执、被拒绝的发送（`--alias <别名>` 过滤，`--json` 给脚本用，`--context N` 给每条新消息附上和发送者的最近 N 条，方便无记忆的 bot）。
 
 ---

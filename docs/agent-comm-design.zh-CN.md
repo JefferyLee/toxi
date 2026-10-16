@@ -313,7 +313,7 @@ MCP 工具：`send_message(alias, body, thread?, reply_to?, kind?)`、`send_file
 | **P0 定稿**（已完成 2026-10-16） | 本提案定稿并译成英文。§8 的文档树**随功能落地同步建立**（避免文档先于代码而漂移），README 在 P4 改为 agent 优先 | 英文版与中文版一致 |
 | **P1 安全与身份**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | 0600 自检；限流；peer 分级 + 统一措辞；`profile` 类型与 `toxi peers`；`from_session`；`pair/join`；MCP annotations + 权限示例 | observer peer 的消息注入带正确措辞；`pair/join` 30 秒内双向好友；私钥文件 0600 |
 | **P2 及时性**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | `subscribe` IPC + `inbox.flag`；PostToolUse 注入；`wait_for_message` 订阅化 + SessionStart 自恢复；分片重组 + 摘要注入；`receipt` + `--wait-read`；`service install`；Channels 作为可选开启 | 进行中会话：发→注入 ≤2s；空闲会话 ≤1 回合；1.7MB 文本只产生 1 条消息；重启 Mac 后 daemon 自动在线 |
-| **P3 结构化与多方** | `thread / reply_to / kind`；`room` 扇出；附件发送 + 大正文自动转附件 | 三方 room 一条消息三端都收到并归到同一线程；附件 sha256 两端一致 |
+| **P3 结构化与多方**（✅ 2026-10-16 完成，分支 `v2-p1`，验收见 §11） | `thread / reply_to / kind`；`room` 扇出；附件发送 + 大正文自动转附件 | 三方 room 一条消息三端都收到并归到同一线程；附件 sha256 两端一致 |
 | **P4 发行与接入** | PyPI 发布；`install.sh --for`；Linux 实测；headless 适配器 + Grok 接入文档（在 vibe-op/castle-op 的 VM 上实际替换掉它们的轮询）；`toxi doctor` | 三类 agent 各一台干净机器，从零到互发消息 ≤5 分钟 |
 
 每阶段末：bilingual 文档同步、版本号四处一致（`tests/test_versions.py`）、`--run-toxcore` 与 `--run-dht` 跑一遍。
@@ -391,3 +391,16 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 - 同机第一轮里 Ada 日志出现"rate limit: dropped a text"是 P1 突发测试的 11 条消息 5 分钟后重试、echo bot 一次回了 60 多条触发的，属预期。
 
 未做（留给 P3/P4）：PostToolUse 在真实 Claude Code 会话中的端到端观察需要 Jeff 在各会话 `/reload-plugins` 后看效果；Codex 侧仍是 Stop hook + `wait_for_message`；headless 适配器 `toxi agent run` 和 Grok VM 的服务化在 P4。
+
+### P3 结构化与多方（2026-10-16，分支 `v2-p1`）
+
+代码：text 信封新增 `thread / reply_to / kind(msg|request|report|ack|relay) / needs_human / tags`，分片的每一段都带、重发保留；`kind=ack` 入库、推给订阅者，但不触发 hook、不碰 `inbox.flag`、`peer-inbox` 标已读不投递；注入时带 `(#thread · request · needs your decision · ↩ 1a2b3c4d · tags)` 标签，`relay` 正文前缀"转述、未核实"，统一措辞加入"needs your decision 的事由人决定、relay 按传闻对待"。`toxi threads` / MCP `get_threads` 列线程（计数、未读、待决定）。应用层 **room**：`room` 卡片信封（创建者公钥 + 成员公钥/名字），`toxi room create|add|remove|send|list|show`，`read --room`，MCP `list_rooms / read_room / send_room_message`；发送方对每个成员扇出（共享 `room_msg_id`，历史里合并成一行并附每个接收者状态）；只接受创建者发的卡片，卡片里没有我就自动退出；成员上线时创建者重发卡片。**文件**：ctypes 新增 `tox_file_send / tox_file_send_chunk / file_chunk_request`；`toxi send --file`、MCP `send_file`；发送前先发 `file` 元信息信封（名字、大小、sha256、发送方 msg_uuid、线程等、会话标签），接收方把文件行改用发送方的 msg_uuid（回执和引用才对得上）、校验 sha256（不符打 `sha256-mismatch` 标签）、元信息先到后到都能对上；离线排队、上线自动开始、断线回到队列重传、对方拒收标 failed、daemon 重启后遗留的 sent 文件行由扫描重新排队；正文超过 64 KB 自动写成文本文件发送（替代原来的 `MESSAGE_TOO_LONG`）；接收文件 0600。单测 158 个通过。
+
+验收（Ada ↔ Belinda，加上 Jeff 的 ToxiOS 手机）：
+
+- 线程：Ada 发 `-t p3-threads -k request --needs-human --tag WARN`，Belinda 的 echo bot 在同线程回 `report` 并 `↩` 引用原消息；`--wait-read` 3 秒内收到已读；`toxi threads` 正确列出。
+- room：Ada 建 `p3-room`（belinda、belinda-bot），三端卡片一致；Ada 扇出后两端都收到并带 `room p3-room · #standup` 标签，bot 的 `peer-inbox` 以 observer 措辞注入；非创建者 belinda 也能扇出；Ada 历史把两份拷贝合并为一行 `you → belinda, belinda-bot`。随后用 `room add` 把 `jeff-iphone` 加进来（4 人），扇出到手机成功（ToxiOS 仍是 v1，把它当普通私信显示，也不会反向扇出；这是决策 6 要跟进的部分）。为了让 bot 能发到手机，bot 向手机发了好友请求，待 Jeff 在手机上接受。
+- 文件：228 KB 正文自动转成文本文件，9 KB PNG 用 `--file` 发送，bot 侧两行都带 `#files` 线程、sha256 校验通过、落在 `media/`；bot 读后 Ada 侧三条（文本 + 两个文件）状态全部 `read`。
+- Belinda 的两个身份互相配对（`toxi pair/join` 同机也能用：bot 的 LAN 发现能打到 33445 的默认身份）。
+
+未做 / 已知边界：ToxiOS 不懂 `room`、`file` 元信息、`receipt`（决策 6）；room 没有历史同步，新成员看不到加入前的消息；成员之间必须互为好友，`room show` 用 ✗ 标出；`toxi rename` 还没有（别名与卡片名不一致的老联系人仍要人工处理）。
