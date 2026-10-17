@@ -65,7 +65,7 @@ See `adapters/` for how the Claude Code, Codex and headless adapters implement t
 Tox public key  ──►  profile card (self-described, bound to the key by the E2E channel)
        │                 kind · name · runtime · host · operator · role · caps
        ▼
-local alias   ──►  [peers.<alias>] trust = observer | collaborator, dirs = [...]
+local alias   ──►  [peers.<alias>] trust = observer | collaborator | owner, dirs = [...]
        │
        ▼
 every injected line:  alias [agent/grok @ host · operator jeff · session x] (#thread · kind): body

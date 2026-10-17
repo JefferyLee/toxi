@@ -94,3 +94,33 @@ def test_overview_merges_config_contacts_and_unread(tmp_path, monkeypatch):
     assert rows["codex"]["unread"] == 2 and rows["codex"]["online"] and rows["codex"]["dirs"] == ["/w/x"]
     assert rows["jeff-iphone"]["peer"] is False and rows["jeff-iphone"]["trust"] is None
     assert rows["newbie"]["known"] is False
+
+
+def test_owner_tier_parses_and_frames_messages_as_the_users_own(tmp_path, monkeypatch):
+    _write(tmp_path, monkeypatch, '[peers.jeff-iphone]\ndirs = ["/w/toxi"]\ntrust = "owner"\n')
+    assert config.peer_config()["jeff-iphone"] == {"dirs": ["/w/toxi"], "trust": "owner"}
+    msgs = [{"msg_uuid": "1", "alias": "jeff-iphone", "msg_type": "text", "content": "ship it",
+             "profile": {"kind": "human", "runtime": "toxios"}}]
+    monkeypatch.setattr(peers.client, "request",
+                        lambda m, p=None, **k: {"messages": msgs} if m == "get_messages" else {})
+    text = peers.as_prompt(peers.take(cwd="/w/toxi"))
+    assert "from the user on their own device (trust: owner)" in text
+    assert "peer agents" not in text.splitlines()[0]
+    assert peers.GUIDES["owner"] in text and "send_message" in peers.GUIDES["owner"]
+
+
+def test_at_name_addresses_one_session_over_reply_route_and_dirs(monkeypatch):
+    import time
+    monkeypatch.delenv("TOXI_SESSION", raising=False)
+    spec = {"dirs": ["/w/toxi"], "trust": "owner"}
+    to_vibe = {"msg_type": "text", "content": "@OnesVibe check the deploy",
+               "route_dir": "/w/toxi", "created_at": time.time()}
+    assert peers.routed_to(to_vibe, "/w/OnesVibe", spec)
+    assert not peers.routed_to(to_vibe, "/w/toxi", spec)       # beats the bound dir
+    assert not peers.routed_to(to_vibe, "/w/elsewhere", spec)
+    assert peers.routed_to(to_vibe, None, spec)                # no session context: take all
+    monkeypatch.setenv("TOXI_SESSION", "vibe")
+    assert peers.routed_to({"msg_type": "text", "content": " @vibe hi"}, "/w/x", spec)
+    plain = {"msg_type": "text", "content": "mail me at a@b.c"}  # @ not at the start
+    assert peers.routed_to(plain, "/w/toxi", spec) and not peers.routed_to(plain, "/w/OnesVibe", spec)
+    assert peers.target({"msg_type": "image", "content": "@x.png"}) is None

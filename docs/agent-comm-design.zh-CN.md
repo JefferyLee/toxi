@@ -453,6 +453,7 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 14. 私钥与数据库静态加密、可选 Tor。
 15. 真正的 Tox 群组（NGC）替代应用层 room（成员多时）。
 16. PRD 与 v2 对齐、Homebrew tap 跟进 0.5.x、Linux 发行版（Debian）实测、Windows 不在计划内。
+17. 指挥链（授权传递）。现在的信任由接收方判断，且不传递：某个 agent 转述"Jeff 同意了"不算数。要支持授权传递，需要签名授权（owner 的设备签发写明被授权者、范围和期限的凭证，接收方验证），也就是 daemon 和 ToxiOS 在 Tox 密钥之外新增签名密钥、授权协议、授权与撤销界面，而且一个 agent 被带偏的影响面更大。等到真的需要某个 agent 长期代 owner 行事时再做；一次批准多个 agent 现在用 room 就能做到，因为 room 消息由发送者直接发给每个成员。
 
 ### P6 room 历史、归档与检索、版本比对、分页修正、Codex 回合中投递（2026-10-16，v0.6.0）
 

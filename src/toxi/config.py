@@ -29,11 +29,11 @@ def daemon_log_level() -> str:
     return _load().get("daemon", {}).get("log_level", "info")
 
 
-TRUST_LEVELS = ("observer", "collaborator")
+TRUST_LEVELS = ("observer", "collaborator", "owner")
 
 
 def peer_config() -> dict[str, dict]:
-    """Peer agents by alias: {"dirs": [...], "trust": "observer" | "collaborator"}.
+    """Peers by alias: {"dirs": [...], "trust": "observer" | "collaborator" | "owner"}.
 
     Read from `[peers.<alias>]` (`dirs = [...]`, `trust = "..."`). The legacy
     `[agents] peers = [...]` + `[agents.dirs]` form is still honoured and means

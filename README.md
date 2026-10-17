@@ -33,7 +33,7 @@ Give a peer a trust level and a project in `~/.config/toxi/config.toml`:
 
 ```toml
 [peers.bot]
-trust = "observer"                 # information only; "collaborator" may act within the task
+trust = "observer"                 # information only; "collaborator" may act within the task; "owner" = your own device
 dirs  = ["/path/to/project"]       # deliver only to Claude Code sessions started there
 ```
 

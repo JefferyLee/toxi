@@ -65,7 +65,7 @@ Claude Code、Codex 与 headless 适配器如何实现这四件事见 `adapters/
 Tox 公钥  ──►  身份卡片（自述，经 E2E 信道与密钥绑定）
     │              kind · name · runtime · host · operator · role · caps
     ▼
-本地别名  ──►  [peers.<alias>] trust = observer | collaborator, dirs = [...]
+本地别名  ──►  [peers.<alias>] trust = observer | collaborator | owner, dirs = [...]
     │
     ▼
 每条注入的行：  alias [agent/grok @ host · operator jeff · session x] (#thread · kind): body

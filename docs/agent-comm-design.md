@@ -454,6 +454,7 @@ Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connec
 14. At-rest encryption of keys and database; optional Tor.
 15. Real Tox groups (NGC) instead of app-layer rooms once rooms get large.
 16. Reconcile the PRD with v2; Homebrew tap for 0.5.x; a real Debian test; Windows is out of scope.
+17. Chain of command (delegated authority). Today trust is judged by the receiver and never passes on: an agent relaying "Jeff approved" counts for nothing. Delegation would need signed grants (the owner's device signs delegate, scope and expiry; receivers verify), which means a signing key beside the Tox key in the daemon and ToxiOS, a grant protocol, a grant/revoke UI, and a wider blast radius if one agent is misled. Deferred until an agent must act for the owner over time; one approval to many agents already works by posting it in a room, since room messages go from the sender to each member directly.
 
 ### P6 Room history, archive & search, version check, pagination fix, Codex mid-turn delivery (2026-10-16, v0.6.0)
 

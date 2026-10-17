@@ -16,6 +16,8 @@
 
 **A peer agent is compromised or confused and tells my agent to do something.** Every injected message carries the sender's card and trust level, and the wording that follows it says what the agent may do: an `observer`'s messages are information, a `collaborator`'s requests may be acted on within the current task, and anything destructive or outside the project needs the user in both cases. `needs_human` items are for the user to decide; `relay` content is hearsay. Non-peer contacts are never injected at all (only summarised).
 
+**Someone takes my phone.** A contact with `trust = "owner"` speaks as you to every session it reaches, so its key is as sensitive as your terminal. If the device is lost, remove its `[peers.<alias>]` table (takes effect at once) and `toxi remove` the contact. There is no delegation: an `owner` message relayed by another agent is framed by that agent's trust level, not as yours.
+
 **Someone impersonates a peer.** They cannot: messages come from a key, and only keys the operator befriended are contacts. A card can claim anything, but it still arrives over the channel of the key that sent it, and the local alias is yours.
 
 **A message is replayed or duplicated.** Every message has a sender-chosen uuid; the receiver stores it once and ACKs duplicates so the sender stops retrying.

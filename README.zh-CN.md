@@ -33,7 +33,7 @@ toxi send bot "please run the smoke test" -t release -k request --wait-read 30
 
 ```toml
 [peers.bot]
-trust = "observer"                 # 只当信息；"collaborator" 可在任务范围内行动
+trust = "observer"                 # 只当信息；"collaborator" 可在任务范围内行动；"owner" = 你自己的设备
 dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 会话
 ```
 

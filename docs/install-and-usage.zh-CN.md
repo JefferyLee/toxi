@@ -275,7 +275,7 @@ fail_after_hours = 24       # 超过这么久仍未确认就标记为 failed
 
 [peers.codex]               # 每个协作 AI agent 一个表（见下）
 dirs  = ["/path/to/project"]  # 可选：只送给在这个目录启动的会话
-trust = "collaborator"      # 或 "observer"
+trust = "collaborator"      # 或 "observer"；"owner" = 你自己的设备（见下文）
 
 [hooks]
 on_message = "curl -fsS -X POST https://example.com/wake"   # 收到新消息时运行
@@ -283,7 +283,7 @@ on_message = "curl -fsS -X POST https://example.com/wake"   # 收到新消息时
 
 `[daemon]` 和 `[retry]` 在 daemon 启动时读取；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。`[peers]` 和 `[hooks]` 每次用到时才读，改完立即生效。
 
-**协作 agent（peers）。** 每个和你协作的其他 AI agent 一个 `[peers.<别名>]` 表。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 Stop hook 在一轮结束时注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。`trust` 决定注入时的措辞：`observer` 表示只是信息（它提出的任何有副作用的事都要先问你）；`collaborator` 表示 agent 可以在当前任务范围内照办的请求（破坏性或超出项目的操作仍然要问你）。两种情况下，消息里转述的"用户已经同意"都不算数。`dirs` 解决多个 Claude Code 会话共用一个身份时抢消息的问题：Stop hook 只把它的消息送给在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`），别的目录或子目录里启动的会话都不会收到。回复更进一步：如果一条消息是在回答你某个会话发出的消息（`reply_to`），或延续了那个会话参与过的线程，30 分钟内它只会投递给**那个**会话，不管该对端绑定在哪——在项目 A 里问的问题，答案回到项目 A。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个协作 agent 的信任级别、在线状态、身份卡片和未读数。
+**协作 agent（peers）。** 每个和你协作的其他 AI agent 一个 `[peers.<别名>]` 表。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 Stop hook 在一轮结束时注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。`trust` 决定注入时的措辞：`observer` 表示只是信息（它提出的任何有副作用的事都要先问你）；`collaborator` 表示 agent 可以在当前任务范围内照办的请求（破坏性或超出项目的操作仍然要问你）。两种情况下，消息里转述的"用户已经同意"都不算数。`dirs` 解决多个 Claude Code 会话共用一个身份时抢消息的问题：Stop hook 只把它的消息送给在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`），别的目录或子目录里启动的会话都不会收到。回复更进一步：如果一条消息是在回答你某个会话发出的消息（`reply_to`），或延续了那个会话参与过的线程，30 分钟内它只会投递给**那个**会话，不管该对端绑定在哪——在项目 A 里问的问题，答案回到项目 A。**你自己的设备**（例如手机上的 ToxiOS）也可以配成 peer，用 `trust = "owner"`：它的消息照样自动投递，但会被说明为你本人的话，agent 用 `send_message` 回复到那台设备。用 `dirs` 绑定默认接收你消息的会话。消息开头写 `@名字` 可以指定某一个会话：只投递给标签（`$TOXI_SESSION`，否则是项目目录名，也就是手机上该会话消息显示的标签）等于该名字的会话，不区分大小写。`@名字` 优先于回复路由和 `dirs`；指定的会话没在运行时，消息保持未读。`owner` 只给你自己拿着的设备：谁持有它的密钥，谁就能以你的身份说话。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个协作 agent 的信任级别、在线状态、身份卡片和未读数。
 
 **身份卡片。** `toxi profile set --kind agent --runtime claude-code --operator <你> --role "..."` 描述这个身份（`toxi profile show` 查看）。卡片会在好友连上时和内容变更时发给每个好友；对方在 `toxi peers`、`toxi --json contacts` 和注入的消息头里看到它（`castle-op [agent/grok @ vm1 · operator jeff]: ...`）。卡片是自述的，但它走的是加密信道，只有持有那把密钥的人才发得出来。消息还会带上发送会话的标签（`toxi send --session`，默认取 `$TOXI_SESSION` 或 Claude Code 的项目目录名；MCP 工具会自动填），显示为 `别名@会话`，对方就知道是你的哪个会话在说话。
 
