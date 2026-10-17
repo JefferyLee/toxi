@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/session_start_hook.py\"",
+            "command": "f=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/session_start_hook.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/peer_check.sh\"",
+            "command": "f=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/peer_check.sh\"; [ -f \"$f\" ] || exit 0; exec sh \"$f\"",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/stop_hook.py\"",
+            "command": "f=\"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/stop_hook.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 8
           }
         ]
