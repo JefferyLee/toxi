@@ -86,6 +86,20 @@ def test_codex_hooks_cover_start_tool_and_stop():
         assert (PLUGIN / "hooks" / name).exists()
 
 
+def test_codex_hook_commands_resolve_outside_the_repo(tmp_path):
+    # Codex sets PLUGIN_ROOT (not CODEX_PLUGIN_ROOT) and runs hooks in the
+    # session's cwd, so a relative fallback alone breaks in every other project.
+    import subprocess
+    hooks = _load(PLUGIN / "hooks" / "hooks.json")["hooks"]
+    for event in ("SessionStart", "PostToolUse", "Stop"):
+        cmd = hooks[event][0]["hooks"][0]["command"]
+        assert "${PLUGIN_ROOT:-" in cmd
+        path = cmd.split('"')[1]
+        out = subprocess.run(["sh", "-c", f'printf %s "{path}"'], cwd=tmp_path, capture_output=True, text=True,
+                             env={"PATH": "/usr/bin:/bin", "PLUGIN_ROOT": str(PLUGIN)}).stdout
+        assert Path(out).exists(), out
+
+
 def test_codex_stop_hook_emits_statusline_context(tmp_path):
     res = _run_hook(
         "stop_hook.py",

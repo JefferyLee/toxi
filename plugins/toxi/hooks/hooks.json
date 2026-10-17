@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CODEX_PLUGIN_ROOT:-./plugins/toxi}/hooks/session_start_hook.py\"",
+            "command": "python3 \"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/session_start_hook.py\"",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CODEX_PLUGIN_ROOT:-./plugins/toxi}/hooks/peer_check.sh\"",
+            "command": "sh \"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/peer_check.sh\"",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CODEX_PLUGIN_ROOT:-./plugins/toxi}/hooks/stop_hook.py\"",
+            "command": "python3 \"${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}/hooks/stop_hook.py\"",
             "timeout": 8
           }
         ]
