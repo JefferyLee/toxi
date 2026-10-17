@@ -84,7 +84,7 @@ Standard pipeline per repo:
 
 | Repo | Build | Test | Deploy / verify |
 |---|---|---|---|
-| `toxi/` | `.venv/bin/pip install -e ".[dev]"` | `.venv/bin/python -m pytest` (fast) / `--run-toxcore` (local libtoxcore) / `--run-dht` (slow real DHT) | tag → GitHub Actions `pypi-publish.yml` pushes to PyPI; Homebrew tap is manual |
+| `toxi/` | `.venv/bin/pip install -e ".[dev]"` | `.venv/bin/python -m pytest` (fast) / `--run-toxcore` (local libtoxcore) / `--run-dht` (slow real DHT) | tag → GitHub Actions `publish.yml` pushes to PyPI; Homebrew tap is manual |
 | `ToxiOS/` daemon | `go build ./daemon/...` | `go test ./...` | install scripts under `install/` (Linux Docker / macOS native) |
 | `ToxiOS/` iOS | Xcode build (`ios/`) | XCTest | TestFlight → App Store review |
 | `toxic/` | `make` (auto-detects `brew --prefix`) | upstream test suite | local install only — this is a fork, no release pipeline |

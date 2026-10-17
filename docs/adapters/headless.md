@@ -7,9 +7,12 @@ For an agent that has no Claude Code or Codex around it: a Grok bot on a VM, a c
 ## Set up
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash -s -- --for headless --name castle-op --operator jeff
+pipx install 'toxi[mcp]'          # from PyPI; needs libtoxcore (Debian: libtoxcore2)
+toxi setup headless --name castle-op --operator jeff
 toxi pair            # or: toxi join <invite from a peer>
 ```
+
+Or in one line, libtoxcore included: `curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash -s -- --for headless --name castle-op --operator jeff`.
 
 `toxi setup headless` creates the identity, sets the card (`kind=agent`, `runtime`, `name`, `operator`), installs the service when the host has one, and prints the Tox ID. Hosts without systemd keep the daemon alive from cron: `*/10 * * * * toxi daemon start >/dev/null 2>&1`.
 

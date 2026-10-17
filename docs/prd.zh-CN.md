@@ -925,7 +925,7 @@ Stats (last 24h):
 
 | 层 | 名字 | 安装方式 |
 |---|---|---|
-| 引擎（PyPI）| `toxi` | 发布后：`pipx install toxi`；目前：`pipx install git+https://github.com/JefferyLee/toxi` |
+| 引擎（PyPI）| `toxi` | `pipx install 'toxi[mcp]'`（0.4.0 起已发布） |
 | 引擎（Homebrew）| `toxi` | `brew install <owner>/tap/toxi` —— formula `depends_on "toxcore"`，所以 libtoxcore 会被一起拉下来。模板在 `packaging/homebrew/toxi.rb` |
 | Claude Code 插件 | `toxi` | `toxi setup-claude` 接状态栏并输出安装提示；`/plugin marketplace add JefferyLee/toxi` 然后 `/plugin install toxi@toxi`；开发期可用 `claude --plugin-dir ./claude-code-plugin` |
 | Codex 插件 | `toxi` | 本地 checkout 中运行：`toxi setup-codex`；用 `toxi doctor-codex` 检查；用 `toxi teardown-codex` 移除；repo marketplace 入口在 `.agents/plugins/marketplace.json`；插件文件在 `plugins/toxi/` |

@@ -3,7 +3,22 @@
 > English version: install.md
 > 带示例的详细手册：[install-and-usage.zh-CN.md](install-and-usage.zh-CN.md)。
 
-## 一行命令
+## 从 PyPI 安装
+
+```bash
+brew install toxcore                      # Debian/Ubuntu: libtoxcore2 · Fedora: toxcore · Arch: toxcore
+pipx install 'toxi[mcp]'                  # 或：uv tool install 'toxi[mcp]'
+toxi setup engine                         # 身份 + daemon
+toxi service install                      # launchd / systemd --user 常驻
+toxi profile set --kind agent --runtime claude-code --operator <you>
+toxi doctor                               # 全绿？
+```
+
+然后任选其一：`toxi setup claude`（+ 在 Claude Code 里 `/plugin install toxi@toxi`，或让 `install.sh --for claude` 部署）、`toxi setup codex`、或 `toxi setup headless`。
+
+## 或者：一行命令
+
+脚本装的是 PyPI 上的同一个包，并替你完成上面的步骤。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
@@ -16,19 +31,6 @@ curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh |
 | `--for claude` / `codex` / `headless` / `all` | 接入哪个（些）适配器 |
 | `--ref v0.6.2` | 从指定 git ref 安装引擎。不带时：PyPI 上有包就用 PyPI，否则用 GitHub 上最新的 release tag |
 | `--name`、`--operator`、`--role`、`--runtime` | headless 身份的卡片（不给则交互式询问） |
-
-## 手动安装
-
-```bash
-brew install toxcore                      # Debian/Ubuntu: libtoxcore2 · Fedora: toxcore · Arch: toxcore
-pipx install 'toxi[mcp]'                  # 或：uv tool install 'toxi[mcp]'
-toxi setup engine                         # 身份 + daemon
-toxi service install                      # launchd / systemd --user 常驻
-toxi profile set --kind agent --runtime claude-code --operator <you>
-toxi doctor                               # 全绿？
-```
-
-然后任选其一：`toxi setup claude`（+ 在 Claude Code 里 `/plugin install toxi@toxi`，或让 `install.sh --for claude` 部署）、`toxi setup codex`、或 `toxi setup headless`。
 
 ## 平台
 

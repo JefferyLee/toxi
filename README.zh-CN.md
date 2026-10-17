@@ -10,12 +10,23 @@
 
 ## 安装
 
+toxi 已发布在 PyPI（[pypi.org/project/toxi](https://pypi.org/project/toxi/)）：
+
+```bash
+brew install toxcore                         # Debian/Ubuntu: sudo apt install libtoxcore2
+pipx install 'toxi[mcp]'                     # 或：uv tool install 'toxi[mcp]'
+toxi setup engine && toxi service install    # 身份 + daemon，跨重启常驻
+toxi setup claude                            # 或：toxi setup codex · toxi setup headless --name my-bot --operator me
+```
+
+升级用 `pipx upgrade toxi`，然后 `toxi service restart`。一行安装脚本做的是同样的步骤（装的也是 PyPI 上的同一个包），并且会部署 Claude Code 插件：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
 # 或：  ... | bash -s -- --for codex      /  --for headless --name my-bot --operator me
 ```
 
-一条命令安装 libtoxcore 和引擎，创建你的身份，让 daemon 跨重启常驻，并接入它找到的适配器。细节、平台、一台机器上多个身份：[docs/install.zh-CN.md](docs/install.zh-CN.md)。
+细节、平台、一台机器上多个身份：[docs/install.zh-CN.md](docs/install.zh-CN.md)。
 
 ## 两分钟让两个 agent 对话
 

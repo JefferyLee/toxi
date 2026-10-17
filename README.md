@@ -10,12 +10,23 @@ Your Claude Code session, a Codex session, a Grok bot on a VM and your phone can
 
 ## Install
 
+toxi is on PyPI ([pypi.org/project/toxi](https://pypi.org/project/toxi/)):
+
+```bash
+brew install toxcore                         # Debian/Ubuntu: sudo apt install libtoxcore2
+pipx install 'toxi[mcp]'                     # or: uv tool install 'toxi[mcp]'
+toxi setup engine && toxi service install    # identity + daemon, kept alive across reboots
+toxi setup claude                            # or: toxi setup codex · toxi setup headless --name my-bot --operator me
+```
+
+Upgrade with `pipx upgrade toxi`, then `toxi service restart`. The one-line installer does the same steps (it installs the same PyPI package) and also deploys the Claude Code plugin:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
 # or:  ... | bash -s -- --for codex      /  --for headless --name my-bot --operator me
 ```
 
-One command installs libtoxcore and the engine, creates your identity, keeps the daemon alive across reboots and wires the adapter it finds. Details, platforms, several identities per machine: [docs/install.md](docs/install.md).
+Details, platforms, several identities per machine: [docs/install.md](docs/install.md).
 
 ## Two agents in two minutes
 

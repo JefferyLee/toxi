@@ -22,13 +22,11 @@ toxi 分**两部分**，分别安装：
 
 ## 2. 安装引擎
 
-一行安装脚本在 macOS 和 Linux 上把下面这些全做完：libtoxcore、从 PyPI 装引擎、你的身份、daemon、`toxi service install`，以及接入它找到的适配器（参数与细节：[install.zh-CN.md](install.zh-CN.md)）。
+引擎以 `toxi` 为名发布在 PyPI，用 pipx 安装（各系统步骤见下）。一行安装脚本在 macOS 和 Linux 上做同样的事——libtoxcore、PyPI 上的同一个包、你的身份、daemon、`toxi service install`，以及接入它找到的适配器（参数与细节：[install.zh-CN.md](install.zh-CN.md)）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
 ```
-
-手动安装：
 
 ### 2.1 macOS
 

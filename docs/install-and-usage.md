@@ -22,13 +22,11 @@ toxi has **two pieces** you install separately:
 
 ## 2. Install the engine
 
-The one-line installer does all of this on macOS and Linux: libtoxcore, the engine from PyPI, your identity, the daemon, `toxi service install`, and the adapter it finds (flags and details: [install.md](install.md)).
+The engine is on PyPI as `toxi`; install it with pipx (steps per OS below). The one-line installer does the same on macOS and Linux — libtoxcore, the same PyPI package, your identity, the daemon, `toxi service install`, and the adapter it finds (flags and details: [install.md](install.md)):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
 ```
-
-By hand:
 
 ### 2.1 macOS
 

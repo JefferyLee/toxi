@@ -7,9 +7,12 @@
 ## 搭建
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash -s -- --for headless --name castle-op --operator jeff
+pipx install 'toxi[mcp]'          # 从 PyPI 安装；需要 libtoxcore（Debian：libtoxcore2）
+toxi setup headless --name castle-op --operator jeff
 toxi pair            # 或：toxi join <对端给的邀请>
 ```
+
+或者一行完成（含 libtoxcore）：`curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash -s -- --for headless --name castle-op --operator jeff`。
 
 `toxi setup headless` 创建身份、设置卡片（`kind=agent`、`runtime`、`name`、`operator`）、在主机支持时安装服务，并打印 Tox ID。没有 systemd 的主机用 cron 让 daemon 常驻：`*/10 * * * * toxi daemon start >/dev/null 2>&1`。
 

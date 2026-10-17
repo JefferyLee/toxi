@@ -3,7 +3,22 @@
 > 中文版 / Chinese version: install.zh-CN.md
 > Detailed walkthrough with examples: [install-and-usage.md](install-and-usage.md).
 
-## One line
+## From PyPI
+
+```bash
+brew install toxcore                      # Debian/Ubuntu: libtoxcore2 · Fedora: toxcore · Arch: toxcore
+pipx install 'toxi[mcp]'                  # or: uv tool install 'toxi[mcp]'
+toxi setup engine                         # identity + daemon
+toxi service install                      # launchd / systemd --user keep-alive
+toxi profile set --kind agent --runtime claude-code --operator <you>
+toxi doctor                               # everything green?
+```
+
+Then one of: `toxi setup claude` (+ `/plugin install toxi@toxi` inside Claude Code, or let `install.sh --for claude` deploy it), `toxi setup codex`, or `toxi setup headless`.
+
+## Or: one line
+
+The script installs the same PyPI package and does the steps above for you.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
@@ -16,19 +31,6 @@ It installs libtoxcore, a Python app installer (pipx, or uv, or pip), the `toxi`
 | `--for claude` / `codex` / `headless` / `all` | which adapter(s) to wire |
 | `--ref v0.6.2` | install the engine from a git ref. Without it the script uses PyPI when the package is published there, else the latest GitHub release tag |
 | `--name`, `--operator`, `--role`, `--runtime` | the headless identity's card (asked interactively otherwise) |
-
-## By hand
-
-```bash
-brew install toxcore                      # Debian/Ubuntu: libtoxcore2 · Fedora: toxcore · Arch: toxcore
-pipx install 'toxi[mcp]'                  # or: uv tool install 'toxi[mcp]'
-toxi setup engine                         # identity + daemon
-toxi service install                      # launchd / systemd --user keep-alive
-toxi profile set --kind agent --runtime claude-code --operator <you>
-toxi doctor                               # everything green?
-```
-
-Then one of: `toxi setup claude` (+ `/plugin install toxi@toxi` inside Claude Code, or let `install.sh --for claude` deploy it), `toxi setup codex`, or `toxi setup headless`.
 
 ## Platforms
 

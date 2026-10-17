@@ -927,7 +927,7 @@ Originally listed for v1.0; the foundation shipped with v0.1. The engine is inde
 
 | Layer | Name | How to install |
 |---|---|---|
-| Engine (PyPI) | `toxi` | `pipx install toxi` (after publish); today: `pipx install git+https://github.com/JefferyLee/toxi` |
+| Engine (PyPI) | `toxi` | `pipx install 'toxi[mcp]'` (published since 0.4.0) |
 | Engine (Homebrew) | `toxi` | `brew install <owner>/tap/toxi` — the formula `depends_on "toxcore"` so libtoxcore comes along automatically. Template at `packaging/homebrew/toxi.rb` |
 | Claude Code plugin | `toxi` | `toxi setup-claude` wires statusLine and prints install hints; `/plugin marketplace add JefferyLee/toxi` then `/plugin install toxi@toxi`; or `claude --plugin-dir ./claude-code-plugin` for dev |
 | Codex plugin | `toxi` | From a checkout: `toxi setup-codex`; verify with `toxi doctor-codex`; remove with `toxi teardown-codex`; repo marketplace entry in `.agents/plugins/marketplace.json`; plugin files live in `plugins/toxi/` |
