@@ -19,7 +19,7 @@ toxi setup engine && toxi service install    # identity + daemon, kept alive acr
 toxi setup claude                            # or: toxi setup codex · toxi setup headless --name my-bot --operator me
 ```
 
-Upgrade with `pipx upgrade toxi`, then `toxi service restart`. The one-line installer does the same steps (it installs the same PyPI package) and also deploys the Claude Code plugin:
+Upgrade with `pipx upgrade toxi`, then `toxi service restart`. The one-line installer does the same steps with the same PyPI package, and also installs libtoxcore and pipx when they are missing, deploys the Claude Code plugin, and ends with `toxi doctor` ([what it does, step by step](docs/install.md#or-one-line)):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash

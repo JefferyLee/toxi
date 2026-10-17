@@ -19,7 +19,7 @@ toxi setup engine && toxi service install    # 身份 + daemon，跨重启常驻
 toxi setup claude                            # 或：toxi setup codex · toxi setup headless --name my-bot --operator me
 ```
 
-升级用 `pipx upgrade toxi`，然后 `toxi service restart`。一行安装脚本做的是同样的步骤（装的也是 PyPI 上的同一个包），并且会部署 Claude Code 插件：
+升级用 `pipx upgrade toxi`，然后 `toxi service restart`。一行安装脚本用 PyPI 上的同一个包完成同样的步骤，另外还会在缺少时安装 libtoxcore 和 pipx、部署 Claude Code 插件，最后运行 `toxi doctor`（[逐步说明](docs/install.zh-CN.md#或者一行命令)）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash

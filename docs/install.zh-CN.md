@@ -24,7 +24,24 @@ toxi doctor                               # 全绿？
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
 ```
 
-它会安装 libtoxcore、一个 Python 应用安装器（pipx，或 uv，或 pip）、`toxi` 引擎，创建你的身份，让 daemon 跨重启常驻（`toxi service install`），并接入它找到的适配器：有 `claude` 时接 Claude Code，否则建一个 headless 身份。重复运行即原地升级全部组件。
+它按顺序做这些事：
+
+1. **libtoxcore**：已经装了就跳过；否则 macOS 上 `brew install toxcore`，Linux 上 `sudo apt-get install libtoxcore2` / `sudo dnf install toxcore` / `sudo pacman -S toxcore`。找不到已知的包管理器就停下。
+2. **Python 应用安装器**：有 pipx 就用 pipx，其次 uv；都没有就先装 pipx（macOS 用 Homebrew，其他系统用 `pip install --user`），最后才退回 `pip install --user`。`python3` 低于 3.10 时会提示。
+3. **引擎**：从 PyPI 安装或升级 `toxi[mcp]`。连不上 PyPI 时用 GitHub 上最新的 release tag；`--ref` 强制用指定的 git ref。
+4. **身份和 daemon**：`toxi setup engine`，然后 `toxi service install`（macOS 用 launchd，Linux 用 `systemd --user`）。没有服务管理器时，打印一行让 daemon 常驻的 cron 配置。
+5. **适配器**（`--for`；默认：有 `claude` 命令或 `~/.claude` 目录时为 `claude`，否则为 `headless`）：
+   - `claude`：把仓库克隆到 `~/.claude/plugins/marketplaces/toxi`，把插件复制到 `~/.claude/plugins/cache/toxi/toxi/<版本>/` 并删除旧版本目录，在 `~/.claude/plugins/installed_plugins.json` 和 `~/.claude/settings.json` 里注册并启用，再接好状态栏（`toxi setup claude`）。已经在运行的会话需要执行 `/reload-plugins`。
+   - `codex`：`toxi setup codex`（MCP 服务器、插件、`/prompts:toxi-read`）；`PATH` 里没有 `codex` 时跳过。之后在 Codex 里用 `/hooks` 信任 hook。
+   - `headless`：标准输入是终端时询问卡片上的名字和运营者，`curl | bash` 方式下不会询问（可以用 `--name`、`--operator`、`--role`、`--runtime` 直接给），然后执行 `toxi setup headless`。
+6. **检查**：`toxi doctor`。
+
+重复运行即原地升级全部组件。想先看一遍脚本再运行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh -o install.sh
+less install.sh && bash install.sh --for codex
+```
 
 | 参数 | 效果 |
 |---|---|

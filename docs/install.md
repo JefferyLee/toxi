@@ -24,7 +24,24 @@ The script installs the same PyPI package and does the steps above for you.
 curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
 ```
 
-It installs libtoxcore, a Python app installer (pipx, or uv, or pip), the `toxi` engine, creates your identity, keeps the daemon alive across reboots (`toxi service install`) and wires the adapter it finds: Claude Code when `claude` is present, otherwise a headless identity. Re-running upgrades everything in place.
+What it does, in order:
+
+1. **libtoxcore**: skipped if already present; otherwise `brew install toxcore` on macOS, or `sudo apt-get install libtoxcore2` / `sudo dnf install toxcore` / `sudo pacman -S toxcore` on Linux. It stops if it finds no known package manager.
+2. **Python app installer**: uses pipx if present, else uv; otherwise installs pipx (Homebrew on macOS, `pip install --user` elsewhere), and falls back to `pip install --user` as a last resort. It warns if `python3` is older than 3.10.
+3. **Engine**: installs or upgrades `toxi[mcp]` from PyPI. If PyPI cannot be reached it uses the latest GitHub release tag; `--ref` forces a git ref.
+4. **Identity and daemon**: `toxi setup engine`, then `toxi service install` (launchd on macOS, `systemd --user` on Linux). Without a service manager it prints a cron line that keeps the daemon alive.
+5. **Adapter** (`--for`; default `claude` when the `claude` command or `~/.claude` exists, otherwise `headless`):
+   - `claude`: clones the repo into `~/.claude/plugins/marketplaces/toxi`, copies the plugin to `~/.claude/plugins/cache/toxi/toxi/<version>/` and removes older version folders, registers and enables it in `~/.claude/plugins/installed_plugins.json` and `~/.claude/settings.json`, and wires the status line (`toxi setup claude`). Sessions already running need `/reload-plugins`.
+   - `codex`: `toxi setup codex` (MCP server, plugin, `/prompts:toxi-read`); skipped if `codex` is not on `PATH`. Trust the hooks in Codex with `/hooks`.
+   - `headless`: asks for the card's name and operator when stdin is a terminal, so not under `curl | bash` (or pass `--name`, `--operator`, `--role`, `--runtime`), then `toxi setup headless`.
+6. **Check**: `toxi doctor`.
+
+Re-running it upgrades everything in place. To read it before running it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh -o install.sh
+less install.sh && bash install.sh --for codex
+```
 
 | flag | effect |
 |---|---|
