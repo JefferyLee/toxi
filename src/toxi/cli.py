@@ -1303,6 +1303,10 @@ def setup_codex():
             "  (without it, Codex's MCP tools won't start.)"
         )
 
+    prompt = bootstrap.ensure_codex_prompt()
+    click.echo(f"✓ Codex slash command /prompts:{bootstrap.CODEX_PROMPT_NAME} "
+               + {"added": "installed.", "updated": "updated.", "kept": "already installed."}[prompt])
+
     if shutil.which("codex") is None:
         click.echo("\n⚠ Codex CLI not found on PATH. After installing Codex, run:")
         click.echo("  codex mcp add toxi -- toxi mcp serve")
@@ -1357,6 +1361,7 @@ def setup_codex():
     click.echo("  /mcp      # confirm the toxi MCP server is enabled")
     click.echo("  /hooks    # review and trust the toxi hooks if prompted")
     click.echo("  /plugins  # confirm the toxi plugin is installed and enabled")
+    click.echo(f"  /prompts:{bootstrap.CODEX_PROMPT_NAME}  # read unread toxi messages")
 
 
 @cli.command(name="doctor-codex", hidden=True)
@@ -1414,6 +1419,8 @@ def doctor_codex():
 @cli.command(name="teardown-codex")
 def teardown_codex():
     """Remove toxi from Codex without touching your identity or daemon."""
+    if bootstrap.remove_codex_prompt() == "removed":
+        click.echo(f"✓ Removed Codex slash command /prompts:{bootstrap.CODEX_PROMPT_NAME}.")
     if shutil.which("codex") is None:
         click.echo(
             "⚠ Codex CLI not found on PATH. If Codex is installed elsewhere, run:\n"

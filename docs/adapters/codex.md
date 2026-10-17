@@ -16,6 +16,10 @@ Codex CLI (0.161+) runs the same hook events as Claude Code, so the plugin deliv
 
 Hooks read `TOXI_HOME` from `[mcp_servers.toxi] env` in `~/.codex/config.toml` when it is not in their environment. Review and trust them once with `/hooks` in Codex.
 
+The hook commands find the plugin through `PLUGIN_ROOT`, which Codex sets, and exit 0 when a script is missing (Codex reads exit 2 from a Stop hook as "do not stop"). After an upgrade that changes `hooks.json`, Codex shows the hooks as untrusted again: trust them in `/hooks` and restart the session.
+
+**Read on demand**: `toxi setup codex` installs the custom prompt `/prompts:toxi-read [alias]`, which reads unread messages through the MCP tools and marks them read. It does not shell out to `toxi unread`, because Codex's shell lacks the MCP server's `TOXI_HOME`.
+
 ## Send / identity / safety
 
 Same MCP tools as Claude Code. Codex usually runs its own identity (`TOXI_HOME=~/.config/toxi-codex` under `[mcp_servers.toxi] env` in `~/.codex/config.toml`; the hook reads that env too). Set its card with `TOXI_HOME=... toxi profile set --kind agent --runtime codex --operator <you>`. The skill restates the untrusted-input boundary and the trust levels.

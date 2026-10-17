@@ -147,6 +147,29 @@ def test_codex_repo_root_prefers_current_checkout(monkeypatch, tmp_path):
     assert bootstrap.codex_marketplace_path() == checkout / ".agents" / "plugins" / "marketplace.json"
 
 
+@pytest.fixture(autouse=True)
+def _codex_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+
+def test_setup_codex_installs_read_prompt_once(monkeypatch, tmp_path):
+    monkeypatch.setattr("toxi.cli._ensure_mcp_extra", lambda: "present")
+    monkeypatch.setattr("toxi.cli.shutil.which", lambda name: None)
+    prompt = tmp_path / "codex-home" / "prompts" / "toxi-read.md"
+
+    first = CliRunner().invoke(cli, ["setup-codex"])
+    assert "/prompts:toxi-read installed" in first.output
+    text = prompt.read_text()
+    assert "get_unread" in text and "mark_read" in text and "$ARGUMENTS" in text
+    assert "toxi unread" not in text  # Codex's shell lacks the MCP server's TOXI_HOME
+
+    again = CliRunner().invoke(cli, ["setup-codex"])
+    assert "/prompts:toxi-read already installed" in again.output
+
+    CliRunner().invoke(cli, ["teardown-codex"])
+    assert not prompt.exists()
+
+
 def test_setup_codex_when_codex_missing(monkeypatch):
     monkeypatch.setattr("toxi.cli._ensure_mcp_extra", lambda: "present")
     monkeypatch.setattr("toxi.cli.shutil.which", lambda name: None)
