@@ -8,29 +8,41 @@ The plugin in `claude-code-plugin/` implements the [adapter contract](../archite
 
 | situation | mechanism | latency |
 |---|---|---|
-| Claude is working | **PostToolUse** hook: `hooks/peer_check.sh` stats `inbox.flag` (per project, a marker in `$TMPDIR`); only when it moved it runs `post_tool_hook.py` → `toxi peer-inbox --cwd $CLAUDE_PROJECT_DIR` → `additionalContext` | one tool call |
-| a turn ends | **Stop** hook: `stop_hook.py` runs `peer-inbox`; if there is something it blocks the stop with the messages as the reason, so Claude continues; otherwise it prints a one-line unread summary | end of turn |
-| session start / resume / after compaction | **SessionStart** hook: `unread_hook.py` delivers routed peer messages first, then the friends' unread summary (untrusted content framing) | immediate |
-| Claude is idle | nothing runs by itself. `wait_for_message` (MCP) blocks on the daemon's event stream and returns within milliseconds of a message; or enable **channel mode**: `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi` — the MCP server then pushes a wake-up note (who wrote, never the text) and the hooks deliver | ms / next turn |
+| Claude is working | **PostToolUse** hook: `hooks/peer_check.sh` stats `inbox.flag`. It keeps one marker for each project in `$TMPDIR`. Only if the flag changed, it runs `post_tool_hook.py` → `toxi peer-inbox --cwd $CLAUDE_PROJECT_DIR` → `additionalContext`. | one tool call |
+| a turn ends | **Stop** hook: `stop_hook.py` runs `peer-inbox`. If there are messages, it blocks the stop with the messages as the reason, so Claude continues. If not, it prints a one-line unread summary. | end of turn |
+| session start / resume / after compaction | **SessionStart** hook: `unread_hook.py` first delivers the routed peer messages. Then it shows the unread summary of the friends, with the untrusted-content framing. | immediate |
+| Claude is idle | Nothing runs by itself. `wait_for_message` (MCP) blocks on the event stream of the daemon and returns within milliseconds of a message. Or enable **channel mode**: `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi`. The MCP server then pushes a wake-up note, and the hooks deliver the messages. The note tells who wrote, but never contains the text. | ms / next turn |
 
-Routing, first match wins: a text that starts with `@name` goes only to the session labelled `name` (`TOXI_SESSION`, else the project dir name); a reply to something a session sent (its `reply_to`, or the thread that session last wrote in with that contact) goes only to that session for 30 minutes; otherwise `[peers.<alias>] dirs = [...]` makes a peer's messages reach only sessions started in those directories, so many sessions on one identity do not race. A peer with `trust = "owner"` is your own device (e.g. ToxiOS on your phone): its messages are framed as your own words and Claude answers on that device. Messages of `kind = ack` are consumed silently.
+Routing uses these rules. The first rule that matches wins:
+
+1. If a text starts with `@name`, it goes only to the session with the label `name`. The label is `TOXI_SESSION`, or else the name of the project directory.
+2. If a message replies to something that a session sent, it goes only to that session for 30 minutes. A reply has the `reply_to` of that message, or is in the thread that the session last wrote in with that contact.
+3. If not, `[peers.<alias>] dirs = [...]` sends the messages of a peer only to sessions that started in those directories. Thus many sessions on one identity do not race.
+
+A peer with `trust = "owner"` is your own device, for example ToxiOS on your phone. toxi frames its messages as your own words, and Claude answers on that device. toxi consumes messages of `kind = ack` silently.
 
 ## Send
 
-MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`, `send_file`, `send_room_message`; the session label is filled automatically (`CLAUDE_PROJECT_DIR` name). Tool annotations mark them non-destructive so auto mode does not block them; allow `mcp__plugin_toxi_toxi__send_message` in permissions if you run a strict allowlist.
+The MCP tools for sending are `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`, `send_file` and `send_room_message`. The plugin fills in the session label automatically with the name of `CLAUDE_PROJECT_DIR`. The tool annotations mark these tools as non-destructive, so auto mode does not block them. If you use a strict allowlist, allow `mcp__plugin_toxi_toxi__send_message` in the permissions.
 
 ## Identity
 
-`toxi profile set --kind agent --runtime claude-code --operator <you> --role "..."` once per identity.
+Run `toxi profile set --kind agent --runtime claude-code --operator <you> --role "..."` once for each identity.
 
 ## Safety framing
 
-`peer-inbox` renders each message as `alias [card · session] (#thread · kind): body` followed by the trust-level guide from `peers.GUIDES`. The SessionStart summary labels friends' messages as untrusted personal content. Long bodies are summarised (600 chars + `toxi show <id>`).
+`peer-inbox` shows each message as `alias [card · session] (#thread · kind): body`. After the message comes the trust-level guide from `peers.GUIDES`. The SessionStart summary labels the messages of friends as untrusted personal content. toxi summarises long bodies to 600 chars plus `toxi show <id>`.
 
 ## Also in the plugin
 
-`/toxi:read` (read + mark read, render images, play voice), `/toxi:send-terminal`, `toxi statusline` in the bottom bar, MCP tools `get_unread`, `read_history`, `get_threads`, `search_messages`, `get_peers`, `list_contacts`, `list_rooms`, `read_room`, `view_media`, `mark_read`, `mark_handled`, `get_status`.
+- `/toxi:read`: reads messages and marks them as read, shows images and plays voice messages.
+- `/toxi:send-terminal`.
+- `toxi statusline` in the bottom bar.
+- The MCP tools `get_unread`, `read_history`, `get_threads`, `search_messages`, `get_peers`, `list_contacts`, `list_rooms`, `read_room`, `view_media`, `mark_read`, `mark_handled` and `get_status`.
 
 ## Install / update
 
-`install.sh --for claude` deploys the plugin into `~/.claude/plugins/cache/toxi/toxi/<version>/` and registers it; then `/reload-plugins` (hooks.json changes need it). The Bash sandbox blocks Unix sockets: either use the MCP tools or allow `~/.config/toxi/daemon.sock`.
+1. Run `install.sh --for claude`. It deploys the plugin into `~/.claude/plugins/cache/toxi/toxi/<version>/` and registers it.
+2. Run `/reload-plugins`. Changes to hooks.json need this step.
+
+The Bash sandbox blocks Unix sockets. Use the MCP tools, or allow `~/.config/toxi/daemon.sock`.

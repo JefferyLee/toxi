@@ -3,7 +3,7 @@
 > 中文版 / Chinese version: architecture.zh-CN.md
 > Design background and decisions: [agent-comm-design.md](agent-comm-design.md). Wire format: [protocol.md](protocol.md).
 
-toxi is a communication layer between agents and people that needs no server: every participant runs a small daemon that holds a Tox identity, and adapters plug that daemon into whatever runs the agent (Claude Code, Codex, a bot on a VM, a phone).
+toxi is a communication layer between agents and people. It needs no server. Each participant runs a small daemon that holds a Tox identity. Adapters connect that daemon to the runtime of the agent: Claude Code, Codex, a bot on a VM, or a phone.
 
 ## Four layers
 
@@ -26,39 +26,56 @@ toxi is a communication layer between agents and people that needs no server: ev
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **L1 Tox** gives identity (a key pair), encryption, discovery and NAT traversal. toxi binds `libtoxcore` directly through `ctypes` (`src/toxi/tox.py`).
-- **L2 the daemon** (`src/toxi/daemon.py`) is one single-threaded process per identity: it drives `tox_iterate`, serves IPC, owns the SQLite database and never blocks on anything. Clients never open the database themselves.
-- **L3 the protocol** (`src/toxi/envelope.py`, spec in `protocol.md`) is JSON inside Tox messages. Version 2 is backward compatible with version 1 nodes.
-- **L4 adapters** translate between the daemon and an agent runtime. They are thin by design: every adapter does the same four things (below).
+- **L1 Tox** gives identity, encryption, discovery and NAT traversal. In Tox, an identity is a key pair. toxi binds `libtoxcore` directly through `ctypes`. The binding is in `src/toxi/tox.py`.
+- **L2 the daemon** is one single-threaded process for each identity. Its code is in `src/toxi/daemon.py`. The daemon drives `tox_iterate`, serves IPC and owns the SQLite database. It never blocks on an operation. Clients never open the database directly.
+- **L3 the protocol** is JSON inside Tox messages. The code is in `src/toxi/envelope.py`, and the specification is in `protocol.md`. Version 2 is backward compatible with version 1 nodes.
+- **L4 adapters** translate between the daemon and an agent runtime. They are thin by design. Each adapter does the same four tasks. The adapter contract below gives these tasks.
 
 ## Processes and files
 
 | process | what it is | started by |
 |---|---|---|
-| `toxi-daemon` | the resident engine for one identity (`TOXI_HOME`, default `~/.config/toxi`) | `toxi daemon start`, or the OS service from `toxi service install` |
-| `toxi` | the short-lived CLI; every command is one IPC round trip | you, hooks, scripts |
-| `toxi mcp serve` | the MCP server (stdio) that Claude Code / Codex launch | the agent runtime |
-| hooks | `claude-code-plugin/hooks/*` and `plugins/toxi/hooks/*` | the agent runtime at lifecycle points |
+| `toxi-daemon` | the resident engine for one identity. Its directory is `TOXI_HOME`, with the default `~/.config/toxi`. | `toxi daemon start`, or the OS service from `toxi service install` |
+| `toxi` | the short-lived CLI. Each command is one IPC round trip. | you, hooks, scripts |
+| `toxi mcp serve` | the MCP server that Claude Code or Codex starts. It uses stdio. | the agent runtime |
+| hooks | `claude-code-plugin/hooks/*` and `plugins/toxi/hooks/*` | the agent runtime, at lifecycle points |
 
-Per identity directory: `tox_state.bin` (keys + friend list), `chat.db` (contacts, messages, friend requests, invites, rooms, room members, pending introductions), `archive.db` (messages moved out by archiving; created by the first archive), `profile.json` (own card), `config.toml`, `media/` (received files, outgoing attachments), `inbox.flag`, `daemon.sock`, `daemon.log`. All private (0700 / 0600).
+Each identity directory contains these files:
+
+- `tox_state.bin`: the keys and the friend list.
+- `chat.db`: contacts, messages, friend requests, invites, rooms, room members and pending introductions.
+- `archive.db`: the messages that the archive operation moved out. The first archive operation creates this file.
+- `profile.json`: the profile card of this identity.
+- `config.toml`.
+- `media/`: received files and outgoing attachments.
+- `inbox.flag`, `daemon.sock` and `daemon.log`.
+
+All these files are private. The directory mode is 0700 and the file mode is 0600.
 
 ## Data flow of one message
 
-1. `send` (CLI / MCP / room fan-out) → IPC `send_message` → row stored as `queued` → if toxcore says the friend is connected, the envelope goes out and the row becomes `sent` (long bodies as `part` chunks, bodies over 64 KB as a file).
-2. The receiver's daemon stores it once (dedup by uuid), ACKs it, reassembles parts, touches `inbox.flag`, emits `message.new` to subscribers, and schedules the `on_message` hook / webhook (debounced, only once the message is complete).
-3. Delivery into an agent: Claude Code's PostToolUse / Stop / SessionStart hooks or `wait_for_message` call `peer-inbox`, which marks the messages read and renders them with the sender's card, session, thread tags and the trust-level guide. Marking read records a receipt as owed (`receipt_pending`); it is sent only if the sender's card lists the `receipt` cap — at once if the sender is online, otherwise on reconnect or by the periodic sweep.
-4. The sender sees `delivered` (ack), then `read` (receipt), then `handled` (a `done` receipt: the receiver answered with `reply_to`, or marked it handled with `toxi done` / MCP `mark_handled`, which also records it as handled on the receiver's side), live on `toxi watch`, or by blocking with `--wait-read`.
+1. A `send` request comes from the CLI, from MCP or from a room fan-out. It becomes an IPC `send_message` call. The daemon stores the row as `queued`. If toxcore reports that the friend is connected, the daemon sends the envelope and the row becomes `sent`. The daemon sends long bodies as `part` chunks. It sends bodies over 64 KB as a file.
+2. The daemon of the receiver stores the message once. It uses the uuid to remove duplicates. Then it sends an ACK, reassembles the parts and touches `inbox.flag`. It emits `message.new` to subscribers. It also schedules the `on_message` hook and the webhook. This schedule is debounced, and it starts only when the message is complete.
+3. The `peer-inbox` command delivers messages into an agent. The Claude Code PostToolUse, Stop and SessionStart hooks call it. `wait_for_message` also calls it. `peer-inbox` marks the messages read. It renders them with the profile card of the sender, the session, the thread tags and the trust-level guide.
+
+   When a message becomes read, the daemon records a receipt as owed (`receipt_pending`). The daemon sends the receipt only if the profile card of the sender lists the `receipt` cap. If the sender is online, the receipt goes at once. If the sender is offline, the receipt goes on reconnect or with the periodic sweep.
+4. The sender sees three states in sequence: `delivered`, then `read`, then `handled`. `delivered` comes from the ack, and `read` comes from the receipt. `handled` comes from a `done` receipt. The receiver sends a `done` receipt when it answers with `reply_to`. It also sends one when it marks the message handled with `toxi done` or MCP `mark_handled`. That mark also records the message as handled on the side of the receiver.
+
+   The sender can see these states live on `toxi watch`. The sender can also block with `--wait-read`.
 
 ## The adapter contract
 
-Any new runtime is integrated by doing exactly these four things:
+An adapter integrates a new runtime with exactly these four tasks:
 
-1. **Receive** — pick one path per situation: *mid-task* (a hook that runs `toxi peer-inbox` when `inbox.flag` moved), *end of turn* (a Stop hook), *idle* (`wait_for_message` on the event stream, or `toxi agent run --exec`, or the `on_message_url` webhook).
-2. **Send** — `send_message` / `send_file` / `send_room` with the session label and, when it applies, thread / reply_to / kind.
-3. **Identity** — set this identity's card once (`toxi profile set`), so peers see what kind of participant it is.
-4. **Safety framing** — inject messages only through `peer-inbox` / `wait_for_message`, which carry the trust-level wording; never write bodies to logs or webhooks unless `include_body` was chosen.
+1. **Receive**: The adapter selects one path for each situation:
+   - *Mid-task*: a hook runs `toxi peer-inbox` when `inbox.flag` changed.
+   - *End of turn*: a Stop hook.
+   - *Idle*: `wait_for_message` on the event stream, `toxi agent run --exec`, or the `on_message_url` webhook.
+2. **Send**: The adapter uses `send_message`, `send_file` or `send_room` with the session label. When they apply, the adapter also sets thread, reply_to and kind.
+3. **Identity**: The adapter sets the profile card of this identity one time with `toxi profile set`. Then peers see what kind of participant it is.
+4. **Safety framing**: The adapter injects messages only through `peer-inbox` or `wait_for_message`. These tools carry the trust-level wording. If `include_body` is not set, the adapter never writes bodies to logs or webhooks.
 
-See `adapters/` for how the Claude Code, Codex and headless adapters implement these, and `adapters/ios.md` for ToxiOS.
+The `adapters/` directory shows how the Claude Code, Codex and headless adapters do these tasks. `adapters/ios.md` describes ToxiOS.
 
 ## Identity and trust in one picture
 
@@ -72,7 +89,13 @@ local alias   ──►  [peers.<alias>] trust = observer | collaborator | owner
 every injected line:  alias [agent/grok @ host · operator jeff · session x] (#thread · kind): body
 ```
 
-Trust comes from the operator who paired the two identities; the card tells you *what* you are talking to; `owner` marks the user's own device, whose messages count as the user's. Delivery to sessions: a message starting with `@name` goes only to the session labelled `name`; a fresh reply goes back to the session that sent the message it answers (30 minutes); otherwise `dirs` routes a peer to the one session that works with it.
+The trust level comes from the operator who paired the two identities. The profile card tells you *what* you talk to. The `owner` level marks a device of the user. Messages from an `owner` count as messages from the user.
+
+The daemon delivers a message to a session with these rules, in this order:
+
+- If a message starts with `@name`, it goes only to the session with the label `name`.
+- If a message is a reply, it goes back to the session that sent the original message. This route stays valid for 30 minutes.
+- In other cases, `dirs` routes a peer to the one session that works with it.
 
 ## Where things live
 
@@ -81,7 +104,7 @@ Trust comes from the operator who paired the two identities; the card tells you 
 | ctypes binding | `src/toxi/tox.py` |
 | envelope encode/validate | `src/toxi/envelope.py` |
 | daemon (IPC, callbacks, queue, parts, receipts, rooms, files, events, hooks) | `src/toxi/daemon.py` |
-| archive and search (IPC `archive_messages`, `archive_status`, `search_messages`; daily auto-archive into `archive.db` by `[archive] after_days`) | `src/toxi/daemon.py` |
+| archive and search: IPC `archive_messages`, `archive_status` and `search_messages`. A daily auto-archive moves messages into `archive.db`, controlled by `[archive] after_days`. | `src/toxi/daemon.py` |
 | config parsing | `src/toxi/config.py` |
 | peer delivery and wording | `src/toxi/peers.py` |
 | pairing invites | `src/toxi/invite.py` |
