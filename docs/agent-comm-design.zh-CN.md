@@ -425,20 +425,36 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 
 验收：e2e 测试在 Ada 上通过（之前同机两个新节点 8 分钟都连不上，原因是 LAN 发现只打 33445 且 NAT 回环失败；直接 bootstrap 解决）。现网 Ada、Belinda 节点部署 0.5.0 后由 `toxi doctor` 与 `toxi peers` 确认。
 
+### P6 room 历史、归档与检索、版本比对、分页修正、Codex 回合中投递（2026-10-16，v0.6.0）
+
+代码：room 创建者在卡片首次送达某成员后转发最近 20 条文本（`relayed: {name, ts}`，uuid 用原消息 id，接收端存为已读、不唤醒；成员已有的拷贝不重发；`room_members.history_sent` 保证只补一次）。`toxi archive`（`--older-than 90d` / `--delete` / `--dry-run` / `--status`，未送达的不归档，`archive.db` 多一列 alias）与 `[archive] after_days` 每日自动归档；`toxi search` / MCP `search_messages`（内容 LIKE，可含归档）。`toxi doctor` 比对 daemon 进程版本与 CLI 版本（`get_status` 现返回 `version`）。`get_messages` 的 `limit` 改为按逻辑消息分页（分片与扇出拷贝不再吃掉窗口）。**Codex 适配器**：调研确认 Codex CLI 0.161 已有 12 种 hook（含 PostToolUse `additionalContext`、SessionStart 上下文），默认开启、需在 `/hooks` 里信任；插件因此加上 PostToolUse（复用 `peer_check.sh` + `post_tool_hook.py`，并从 Codex 配置解析 `TOXI_HOME`）和 SessionStart（`session_start_hook.py`，纯文本输出）——Codex 工作中与会话启动时的投递与 Claude Code 对齐；空闲唤醒仍无解（Codex 无周期或空闲事件，`SessionEnd` 仅在空闲 30 分钟后触发）。协议：`relayed` 字段与"新成员补历史"写入 §3.1/§3.6。单测 181 个。
+
+验收：单测与两 daemon e2e 通过；现网 Ada、Belinda 升级到 0.6.0 后 `toxi doctor` 全绿；Codex 需在 `/hooks` 里信任两个新 hook 并重启会话。
+
+### 0.6.1 Codex hook 在 toxi 仓库之外失效（2026-10-16，v0.6.1）
+
+Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_ROOT`），不是 `CODEX_PLUGIN_ROOT`，并且在会话的 cwd 里运行它们，所以相对路径 `./plugins/toxi` 的回退只在 toxi 仓库里有效：其他项目里三个 hook 全部报"No such file"，peer 消息只有在 Codex 自己轮询 `get_unread` 时才能收到。hook 命令现在解析 `${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}`。脚本不存在时改为退出 0：原来 python 退出 2，而 Codex 把 Stop hook 的退出码 2 理解为"不许停"，每次尝试停止都把错误喂回给模型（Ada 上一个会话循环了 41 次）。`hooks.json` 变了之后 Codex 会显示为未信任：在 `/hooks` 里重新信任并重启会话。
+
+### 0.6.2 owner 信任级别、`@name` 会话寻址、Codex `/prompts:toxi-read`（2026-10-16，v0.6.2）
+
+代码：第三个信任级别 `trust = "owner"`，给运营者自己的设备（例如手机上的 ToxiOS）：它的消息像其他 peer 一样投递，但措辞是"这是用户本人说的"，agent 在那台设备上回答，channel 唤醒提示也标明来自用户自己的设备。以 `@name` 开头的文本只投递给标签为 `name` 的会话（`TOXI_SESSION`，否则为项目目录名，不区分大小写），优先于 30 分钟回复路由和 `dirs` 绑定。`toxi setup codex` 安装 Codex 自定义提示词 `/prompts:toxi-read [alias]`，它通过 MCP 工具读取，因为 Codex 的 shell 里没有 MCP 服务器用的 `TOXI_HOME`；`toxi teardown-codex` 移除它。安全文档补了设备丢失的处理；指挥链记为待办第 17 项。
+
+验收：Jeff 手机上的 ToxiOS 在 Ada 上配置为 owner peer，2026-10-16 端到端验证通过。
+
 ---
 
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**
 
-1. grok、vibe-op 升级到 0.5.1 并重启各自 daemon（等 Jeff 在聊天里直接批准；castle-op 已完成）。
-2. 各 Claude Code 会话 `/reload-plugins`（已通知；toxi 仓库这个会话也要），Codex 会话重启一次以刷新 MCP 工具列表。
+1. vibe-op 升级并重启自己的 daemon（castle-op 和 grok 已报 0.6.0；vibe-op 尚未报告升级）。
+2. 各 Claude Code 会话 `/reload-plugins`（已通知；toxi 仓库这个会话也要），Codex 会话重启一次以刷新 MCP 工具列表；升级改动了 Codex 插件的 `hooks.json` 之后，要在 Codex 的 `/hooks` 里重新信任并重启会话。
 3. ToxiOS：手机端真机回归（v0.0.15）、延后的 S7、Me 页把卡片名改成 "Jeff"；Ada 侧按需配合发消息/文件/room。
 4. Grok VM 的 webhook：在 webhook 接收侧校验 `X-Toxi-Signature`（castle-op 说它那边暂无法验证）。
 
 **中期（每项一周内）**
 
-5. ◐ Codex 空闲唤醒：Codex 没有 PostToolUse 类 hook，空闲收不到消息；看 Codex 侧有无新 hook/通知机制，没有则在 skill 里固化 `wait_for_message` 循环。
+5. ◐ 空闲唤醒：只剩空闲这一种情况没解决。自 0.6.0 起 Codex 有 PostToolUse 和 SessionStart hook，工作中和会话启动时都能像 Claude Code 一样收到；空闲的 Codex 仍然收不到。可走的路是 Codex app-server，它在共享的本地 daemon 上提供 `turn/start` / `turn/steer`，toxi 还没用上。Claude Code 的空闲缺口有可选方案 Channels 模式（`TOXI_CHANNEL=1` + `--dangerously-load-development-channels plugin:toxi@toxi`），日常会话里没开（见第 6 项）。headless 的空闲唤醒已可用：2026-10-16 三个 Grok bot 确认 `on_message_url` webhook 在消息到达约 3 秒后在它们的平台上启动一次运行，约 25 秒内回复，另有每小时一次的检查兜底。
 6. Claude Code Channels 转正：申请进 channel 白名单，去掉 `--dangerously-load-development-channels`。
 7. ✅ room 补历史：新成员进 room 看不到之前的消息；创建者发卡片时附最近 N 条。
 8. 无 systemd 机器（Grok VM）的 daemon 自监督：`toxi daemon start --supervise` 或由 `toxi agent run` 拉起 daemon，替代 cron。
@@ -448,15 +464,14 @@ docs/agent-comm-design.zh-CN.md     本文（定稿后归档到 docs/design/）
 12. `toxi agent run` 在 daemon 刚重启后的首条未投递疑似竞态，留观并补复现用例。
 13. 旧版本已记"已发"的回执不会补发（ToxiOS 迁移前的三条）；是否做一次性补发由 ToxiOS 决定。
 
+2026-10-16 在 0.6.2 之后发现（编号接在远期之后，好让上面已被代码引用的编号不变）：
+
+18. 重连时只补发 `queued` 行，所以已 `sent` 但没收到 ACK 的文本要等好友回来后的 5 分钟 ACK 超时才重发（jeff-iphone 上遇到：延迟、没丢；手动重发后收到了两次）。
+19. 既没有 `thread` 也没有 `reply_to` 的 peer 回复退回 `dirs` 绑定，所以从 toxi 会话问出去的问题，答案落到了 Power-Up-Chess 和 OnesVibe 会话里。候选修法：把无线程的回复路由给 30 分钟内最后向该 peer 发过请求的会话。
+
 **远期**
 
 14. 私钥与数据库静态加密、可选 Tor。
 15. 真正的 Tox 群组（NGC）替代应用层 room（成员多时）。
-16. PRD 与 v2 对齐、Homebrew tap 跟进 0.5.x、Linux 发行版（Debian）实测、Windows 不在计划内。
+16. PRD 与 v2 对齐、Homebrew tap 跟进 0.6.x、Linux 发行版（Debian）实测、Windows 不在计划内。
 17. 指挥链（授权传递）。现在的信任由接收方判断，且不传递：某个 agent 转述"Jeff 同意了"不算数。要支持授权传递，需要签名授权（owner 的设备签发写明被授权者、范围和期限的凭证，接收方验证），也就是 daemon 和 ToxiOS 在 Tox 密钥之外新增签名密钥、授权协议、授权与撤销界面，而且一个 agent 被带偏的影响面更大。等到真的需要某个 agent 长期代 owner 行事时再做；一次批准多个 agent 现在用 room 就能做到，因为 room 消息由发送者直接发给每个成员。
-
-### P6 room 历史、归档与检索、版本比对、分页修正、Codex 回合中投递（2026-10-16，v0.6.0）
-
-代码：room 创建者在卡片首次送达某成员后转发最近 20 条文本（`relayed: {name, ts}`，uuid 用原消息 id，接收端存为已读、不唤醒；成员已有的拷贝不重发；`room_members.history_sent` 保证只补一次）。`toxi archive`（`--older-than 90d` / `--delete` / `--dry-run` / `--status`，未送达的不归档，`archive.db` 多一列 alias）与 `[archive] after_days` 每日自动归档；`toxi search` / MCP `search_messages`（内容 LIKE，可含归档）。`toxi doctor` 比对 daemon 进程版本与 CLI 版本（`get_status` 现返回 `version`）。`get_messages` 的 `limit` 改为按逻辑消息分页（分片与扇出拷贝不再吃掉窗口）。**Codex 适配器**：调研确认 Codex CLI 0.161 已有 12 种 hook（含 PostToolUse `additionalContext`、SessionStart 上下文），默认开启、需在 `/hooks` 里信任；插件因此加上 PostToolUse（复用 `peer_check.sh` + `post_tool_hook.py`，并从 Codex 配置解析 `TOXI_HOME`）和 SessionStart（`session_start_hook.py`，纯文本输出）——Codex 工作中与会话启动时的投递与 Claude Code 对齐；空闲唤醒仍无解（Codex 无周期或空闲事件，`SessionEnd` 仅在空闲 30 分钟后触发）。协议：`relayed` 字段与"新成员补历史"写入 §3.1/§3.6。单测 181 个。
-
-验收：单测与两 daemon e2e 通过；现网 Ada、Belinda 升级到 0.6.0 后 `toxi doctor` 全绿；Codex 需在 `/hooks` 里信任两个新 hook 并重启会话。

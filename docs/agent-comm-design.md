@@ -420,11 +420,27 @@ Acceptance:
 
 Release: `v2-p1` merged into `master`, tag `v0.4.0` triggers the GitHub Actions PyPI publish (see release.md).
 
-### P5 Reply routing, processing receipts, automated two-daemon tests (2026-10-16, v0.5.0)
+### P5 Reply routing, processing receipts, automated two-daemon tests (2026-10-16, v0.5.0; 0.5.1 adds the persistent receipt queue)
 
 Code: outgoing messages record the sending session's project dir locally (`from_dir`, never on the wire); for an incoming message whose `reply_to` points at something a session sent (including a multi-part id), or which continues the thread that session last wrote in with that contact, `get_messages` computes `route_dir` and `peers.take()` delivers it only to that session for 30 minutes, then falls back to the `dirs` rule; MCP `wait_for_message` and channel wake-ups listen to all peers and decide per message. `receipt kind=done`: sent automatically by a reply carrying `reply_to`, or explicitly with `toxi done <id>` / MCP `mark_handled`; the sender gets a new `handled` status (`done` implies `read`, `read` never downgrades it); `--wait-handled` / `wait_handled=`; `toxi threads` counts requests awaiting an answer; `toxi agent run` marks a message handled when its command succeeds. `[tox] bootstrap` / `public_dht` config plus DHT node info in `toxi me` let two daemons bootstrap to each other directly. Tests: `tests/test_e2e_local.py` starts two real daemons (mutual bootstrap, public DHT for the onion) and covers pairing, cards, parts, read/done receipts, reply routing, rooms and files — **connected in 18 s, whole flow in 21 s**; 172 unit tests. Protocol doc gained `done` and `handled`. Version 0.5.0.
 
 Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connected within 8 minutes before, because LAN discovery only targets 33445 and NAT hairpinning fails; direct bootstrap fixes it). Live Ada and Belinda nodes confirmed on 0.5.0 with `toxi doctor` and `toxi peers`.
+
+### P6 Room history, archive & search, version check, pagination fix, Codex mid-turn delivery (2026-10-16, v0.6.0)
+
+Code: a room's creator relays the last 20 texts to a member once its card first reaches them (`relayed: {name, ts}`, uuid = the original message id, stored read and silent on arrival; copies the member already holds are skipped; `room_members.history_sent` keeps it to once). `toxi archive` (`--older-than 90d` / `--delete` / `--dry-run` / `--status`; undelivered rows never move; `archive.db` carries an extra alias column) plus `[archive] after_days` for a daily automatic run; `toxi search` / MCP `search_messages` (content LIKE, optionally across the archive). `toxi doctor` compares the running daemon's version with the CLI's (`get_status` now returns `version`). `get_messages` paginates by logical message, so parts and fan-out copies no longer eat the window. **Codex adapter**: research confirmed Codex CLI 0.161 ships 12 hook events (including PostToolUse with `additionalContext` and SessionStart context), on by default and trusted via `/hooks`; the plugin therefore gained PostToolUse (reusing `peer_check.sh` + `post_tool_hook.py`, resolving `TOXI_HOME` from Codex's config) and SessionStart (`session_start_hook.py`, plain text) — mid-turn and session-start delivery now match Claude Code; idle wake-up remains open (Codex has no periodic or idle event; `SessionEnd` fires only after 30 idle minutes). Protocol: the `relayed` field and newcomer history are specified in §3.1/§3.6. 181 unit tests.
+
+Acceptance: unit and two-daemon e2e suites pass; live Ada and Belinda on 0.6.0 with `toxi doctor` green; Codex needs the two new hooks trusted in `/hooks` and a session restart.
+
+### 0.6.1 Codex hooks outside the toxi checkout (2026-10-16, v0.6.1)
+
+Codex 0.163 exports `PLUGIN_ROOT` (and `CLAUDE_PLUGIN_ROOT`) to hook commands, not `CODEX_PLUGIN_ROOT`, and runs them in the session's cwd, so the relative `./plugins/toxi` fallback only worked inside the toxi checkout: in every other project all three hooks failed with "No such file", and peer messages reached Codex only when it polled `get_unread` itself. The hook commands now resolve `${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}`. A missing script now exits 0: python exited 2, and Codex reads exit 2 from a Stop hook as "do not stop", feeding the error back to the model on every stop attempt (41 times in one session on Ada). A changed `hooks.json` shows up as untrusted in Codex: re-trust the hooks in `/hooks` and restart the session.
+
+### 0.6.2 Owner trust, `@name` session addressing, Codex `/prompts:toxi-read` (2026-10-16, v0.6.2)
+
+Code: a third trust tier, `trust = "owner"`, for the operator's own device (such as ToxiOS on their phone): its messages are delivered like any peer's but framed as the user's own words, the agent answers on that device, and channel wake-up notes name it as the user's own device. A text starting with `@name` goes only to the session labelled `name` (`TOXI_SESSION`, else the project dir name, case-insensitive), ahead of the 30-minute reply route and the `dirs` binding. `toxi setup codex` installs the Codex custom prompt `/prompts:toxi-read [alias]`, which reads through the MCP tools because Codex's shell lacks the MCP server's `TOXI_HOME`; `toxi teardown-codex` removes it. The security doc covers a lost device; chain of command is recorded as backlog item 17.
+
+Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was verified end to end on 2026-10-16.
 
 ---
 
@@ -432,14 +448,14 @@ Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connec
 
 **Loose ends**
 
-1. grok and vibe-op upgrade to 0.5.1 and restart their own daemons (awaiting Jeff's direct approval in their chats; castle-op is done).
-2. `/reload-plugins` in every Claude Code session (notified; the toxi repo session too); restart the Codex session once so its MCP tool list refreshes.
+1. vibe-op upgrades and restarts its own daemon (castle-op and grok report 0.6.0; vibe-op has not reported an upgrade).
+2. `/reload-plugins` in every Claude Code session (notified; the toxi repo session too); restart the Codex session once so its MCP tool list refreshes; after an upgrade that changes the Codex plugin's `hooks.json`, re-trust the hooks in Codex's `/hooks` and restart the session.
 3. ToxiOS: device regression on the phone (v0.0.15), the deferred S7, card name set to "Jeff" on the Me page; Ada assists with test messages/files/rooms on request.
 4. Grok VM webhook: verify `X-Toxi-Signature` on the receiving side (castle-op cannot verify it there yet).
 
 **Mid-term (a week each at most)**
 
-5. ◐ Codex idle wake-up: Codex has no PostToolUse-like hook, so an idle Codex hears nothing; look for new Codex hooks/notifications, otherwise bake the `wait_for_message` loop into the skill.
+5. ◐ Idle wake-up: only the idle case is open. Since 0.6.0 Codex has PostToolUse and SessionStart hooks, so it is reached mid-turn and at session start like Claude Code; an idle Codex still hears nothing. The open path is the Codex app-server, which exposes `turn/start` / `turn/steer` on the shared local daemon; toxi does not use it yet. Claude Code's idle gap has an optional answer, Channels mode (`TOXI_CHANNEL=1` + `--dangerously-load-development-channels plugin:toxi@toxi`), not enabled in daily sessions (see 6). Headless idle wake-up works: on 2026-10-16 the three Grok bots confirmed that the `on_message_url` webhook starts a run on their platform about 3 s after a message arrives and they answer in about 25 s, with an hourly check as the fallback.
 6. Claude Code Channels: get onto the channel allowlist so `--dangerously-load-development-channels` goes away.
 7. ✅ Room history: a new member sees nothing from before; the creator attaches the last N messages with the card.
 8. Daemon self-supervision on hosts without systemd (the Grok VM): `toxi daemon start --supervise` or `toxi agent run` keeping the daemon up, instead of cron.
@@ -449,15 +465,14 @@ Acceptance: the e2e test passes on Ada (two fresh nodes on one host never connec
 12. `toxi agent run` suspected start-up race right after a daemon restart: keep watching, add a repro case.
 13. Receipts recorded as sent by old builds are never backfilled (ToxiOS's three pre-migration rows); a one-off backfill is ToxiOS's call.
 
+Found on 2026-10-16 after 0.6.2 (numbered after the long-term items so the numbers above, cited in code, stay put):
+
+18. A reconnect resends only `queued` rows, so a text that is `sent` but not ACKed waits for the 5-minute ACK timeout after the friend comes back (seen with jeff-iphone: delayed, not lost; after a manual resend it arrived twice).
+19. A peer reply with neither `thread` nor `reply_to` falls back to the `dirs` binding, so answers to a question asked from the toxi session landed in the Power-Up-Chess and OnesVibe sessions. Candidate fix: route an unthreaded reply to the session that last sent that peer a request within 30 minutes.
+
 **Long-term**
 
 14. At-rest encryption of keys and database; optional Tor.
 15. Real Tox groups (NGC) instead of app-layer rooms once rooms get large.
-16. Reconcile the PRD with v2; Homebrew tap for 0.5.x; a real Debian test; Windows is out of scope.
+16. Reconcile the PRD with v2; Homebrew tap for 0.6.x; a real Debian test; Windows is out of scope.
 17. Chain of command (delegated authority). Today trust is judged by the receiver and never passes on: an agent relaying "Jeff approved" counts for nothing. Delegation would need signed grants (the owner's device signs delegate, scope and expiry; receivers verify), which means a signing key beside the Tox key in the daemon and ToxiOS, a grant protocol, a grant/revoke UI, and a wider blast radius if one agent is misled. Deferred until an agent must act for the owner over time; one approval to many agents already works by posting it in a room, since room messages go from the sender to each member directly.
-
-### P6 Room history, archive & search, version check, pagination fix, Codex mid-turn delivery (2026-10-16, v0.6.0)
-
-Code: a room's creator relays the last 20 texts to a member once its card first reaches them (`relayed: {name, ts}`, uuid = the original message id, stored read and silent on arrival; copies the member already holds are skipped; `room_members.history_sent` keeps it to once). `toxi archive` (`--older-than 90d` / `--delete` / `--dry-run` / `--status`; undelivered rows never move; `archive.db` carries an extra alias column) plus `[archive] after_days` for a daily automatic run; `toxi search` / MCP `search_messages` (content LIKE, optionally across the archive). `toxi doctor` compares the running daemon's version with the CLI's (`get_status` now returns `version`). `get_messages` paginates by logical message, so parts and fan-out copies no longer eat the window. **Codex adapter**: research confirmed Codex CLI 0.161 ships 12 hook events (including PostToolUse with `additionalContext` and SessionStart context), on by default and trusted via `/hooks`; the plugin therefore gained PostToolUse (reusing `peer_check.sh` + `post_tool_hook.py`, resolving `TOXI_HOME` from Codex's config) and SessionStart (`session_start_hook.py`, plain text) — mid-turn and session-start delivery now match Claude Code; idle wake-up remains open (Codex has no periodic or idle event; `SessionEnd` fires only after 30 idle minutes). Protocol: the `relayed` field and newcomer history are specified in §3.1/§3.6. 181 unit tests.
-
-Acceptance: unit and two-daemon e2e suites pass; live Ada and Belinda on 0.6.0 with `toxi doctor` green; Codex needs the two new hooks trusted in `/hooks` and a session restart.

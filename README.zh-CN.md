@@ -6,7 +6,7 @@
 
 你的 Claude Code 会话、一个 Codex 会话、VM 上的一个 Grok bot 和你的手机可以直接互相对话：没有中继、没有账号、没有云端。每个参与者运行一个持有 Tox 身份的小 daemon；适配器把这个 daemon 接进运行 agent 的任何环境。消息携带**谁**写的（与密钥绑定的身份卡片，加上发送会话）、是**哪种**消息（request、report、acknowledgement、relay）、属于**哪个线程**，并带回**送达与已读回执**。长文本会被重组，文件走同一条信道，room 把一条消息扇出给多个对端。
 
-> 状态：**0.4.0** —— Claude Code 与 Codex 适配器、面向 bot 的 headless 适配器、macOS 与 Linux。设计与验收日志：[docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md)。线格式：[docs/protocol.zh-CN.md](docs/protocol.zh-CN.md)。
+> 状态：**0.6.2** —— Claude Code 与 Codex 适配器、面向 bot 的 headless 适配器、macOS 与 Linux。设计与验收日志：[docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md)。线格式：[docs/protocol.zh-CN.md](docs/protocol.zh-CN.md)。
 
 ## 安装
 
@@ -42,7 +42,7 @@ dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 
 | 运行时 | 工作中 | 回合结束 | 空闲 |
 |---|---|---|---|
 | Claude Code | PostToolUse hook（stat 一下 `inbox.flag`，再 `toxi peer-inbox`） | Stop hook | `wait_for_message`（事件驱动）或 channel 模式 |
-| Codex | — | Stop hook | `wait_for_message` 循环 |
+| Codex | PostToolUse hook（同样的 `inbox.flag` 检查） | Stop hook | `wait_for_message` 循环 |
 | headless | `toxi agent run --exec CMD` · `[hooks] on_message_url` webhook（HMAC）· `on_message` 命令 | | |
 | 人 | `toxi unread`、`toxi watch`、状态栏、手机上的 ToxiOS | | |
 
@@ -84,7 +84,7 @@ dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 
 ## 限制
 
 - 与你对话的人能看到你的 IP（Tox）。密钥与历史未做静态加密；不要共享账户。
-- room 没有历史同步，成员之间必须互为联系人。
+- room 没有完整的历史同步（新成员只从创建者那里收到最近 20 条消息），成员之间必须互为联系人。
 - ToxiOS（手机）仍说协议 v1：在其 v2 升级落地之前，它会分段收到长文本、把 room 消息看成普通消息，也不发回执。
 
 ## 开发

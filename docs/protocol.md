@@ -47,7 +47,7 @@ Receiver duties: store once per `uuid`; **answer every received text (including 
 
 ### 3.2 `ack`
 
-`data: {"ref_uuid"}`. Transport-level delivery confirmation: the sender moves `ref_uuid` from `sent` to `delivered`. An `ack` is never acked. Senders retry an un-acked text after `ack_timeout` (5 min, while the friend is online) and give up (`failed`) after 24 h.
+`data: {"ref_uuid"}`. Transport-level delivery confirmation: the sender moves `ref_uuid` from `sent` to `delivered`. An `ack` is never acked. Senders resend an un-acked text (status `sent`) after `ack_timeout` (5 min, while the friend is online) and give up (`failed`) on a `sent` text 24 h after it was created; a `queued` text never fails, it waits for the friend to connect.
 
 ### 3.3 `receipt`
 
@@ -73,7 +73,7 @@ Capability names describe what the node can **receive and act on**; declaring on
 |---|---|---|
 | `profile` | accepts and shows cards | send its card |
 | `session` | stores and shows `from_session` | — (optional fields may always be sent; unknown ones are ignored) |
-| `receipt` | sends read receipts and understands incoming ones | expect `read` status |
+| `receipt` | sends `read` and `done` receipts and understands incoming ones | expect `read` and `handled` status |
 | `part` | reassembles `part` chunks | send long texts as parts instead of `[i/n] ` pieces |
 
 Only `part` and `receipt` gate sending behaviour; `profile` and `session` are informational.
@@ -96,7 +96,7 @@ A **room card**: the full member list of an app-layer room. `id`, `name` ≤64; 
 - Otherwise upsert the room (`created_by` = sender's key) and **replace** the member list.
 - The creator re-sends the card to a member whenever that member connects, and to everyone after `add`/`remove`.
 - Room messages are ordinary `text` with `room` = room id and `room_msg` = one fresh id per logical message; the sender fans the same body out to every member it has as a contact. There is no transport group; members who are not each other's contacts never see each other's messages (clients should show that).
-- **History for newcomers**: after the creator's card reaches a member for the first time, the creator relays the room's last 20 texts to that member as ordinary `text` envelopes carrying `relayed: {"name": <original writer>, "ts": <original time>}`, `room`, `room_msg` (= the original message id, also used as the envelope `uuid`, so repeats dedupe) and the original thread/kind/tags. A receiver stores a relayed text as **already read** and never notifies for it; a receiver that does not know `relayed` just sees an ordinary message from the creator.
+- **History for newcomers**: after the creator's card reaches a member for the first time, the creator relays the room's last 20 texts to that member as ordinary `text` envelopes carrying `relayed: {"name": <original writer>, "ts": <original time>}`, `room`, `room_msg` (= the original message id, also used as the envelope `uuid`, so repeats dedupe) and the original thread/kind/tags. A receiver stores a relayed text as **already read** and never notifies for it; a receiver that does not know `relayed` just sees an ordinary message from the creator. A history text too long for one Tox message is split into `part` chunks with envelope `uuid` = `"<room_msg>:<i>"` and `part.id` = `room_msg`; the creator does this whatever the member's caps, so a member without the `part` cap stores each chunk as its own message.
 - Display: collapse one's own fan-out copies (same `room_msg`) into one entry with per-recipient status.
 
 ### 3.7 `file`
@@ -116,9 +116,9 @@ Sent **immediately before** `tox_file_send` of a `TOX_FILE_KIND_DATA` transfer w
 
 ## 5. Status model (sender side)
 
-`queued` (friend offline, or toxcore refused) → `sent` → `delivered` (ack / transfer complete) → `read` (receipt) → `handled` (`done` receipt). `failed` after 24 h without ack or when a file transfer is declined. Presence for the queue decision is asked from toxcore at send time, not from a cached flag.
+`queued` (friend offline, or toxcore refused) → `sent` → `delivered` (ack / transfer complete) → `read` (receipt) → `handled` (`done` receipt). `failed` when a `sent` text is still un-acked 24 h after it was created, or when a file transfer is declined; `queued` rows never become `failed`. A periodic sweep resends un-acked `sent` texts after `ack_timeout` while the friend is online; a reconnect flushes only `queued` rows (in send order) and owed receipts. Presence for the queue decision is asked from toxcore at send time, not from a cached flag.
 
-Replies are routed locally: a node remembers which of its own sessions sent each message (never on the wire) and delivers an incoming `reply_to` to that session, or to the session that last wrote in the same thread with that contact, for 30 minutes; after that, or without such a link, the peer's configured binding applies.
+Replies are routed locally (node behaviour, not wire format), in this order. A text that starts with `@name` goes only to the session labelled `name` (`TOXI_SESSION`, else its project dir name), case-insensitive. Otherwise a node remembers which of its own sessions sent each message (never on the wire) and delivers an incoming `reply_to` to that session, or to the session that last wrote in the same thread with that contact, for 30 minutes from the incoming message's `created_at`; after that, or without such a link, the peer's configured binding applies.
 
 ## 6. Limits and abuse resistance
 

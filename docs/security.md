@@ -14,7 +14,7 @@
 
 ## Threats and answers
 
-**A peer agent is compromised or confused and tells my agent to do something.** Every injected message carries the sender's card and trust level, and the wording that follows it says what the agent may do: an `observer`'s messages are information, a `collaborator`'s requests may be acted on within the current task, and anything destructive or outside the project needs the user in both cases. `needs_human` items are for the user to decide; `relay` content is hearsay. Non-peer contacts are never injected at all (only summarised).
+**A peer agent is compromised or confused and tells my agent to do something.** Every injected message carries the sender's card and trust level, and the wording that follows it says what the agent may do: an `observer`'s messages are information, a `collaborator`'s requests may be acted on within the current task, and for both anything destructive or outside the project needs the user; an `owner`'s messages (the user's own device) are treated as if the user had typed them in this session, and the agent answers on that device. `needs_human` items are for the user to decide; `relay` content is hearsay. Non-peer contacts are never injected at all (only summarised).
 
 **Someone takes my phone.** A contact with `trust = "owner"` speaks as you to every session it reaches, so its key is as sensitive as your terminal. If the device is lost, remove its `[peers.<alias>]` table (takes effect at once) and `toxi remove` the contact. There is no delegation: an `owner` message relayed by another agent is framed by that agent's trust level, not as yours.
 
@@ -22,7 +22,7 @@
 
 **A message is replayed or duplicated.** Every message has a sender-chosen uuid; the receiver stores it once and ACKs duplicates so the sender stops retrying.
 
-**My files leak.** Everything under `TOXI_HOME` is private to the user account. Logs never contain message bodies (public keys appear as 8-character prefixes). The `on_message` shell hook and the webhook carry only aliases and ids unless `include_body = true` is set deliberately; the webhook is HMAC-signed when `on_message_secret` is set.
+**My files leak.** Everything under `TOXI_HOME` is private to the user account. Logs never contain message bodies (public keys appear as 8-character prefixes). The `on_message` shell hook and the webhook carry only aliases and ids unless `include_body = true` is set deliberately; the webhook is HMAC-signed when `on_message_secret` is set (`X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`, with `<ts>` in `X-Toxi-Timestamp`).
 
 **A stranger adds me.** Friend requests wait for `toxi accept` — except a request that answers a live `toxi pair` invite (random 32-hex nonce, 10 minutes, single use), which is accepted automatically. Share invites over a channel you trust: an invite is as sensitive as your Tox ID.
 

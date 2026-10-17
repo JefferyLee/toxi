@@ -14,7 +14,7 @@ It installs libtoxcore, a Python app installer (pipx, or uv, or pip), the `toxi`
 | flag | effect |
 |---|---|
 | `--for claude` / `codex` / `headless` / `all` | which adapter(s) to wire |
-| `--ref v0.4.0` | install the engine from a git ref. Without it the script uses PyPI when the package is published there, else the latest GitHub release tag |
+| `--ref v0.6.2` | install the engine from a git ref. Without it the script uses PyPI when the package is published there, else the latest GitHub release tag |
 | `--name`, `--operator`, `--role`, `--runtime` | the headless identity's card (asked interactively otherwise) |
 
 ## By hand
@@ -43,7 +43,7 @@ Each identity is a `TOXI_HOME`: `TOXI_HOME=~/.config/toxi-codex toxi daemon star
 
 ## Upgrade
 
-`toxi upgrade` (pipx) or re-run `install.sh`, then `toxi service restart` for each identity. New capabilities are advertised to peers automatically at the next connect. Protocol v2 nodes keep talking to v1 nodes.
+`toxi upgrade` (pipx) or re-run `install.sh`, then `toxi service restart` for each identity (`toxi doctor` flags a daemon still running an older version than the CLI). New capabilities are advertised to peers automatically at the next connect. Protocol v2 nodes keep talking to v1 nodes.
 
 ## Uninstall
 

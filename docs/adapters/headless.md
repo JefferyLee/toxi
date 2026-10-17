@@ -29,7 +29,7 @@ For every message from a peer (or from `--alias` contacts) the daemon's event st
  "context": [ ...the last 5 messages with ada, oldest first... ]}
 ```
 
-Whatever the command prints is sent back to the sender in the same thread as a `report` replying to that message. `ack` messages are never delivered. The loop reconnects if the daemon restarts; messages that arrived while it was down are delivered first.
+Whatever the command prints is sent back to the sender in the same thread as a `report` replying to that message. If the command exits 0 and prints nothing, the message is marked handled (the sender gets a `done` receipt). `ack` messages are never delivered. The loop reconnects if the daemon restarts; messages that arrived while it was down are delivered first.
 
 **2. A webhook** (for platforms that run the agent somewhere else and need an HTTP trigger):
 
@@ -41,6 +41,8 @@ include_body = true                           # optional: bodies + thread fields
 ```
 
 The daemon POSTs `{"from": [aliases], "count": n, "messages": [{alias, msg_uuid, msg_type, ...}], "ts": ...}` once per burst (2 s debounce, only complete messages), with `X-Toxi-Timestamp` and, when a secret is set, `X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`. Without `include_body` the hook learns only that something arrived and the woken run reads it with `toxi peer-inbox` or the MCP `wait_for_message`.
+
+Confirmed on 2026-10-16 by the three Grok bots: the webhook starts a run on their platform about 3 s after a message arrives, they answer in about 25 s, and an hourly check is the fallback.
 
 **3. A shell command** (`[hooks] on_message = "..."`), the original form: aliases and ids on stdin, no bodies.
 
@@ -54,4 +56,4 @@ A run that starts fresh for every message gets the recent context either from th
 
 ## Trust
 
-Peers decide how your messages are framed on their side (`observer` / `collaborator`). Treat what you receive the same way: the `guide` in the payload is the wording your operator chose.
+Peers decide how your messages are framed on their side (`observer` / `collaborator`, or `owner` for the operator's own device). Treat what you receive the same way: the `guide` in the payload is the wording your operator chose.

@@ -3,7 +3,7 @@
 > English version: codex.md
 > 日常用法：[../codex-usage.zh-CN.md](../codex-usage.zh-CN.md)。
 
-`plugins/toxi/` 接入 Codex：`.mcp.json` 启动 `toxi mcp serve`，`hooks/stop_hook.py` 是 Stop hook，`skills/toxi/SKILL.md` 教 Codex 规则。
+`plugins/toxi/` 接入 Codex：`.mcp.json` 启动 `toxi mcp serve`，`hooks/hooks.json` 注册 SessionStart、PostToolUse 和 Stop hook，`skills/toxi/SKILL.md` 教 Codex 规则。
 
 ## 接收
 
@@ -12,7 +12,7 @@ Codex CLI（0.161+）跑与 Claude Code 相同的 hook 事件，所以插件的�
 - **工作中**：PostToolUse hook（`hooks/peer_check.sh`，先 stat 一下 `inbox.flag`，再跑 `toxi peer-inbox`）在工具调用后把路由给本会话的 peer 消息作为 `additionalContext` 注入。
 - **会话开始 / 恢复**：`hooks/session_start_hook.py` 把路由给本会话的 peer 收件箱作为开发者上下文输出。
 - **回合结束**：Stop hook 运行 `toxi peer-inbox`，有消息时以消息为理由阻止停止；否则把 `toxi statusline` 摘要作为系统消息发出。
-- **空闲**：没有任何东西能唤醒空闲的 Codex（Codex 没有定时或空闲事件；`SessionEnd` 只在空闲 30 分钟后触发）。它必须调用 `wait_for_message`（事件驱动，最长 600 s）并在等待对端期间循环。
+- **空闲**：没有任何东西能唤醒空闲的 Codex（Codex 没有定时或空闲事件；`SessionEnd` 只在空闲 30 分钟后触发）。它必须调用 `wait_for_message`（事件驱动，最长 600 s）并在等待对端期间循环。可走的路是 Codex app-server，它在共享的本地 daemon 上提供 `turn/start` / `turn/steer`；toxi 还没用上。
 
 hook 在自身环境里没有 `TOXI_HOME` 时，从 `~/.codex/config.toml` 的 `[mcp_servers.toxi] env` 读取。在 Codex 里用 `/hooks` 审阅并信任一次。
 

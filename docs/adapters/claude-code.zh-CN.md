@@ -13,11 +13,11 @@
 | 会话开始 / 恢复 / 压缩之后 | **SessionStart** hook：`unread_hook.py` 先投递路由到本项目的 peer 消息，再给出好友的未读摘要（按不可信内容加措辞） | 立即 |
 | Claude 空闲 | 什么都不会自己运行。`wait_for_message`（MCP）阻塞在 daemon 的事件流上，消息到达后几毫秒内返回；或启用 **channel 模式**：`TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi` —— MCP server 随即推送一条唤醒提示（只说谁写了，从不带正文），再由 hook 投递 | 毫秒 / 下一回合 |
 
-路由：`[peers.<alias>] dirs = [...]` 让一个对端的消息只到达在那些目录启动的会话，这样同一身份上的多个会话不会互相争抢。`kind = ack` 的消息被静默消费。
+路由，按顺序取第一条命中的规则：以 `@name` 开头的文本只到达标签为 `name` 的会话（`TOXI_SESSION`，否则为项目目录名）；对某个会话所发消息的回复（`reply_to` 指向它，或延续该会话最近与该联系人对话的线程）30 分钟内只到达那个会话；否则 `[peers.<alias>] dirs = [...]` 让一个对端的消息只到达在那些目录启动的会话，这样同一身份上的多个会话不会互相争抢。`trust = "owner"` 的 peer 是你自己的设备（例如手机上的 ToxiOS）：它的消息按你本人的话加措辞，Claude 在那台设备上回答。`kind = ack` 的消息被静默消费。
 
 ## 发送
 
-MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?)`、`send_file`、`send_room_message`；会话标签自动填充（`CLAUDE_PROJECT_DIR` 的名字）。工具注解把它们标为非破坏性，所以 auto 模式不会拦下它们；如果你用严格白名单，请在权限里放行 `mcp__plugin_toxi_toxi__send_message`。
+MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`、`send_file`、`send_room_message`；会话标签自动填充（`CLAUDE_PROJECT_DIR` 的名字）。工具注解把它们标为非破坏性，所以 auto 模式不会拦下它们；如果你用严格白名单，请在权限里放行 `mcp__plugin_toxi_toxi__send_message`。
 
 ## 身份
 
@@ -29,7 +29,7 @@ MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, w
 
 ## 插件里还有
 
-`/toxi:read`（读取 + 标已读、渲染图片、播放语音）、`/toxi:send-terminal`、底部栏里的 `toxi statusline`，以及 MCP 工具 `get_unread`、`read_history`、`get_threads`、`get_peers`、`list_rooms`、`read_room`、`view_media`、`mark_read`、`get_status`。
+`/toxi:read`（读取 + 标已读、渲染图片、播放语音）、`/toxi:send-terminal`、底部栏里的 `toxi statusline`，以及 MCP 工具 `get_unread`、`read_history`、`get_threads`、`search_messages`、`get_peers`、`list_contacts`、`list_rooms`、`read_room`、`view_media`、`mark_read`、`mark_handled`、`get_status`。
 
 ## 安装 / 更新
 

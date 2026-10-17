@@ -15,7 +15,7 @@ toxi 是 agent 与人之间的一层通信层，不需要服务器：每个参�
           │   IPC：请求/响应 + 事件订阅（Unix socket，长度前缀 JSON）
 ┌─ L2 引擎：toxi-daemon ─────────────────────────────────────────────────────┐
 │ 身份 · 联系人 · 身份卡片 · peer 信任 · 分片重组 · 回执 ·                   │
-│ 队列/重试 · room · 文件 · 事件总线 · SQLite · inbox.flag                   │
+│ 队列/重试 · room · 文件 · 归档/搜索 · 事件总线 · SQLite · inbox.flag       │
 └──────────────────────────────────┬─────────────────────────────────────────┘
 ┌─ L3 协议：信封 v2（承载于 L1，由 L2 实现） ────────────────────────────────┐
 │ text(+session, part, thread, reply_to, kind, …) · profile · receipt · ack · room · file │
@@ -39,14 +39,14 @@ toxi 是 agent 与人之间的一层通信层，不需要服务器：每个参�
 | `toxi mcp serve` | Claude Code / Codex 启动的 MCP server（stdio） | agent 运行时 |
 | hook | `claude-code-plugin/hooks/*` 与 `plugins/toxi/hooks/*` | agent 运行时，在生命周期节点上 |
 
-每个身份目录下：`tox_state.bin`（密钥 + 好友列表）、`chat.db`（联系人、消息、room、邀请）、`profile.json`（自己的卡片）、`config.toml`、`media/`（收到的文件、待发附件）、`inbox.flag`、`daemon.sock`、`daemon.log`。全部私有（0700 / 0600）。
+每个身份目录下：`tox_state.bin`（密钥 + 好友列表）、`chat.db`（联系人、消息、好友请求、邀请、room、room 成员、待处理的介绍）、`archive.db`（归档移出的消息；第一次归档时创建）、`profile.json`（自己的卡片）、`config.toml`、`media/`（收到的文件、待发附件）、`inbox.flag`、`daemon.sock`、`daemon.log`。全部私有（0700 / 0600）。
 
 ## 一条消息的数据流
 
 1. `send`（CLI / MCP / room 扇出）→ IPC `send_message` → 记录以 `queued` 入库 → 若 toxcore 报告好友在线，信封发出，记录变为 `sent`（长正文拆成 `part` 分片，超过 64 KB 的正文作为文件发送）。
 2. 接收方 daemon 只存一次（按 uuid 去重），回 ACK，重组分片，touch `inbox.flag`，向订阅者发出 `message.new`，并调度 `on_message` hook / webhook（去抖，且只在消息完整后触发）。
-3. 投递进 agent：Claude Code 的 PostToolUse / Stop / SessionStart hook 或 `wait_for_message` 调用 `peer-inbox`，后者把消息标为已读，并连同发送方的卡片、会话、线程标签和信任级别指引一起渲染。标已读会发出 `receipt`。
-4. 发送方先看到 `delivered`（ack），再看到 `read`（回执）——可在 `toxi watch` 里实时看到，或用 `--wait-read` 阻塞等待。
+3. 投递进 agent：Claude Code 的 PostToolUse / Stop / SessionStart hook 或 `wait_for_message` 调用 `peer-inbox`，后者把消息标为已读，并连同发送方的卡片、会话、线程标签和信任级别指引一起渲染。标已读会把回执记为待发（`receipt_pending`）；只有发送方卡片的 caps 含 `receipt` 时才发——对方在线就立即发，否则在重连时或由周期性扫描补发。
+4. 发送方先看到 `delivered`（ack），再看到 `read`（回执），再看到 `handled`（`done` 回执：接收方用 `reply_to` 回复了它，或用 `toxi done` / MCP `mark_handled` 标为已处理，这也会在接收方本地记为已处理）——可在 `toxi watch` 里实时看到，或用 `--wait-read` 阻塞等待。
 
 ## 适配器契约
 
@@ -71,7 +71,7 @@ Tox 公钥  ──►  身份卡片（自述，经 E2E 信道与密钥绑定）
 每条注入的行：  alias [agent/grok @ host · operator jeff · session x] (#thread · kind): body
 ```
 
-信任来自给这两个身份配对的运营者；卡片告诉你在和*什么*说话；`dirs` 把一个对端路由到与之协作的那一个会话。
+信任来自给这两个身份配对的运营者；卡片告诉你在和*什么*说话；`owner` 表示用户自己的设备，它的消息算用户本人的话。投递到会话：以 `@name` 开头的消息只投给标签为 `name` 的会话；新鲜的回复回到发出被回复消息的那个会话（30 分钟）；否则由 `dirs` 把一个对端路由到与之协作的那一个会话。
 
 ## 代码在哪里
 
@@ -80,6 +80,7 @@ Tox 公钥  ──►  身份卡片（自述，经 E2E 信道与密钥绑定）
 | ctypes 绑定 | `src/toxi/tox.py` |
 | 信封编码/校验 | `src/toxi/envelope.py` |
 | daemon（IPC、回调、队列、分片、回执、room、文件、事件、hook） | `src/toxi/daemon.py` |
+| 归档与搜索（IPC `archive_messages`、`archive_status`、`search_messages`；按 `[archive] after_days` 每天自动归档到 `archive.db`） | `src/toxi/daemon.py` |
 | 配置解析 | `src/toxi/config.py` |
 | peer 投递与措辞 | `src/toxi/peers.py` |
 | 配对邀请 | `src/toxi/invite.py` |

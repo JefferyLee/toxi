@@ -13,11 +13,11 @@ The plugin in `claude-code-plugin/` implements the [adapter contract](../archite
 | session start / resume / after compaction | **SessionStart** hook: `unread_hook.py` delivers routed peer messages first, then the friends' unread summary (untrusted content framing) | immediate |
 | Claude is idle | nothing runs by itself. `wait_for_message` (MCP) blocks on the daemon's event stream and returns within milliseconds of a message; or enable **channel mode**: `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi` — the MCP server then pushes a wake-up note (who wrote, never the text) and the hooks deliver | ms / next turn |
 
-Routing: `[peers.<alias>] dirs = [...]` makes a peer's messages reach only sessions started in those directories, so many sessions on one identity do not race. Messages of `kind = ack` are consumed silently.
+Routing, first match wins: a text that starts with `@name` goes only to the session labelled `name` (`TOXI_SESSION`, else the project dir name); a reply to something a session sent (its `reply_to`, or the thread that session last wrote in with that contact) goes only to that session for 30 minutes; otherwise `[peers.<alias>] dirs = [...]` makes a peer's messages reach only sessions started in those directories, so many sessions on one identity do not race. A peer with `trust = "owner"` is your own device (e.g. ToxiOS on your phone): its messages are framed as your own words and Claude answers on that device. Messages of `kind = ack` are consumed silently.
 
 ## Send
 
-MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?)`, `send_file`, `send_room_message`; the session label is filled automatically (`CLAUDE_PROJECT_DIR` name). Tool annotations mark them non-destructive so auto mode does not block them; allow `mcp__plugin_toxi_toxi__send_message` in permissions if you run a strict allowlist.
+MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`, `send_file`, `send_room_message`; the session label is filled automatically (`CLAUDE_PROJECT_DIR` name). Tool annotations mark them non-destructive so auto mode does not block them; allow `mcp__plugin_toxi_toxi__send_message` in permissions if you run a strict allowlist.
 
 ## Identity
 
@@ -29,7 +29,7 @@ MCP `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, w
 
 ## Also in the plugin
 
-`/toxi:read` (read + mark read, render images, play voice), `/toxi:send-terminal`, `toxi statusline` in the bottom bar, MCP tools `get_unread`, `read_history`, `get_threads`, `get_peers`, `list_rooms`, `read_room`, `view_media`, `mark_read`, `get_status`.
+`/toxi:read` (read + mark read, render images, play voice), `/toxi:send-terminal`, `toxi statusline` in the bottom bar, MCP tools `get_unread`, `read_history`, `get_threads`, `search_messages`, `get_peers`, `list_contacts`, `list_rooms`, `read_room`, `view_media`, `mark_read`, `mark_handled`, `get_status`.
 
 ## Install / update
 

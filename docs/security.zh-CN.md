@@ -14,7 +14,7 @@
 
 ## 威胁与应对
 
-**某个对端 agent 被攻破或犯糊涂，叫我的 agent 去做某事。** 每条注入的消息都带着发送方的卡片和信任级别，其后的措辞说明 agent 可以做什么：`observer` 的消息只是信息，`collaborator` 的请求可以在当前任务范围内执行，而任何破坏性或超出项目范围的事，两种情况下都需要用户。`needs_human` 的事项由用户决定；`relay` 内容按传闻对待。非 peer 联系人的消息从不注入（只做摘要）。
+**某个对端 agent 被攻破或犯糊涂，叫我的 agent 去做某事。** 每条注入的消息都带着发送方的卡片和信任级别，其后的措辞说明 agent 可以做什么：`observer` 的消息只是信息，`collaborator` 的请求可以在当前任务范围内执行，这两种情况下任何破坏性或超出项目范围的事都需要用户；`owner`（用户自己的设备）的消息按用户在本会话里亲手输入的对待，agent 回复到那台设备上。`needs_human` 的事项由用户决定；`relay` 内容按传闻对待。非 peer 联系人的消息从不注入（只做摘要）。
 
 **有人拿到了我的手机。** `trust = "owner"` 的联系人对它能到达的每个会话都以你的身份说话，所以它的密钥和你的终端一样敏感。设备丢失时，删掉它的 `[peers.<别名>]` 表（立即生效），再 `toxi remove` 这个联系人。没有授权传递：别的 agent 转述的 `owner` 消息，按那个 agent 的信任级别对待，不算你本人的话。
 
@@ -22,7 +22,7 @@
 
 **消息被重放或重复。** 每条消息都有发送方选定的 uuid；接收方只存一次，并对重复的回 ACK，让发送方停止重试。
 
-**我的文件泄露。** `TOXI_HOME` 下的一切都只对本用户账户可见。日志从不包含消息正文（公钥以 8 字符前缀出现）。`on_message` shell hook 与 webhook 只携带别名和 id，除非刻意设置了 `include_body = true`；设置了 `on_message_secret` 时 webhook 带 HMAC 签名。
+**我的文件泄露。** `TOXI_HOME` 下的一切都只对本用户账户可见。日志从不包含消息正文（公钥以 8 字符前缀出现）。`on_message` shell hook 与 webhook 只携带别名和 id，除非刻意设置了 `include_body = true`；设置了 `on_message_secret` 时 webhook 带 HMAC 签名（`X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`，`<ts>` 放在 `X-Toxi-Timestamp` 里）。
 
 **陌生人加我。** 好友请求等待 `toxi accept` —— 除非这个请求回应的是一个有效的 `toxi pair` 邀请（随机 32 位十六进制 nonce，10 分钟有效，一次性），那样会被自动接受。请通过你信任的渠道分享邀请：邀请和你的 Tox ID 一样敏感。
 

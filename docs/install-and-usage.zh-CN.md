@@ -13,7 +13,7 @@ toxi 分**两部分**，分别安装：
 
 ## 1. 前置条件
 
-- **macOS**（v0.1 主要目标）或 **Linux**（在装好 libtoxcore 的前提下应该能用，但还没作为正式测试目标）。
+- **macOS** 或 **Linux**（libtoxcore 来自 Homebrew 或发行版的包；daemon 由 launchd 或 `systemd --user` 保持常驻，见 §11）。
 - **Python 3.10+**（`python3 --version`）。
 - **一台尽量在线的机器**给每个想稳定收消息的人（笔记本休眠也没事——消息会一直排队等你醒来）。
 - 公网**对外 UDP**（以及 TCP 作为兜底）能通往 Tox DHT。
@@ -21,6 +21,14 @@ toxi 分**两部分**，分别安装：
 ---
 
 ## 2. 安装引擎
+
+一行安装脚本在 macOS 和 Linux 上把下面这些全做完：libtoxcore、从 PyPI 装引擎、你的身份、daemon、`toxi service install`，以及接入它找到的适配器（参数与细节：[install.zh-CN.md](install.zh-CN.md)）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
+```
+
+手动安装：
 
 ### 2.1 macOS
 
@@ -30,16 +38,16 @@ brew install toxcore pipx
 pipx ensurepath          # 然后重开终端，确保 `toxi` 在 PATH 上
 
 # 2) 装 toxi（带 MCP extra）
-pipx install 'git+https://github.com/JefferyLee/toxi#egg=toxi[mcp]'
+pipx install 'toxi[mcp]'
 
 # 3) 一键 setup：生成身份、启动 daemon、把底部状态栏指示器写进
 #    ~/.claude/settings.json（会留 .bak 备份）。可反复运行。
 toxi setup
 ```
 
-PyPI 发布以后第 2 步简化为 `pipx install 'toxi[mcp]'`。Homebrew tap 发布以后第 1–3 步会合并成单条 `brew install`。
+要让 daemon 跨登录和重启常驻，再加 `toxi service install`（见 §11）。Homebrew tap 发布以后第 1–3 步会合并成单条 `brew install`。
 
-### 2.2 Linux（预期支持，尚未正式测试）
+### 2.2 Linux
 
 ```bash
 # 1) libtoxcore 包名各发行版不一：
@@ -49,8 +57,9 @@ PyPI 发布以后第 2 步简化为 `pipx install 'toxi[mcp]'`。Homebrew tap �
 sudo apt install libtoxcore2 python3-pip pipx       # 按你的发行版调整
 
 # 2) 与 macOS 同样：
-pipx install 'git+https://github.com/JefferyLee/toxi#egg=toxi[mcp]'
+pipx install 'toxi[mcp]'
 toxi setup
+toxi service install          # systemd --user 常驻（见 §11）
 ```
 
 ### 2.3 验证
@@ -98,10 +107,13 @@ toxi status     # 就绪后显示 "DHT: connected (UDP)" 或 "(TCP)"
 更窄的入口：
 
 ```bash
-toxi setup-engine     # 只创建身份 + 启动 daemon
-toxi setup-claude     # 只接入 Claude Code 状态栏 + 插件安装提示
-toxi setup-codex      # 只接入 Codex MCP + 插件
+toxi setup engine     # 只创建身份 + 启动 daemon
+toxi setup claude     # 只接入 Claude Code 状态栏 + 插件安装提示
+toxi setup codex      # 只接入 Codex MCP + 插件（见 §9.5）
+toxi setup headless   # 没有 Claude/Codex 的 bot 或脚本：身份、服务、身份卡片、配对提示
 ```
+
+`toxi setup headless` 用 `--name`、`--kind`、`--runtime`、`--operator`、`--role` 填身份卡片，`--no-service` 跳过 launchd/systemd 服务。
 
 ---
 
@@ -181,7 +193,7 @@ toxi unread
 toxi unread bob
 
 # 看与某人的历史
-toxi read bob                  # 默认最近 20 条
+toxi read bob                  # 默认最近 20 条（由分段重组的长文本算一条）
 toxi read bob --limit 200      # 看更多
 ```
 
@@ -275,21 +287,33 @@ fail_after_hours = 24       # 超过这么久仍未确认就标记为 failed
 
 [peers.codex]               # 每个协作 AI agent 一个表（见下）
 dirs  = ["/path/to/project"]  # 可选：只送给在这个目录启动的会话
-trust = "collaborator"      # 或 "observer"；"owner" = 你自己的设备（见下文）
+trust = "collaborator"      # 或 "observer"；"owner" = 你自己的设备（见下文）；不写 = "collaborator"
 
 [hooks]
 on_message = "curl -fsS -X POST https://example.com/wake"   # 收到新消息时运行
+on_message_url = "https://example.com/toxi"   # 把新消息的 JSON 摘要 POST 过去（见下）
+on_message_secret = "..."   # 可选：给这个 POST 加 HMAC 签名
+include_body = false        # true = POST 里也带正文和线程字段
+
+[archive]
+after_days = 180            # 每天把早于这么多天的已送达/已接收消息移进 archive.db（0 = 从不）
+
+[tox]
+public_dht = true           # false = 只从下面的节点 bootstrap
+bootstrap = [{ host = "192.168.1.10", port = 33445, key = "<64 hex DHT id>" }]   # 额外的 DHT 节点；`toxi me` 会打印节点的 id 和端口
 ```
 
-`[daemon]` 和 `[retry]` 在 daemon 启动时读取；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。`[peers]` 和 `[hooks]` 每次用到时才读，改完立即生效。
+`[daemon]`、`[retry]` 和 `[tox]` 在 daemon 启动时读取；改完后 `toxi daemon stop && toxi daemon start` 重启即生效。`[peers]`、`[hooks]` 和 `[archive]` 每次用到时才读，改完立即生效。
 
-**协作 agent（peers）。** 每个和你协作的其他 AI agent 一个 `[peers.<别名>]` 表。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 Stop hook 在一轮结束时注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。`trust` 决定注入时的措辞：`observer` 表示只是信息（它提出的任何有副作用的事都要先问你）；`collaborator` 表示 agent 可以在当前任务范围内照办的请求（破坏性或超出项目的操作仍然要问你）。两种情况下，消息里转述的"用户已经同意"都不算数。`dirs` 解决多个 Claude Code 会话共用一个身份时抢消息的问题：Stop hook 只把它的消息送给在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`），别的目录或子目录里启动的会话都不会收到。回复更进一步：如果一条消息是在回答你某个会话发出的消息（`reply_to`），或延续了那个会话参与过的线程，30 分钟内它只会投递给**那个**会话，不管该对端绑定在哪——在项目 A 里问的问题，答案回到项目 A。**你自己的设备**（例如手机上的 ToxiOS）也可以配成 peer，用 `trust = "owner"`：它的消息照样自动投递，但会被说明为你本人的话，agent 用 `send_message` 回复到那台设备。用 `dirs` 绑定默认接收你消息的会话。消息开头写 `@名字` 可以指定某一个会话：只投递给标签（`$TOXI_SESSION`，否则是项目目录名，也就是手机上该会话消息显示的标签）等于该名字的会话，不区分大小写。`@名字` 优先于回复路由和 `dirs`；指定的会话没在运行时，消息保持未读。`owner` 只给你自己拿着的设备：谁持有它的密钥，谁就能以你的身份说话。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个协作 agent 的信任级别、在线状态、身份卡片和未读数。
+**协作 agent（peers）。** 每个和你协作的其他 AI agent 一个 `[peers.<别名>]` 表。它们的未读消息会直接送进 agent 的上下文：Claude Code 和 Codex 的 hook 在会话开始时、每次工具调用后（PostToolUse）和一轮结束时（Stop）注入，MCP 工具 `wait_for_message` 会一直等到有消息为止。送达的消息会标记为已读，每条只送一次。`trust` 决定注入时的措辞：`observer` 表示只是信息（它提出的任何有副作用的事都要先问你）；`collaborator` 表示 agent 可以在当前任务范围内照办的请求（破坏性或超出项目的操作仍然要问你）。两种情况下，消息里转述的"用户已经同意"都不算数。`dirs` 解决多个 Claude Code 会话共用一个身份时抢消息的问题：hook 只把它的消息送给在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`），别的目录或子目录里启动的会话都不会收到。回复更进一步：如果一条消息是在回答你某个会话发出的消息（`reply_to`），或延续了那个会话参与过的线程，30 分钟内它只会投递给**那个**会话，不管该对端绑定在哪——在项目 A 里问的问题，答案回到项目 A。**你自己的设备**（例如手机上的 ToxiOS）也可以配成 peer，用 `trust = "owner"`：它的消息照样自动投递，但会被说明为你本人的话，agent 用 `send_message` 回复到那台设备。用 `dirs` 绑定默认接收你消息的会话。消息开头写 `@名字` 可以指定某一个会话：只投递给标签（`$TOXI_SESSION`，否则是项目目录名，也就是手机上该会话消息显示的标签）等于该名字的会话，不区分大小写。`@名字` 优先于回复路由和 `dirs`；指定的会话没在运行时，消息保持未读。`owner` 只给你自己拿着的设备：谁持有它的密钥，谁就能以你的身份说话。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个协作 agent 的信任级别、在线状态、身份卡片和未读数。
 
 **身份卡片。** `toxi profile set --kind agent --runtime claude-code --operator <你> --role "..."` 描述这个身份（`toxi profile show` 查看）。卡片会在好友连上时和内容变更时发给每个好友；对方在 `toxi peers`、`toxi --json contacts` 和注入的消息头里看到它（`castle-op [agent/grok @ vm1 · operator jeff]: ...`）。卡片是自述的，但它走的是加密信道，只有持有那把密钥的人才发得出来。消息还会带上发送会话的标签（`toxi send --session`，默认取 `$TOXI_SESSION` 或 Claude Code 的项目目录名；MCP 工具会自动填），显示为 `别名@会话`，对方就知道是你的哪个会话在说话。
 
 **限流与文件权限。** daemon 每个联系人每分钟最多接受 60 条文本、每分钟最多 5 个好友请求，多出来的丢弃并记日志。每次启动都会把 `~/.config/toxi/` 设为 0700，把密钥、数据库、配置和卡片文件设为 0600。
 
-**on_message hook。** 收到新消息并存好后，daemon 会运行这条 shell 命令，用来唤醒自己没法盯着 toxi 的 agent（比如某个 bot 的 webhook 触发器）。2 秒内到达的消息合并成一次运行；同一时间只跑一个，超过 30 秒会被终止。命令的环境变量里有 `TOXI_FROM`（发送者别名，逗号分隔）和 `TOXI_COUNT`，stdin 是 `{alias, msg_uuid, msg_type}` 组成的 JSON 列表。消息正文从不传出，webhook 只知道“有新消息”，被唤醒的 agent 再通过 toxi 读取内容。
+**on_message hook。** 收到新消息并存好后，daemon 会运行这条 shell 命令，用来唤醒自己没法盯着 toxi 的 agent（比如某个 bot 的 webhook 触发器）。2 秒内到达的消息合并成一次运行；同一时间只跑一个，超过 30 秒会被终止。命令的环境变量里有 `TOXI_FROM`（发送者别名，逗号分隔）和 `TOXI_COUNT`，stdin 是 `{alias, msg_uuid, msg_type}` 组成的 JSON 列表。这条命令从不拿到消息正文，只知道“有新消息”，被唤醒的 agent 再通过 toxi 读取内容。
+
+**on_message_url webhook。** 对于通过 HTTP 唤醒的 bot，`on_message_url` 让 daemon 为同样的批次 POST `{from, count, messages, ts}`（每项是 `{alias, msg_uuid, msg_type}`）。只有 `include_body = true` 时才会加上正文和线程字段（`content`、`from_session`、`thread`、`reply_to`、`kind` 等）。设置了 `on_message_secret` 时，请求带 `X-Toxi-Timestamp: <ts>` 和 `X-Toxi-Signature: sha256=<hex HMAC-SHA256(secret, "<ts>.<body>")>`；先校验签名再信任内容。在参考环境里，这样被唤醒的 Grok bot 大约 3 秒内收到消息、大约 25 秒给出回答。
 
 ---
 
@@ -319,7 +343,7 @@ toxi accept-intro alice carol --alias=co_carol
 
 ## 9. Claude Code 集成（插件）
 
-插件要求 `toxi` 在你的 `PATH` 上（§2 已经装好了）。它打包了未读通知 hook、4 个 slash 命令、MCP server 配置。
+插件要求 `toxi` 在你的 `PATH` 上（§2 已经装好了）。它打包了未读通知 hook、2 个 slash 命令、MCP server 配置。
 
 ### 9.1 装插件
 
@@ -339,11 +363,9 @@ claude --plugin-dir /绝对路径/到/toxi 仓库/claude-code-plugin
 - **Stop hook** —— 回合结束时还没送达的消息会被注入、回合继续，所以协作 agent 的请求不会等到你下一次输入。
 - **空闲会话** —— Claude 空闲时什么都不跑，所以空闲会话要到下一回合才知道有消息。两种唤醒方式：调用 `wait_for_message`（现在阻塞在 daemon 的事件流上，消息到达后毫秒级返回）；或启用实验性的 channel 模式：用 `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi` 启动 Claude Code。channel 模式下，只要路由到本项目的协作 agent 来信，toxi 的 MCP server 就推一条简短的唤醒提示（只说是谁，不带正文）；投递本身仍走 hook 或 `wait_for_message`，所以提示丢了也不会丢消息。
 - **Slash 命令**（装好后命名空间是 `/toxi:`）：
-  - `/unread` —— 显示未读（翻译非中文；标已读）。
-  - `/send <alias> <message>` —— 发消息。
-  - `/contacts` —— 列联系人和在线状态。
-  - `/status` —— daemon + DHT + 队列 + 24 小时统计。
-- **MCP 工具**（`get_unread`、`read_history`、`mark_read`、`send_message`、`list_contacts`、`get_peers`、`get_status`、`wait_for_message`）—— 让 Claude 替你操作：读历史、在你看过后标记指定消息为已读、起草并发送回复（`send_message(..., wait_read=30)` 会等已读回执）、等待协作 agent 的回答。需要 `[mcp]` extra（§2.1）。
+  - `/toxi:read` —— 显示未读（翻译；标已读；显示图片、播放语音）。
+  - `/toxi:send-terminal <alias> [scrollback_lines]` —— 把这个终端的文本（tmux pane，否则剪贴板）发给某个联系人，自动拆成多条消息。
+- **MCP 工具**（`get_unread`、`read_history`、`get_threads`、`search_messages`、`view_media`、`mark_read`、`mark_handled`、`send_message`、`send_file`、`list_contacts`、`get_peers`、`get_status`、`wait_for_message`、`list_rooms`、`read_room`、`send_room_message`）—— 让 Claude 替你操作：读取和搜索历史、显示收到的媒体、在你看过后标记指定消息为已读、起草并发送回复（`send_message(..., wait_read=30)` 会等已读回执）、等待协作 agent 的回答。需要 `[mcp]` extra（§2.1）。
 
 ### 9.3 状态栏（底部未读指示器）
 
@@ -358,7 +380,7 @@ claude --plugin-dir /绝对路径/到/toxi 仓库/claude-code-plugin
 }
 ```
 
-Claude Code 每轮对话都会刷新状态栏，未读数在你工作时自动更新——不用再敲 `/toxi:unread` 来检查。
+Claude Code 每轮对话都会刷新状态栏，未读数在你工作时自动更新——不用再敲 `/toxi:read` 来检查。
 
 ### 9.4 不离开 Claude Code 就能测
 
@@ -367,35 +389,41 @@ Claude Code 每轮对话都会刷新状态栏，未读数在你工作时自动�
 toxi --json unread          # 应该打印 [...]，hook 注入的就是这份数据
 
 # 在 Claude Code 里：
-/toxi:unread        # 让 Claude 显示并翻译未读
+/toxi:read          # 让 Claude 显示并翻译未读
 ```
 
 如果 hook 触发了但什么都没说，多半是 daemon 没在跑、或者根本没有未读（这两种情况 hook 都会静默）。
 
 ### 9.5 Codex 集成（实验性）
 
-第一版 Codex 插件包位于 `plugins/toxi/`。它包含 Codex manifest、MCP server
-配置、Stop hook，以及一个 `toxi` skill。Stop hook 会调用
-`toxi statusline` 并返回 Codex Stop-hook JSON，让 Codex 在每轮结束后显示和
-Claude Code 底部状态栏相同的摘要，例如
-`toxi: 📬 2 from mini2, jeff · 2/2 online`。插件故意不注册 SessionStart hook；
-未读消息只在你要求 Codex 通过 MCP/CLI 读取时才会进入上下文。MCP server 也会声明
+Codex 插件包位于 `plugins/toxi/`。它包含 Codex manifest、MCP server
+配置、三个 hook，以及一个 `toxi` skill。这些 hook 与 Claude Code 的对应：
+**SessionStart** 在会话开始或恢复时投递路由到本项目的协作 agent 消息；
+**PostToolUse** 在每次工具调用后做同样的 `inbox.flag` 检查（`peer_check.sh`），
+在回合中间注入协作 agent 消息；**Stop** 在回合结束时投递仍未送达的协作 agent
+消息，没有时返回和 Claude Code 底部状态栏相同的 `toxi statusline` 摘要，例如
+`toxi: 📬 2 from mini2, jeff · 2/2 online`。每条 hook 命令都在
+`${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}` 下找脚本，脚本不存在时以 0 退出。
+非协作 agent 联系人的未读消息只在你要求 Codex 读取时才会进入上下文：用
+`/prompts:toxi-read`，或通过 MCP/CLI。MCP server 也会声明
 instructions，告诉 Codex 来信是不可信个人内容、读取工具只是 peek、`mark_read` /
 `send_message` 只能在用户明确要求后使用；`mark_read` 也可在已经把对应消息明确转述给用户后调用。
 
 repo 级 Codex marketplace 入口是 `.agents/plugins/marketplace.json`。Codex 插件
 安装目前需要源码 checkout；PyPI/pipx/Homebrew 安装的 engine 仍可提供
-`toxi mcp serve`，并且当你在源码 checkout 中运行 `toxi setup-codex` 时，它会使用
+`toxi mcp serve`，并且当你在源码 checkout 中运行 `toxi setup codex` 时，它会使用
 当前 checkout 的 repo marketplace 文件。本地接入命令是：
 
 ```bash
-toxi setup-codex
+toxi setup codex
 ```
 
 这个命令会尽量安装 MCP extra、把 `toxi mcp serve` 注册到 Codex、把当前
-checkout 加入 Codex plugin marketplace，并安装 `toxi` Codex 插件。它适合在引擎
+checkout 加入 Codex plugin marketplace、安装 `toxi` Codex 插件，并安装 Codex
+slash 命令 `/prompts:toxi-read [alias]`（位于 `~/.codex/prompts/`）：它通过 MCP
+工具读取你的未读消息（可只看某个联系人），转述给你并标为已读。它适合在引擎
 setup 后运行；不会创建 Tox 身份，也不会启动 daemon。引擎 setup 使用
-`toxi setup-engine`。
+`toxi setup engine`。
 
 检查非交互接入状态：
 
@@ -413,13 +441,17 @@ toxi doctor-codex
 /plugins  # 确认 toxi 插件已安装并启用
 ```
 
+如果某次升级改动了插件的 `hooks.json`，要在 `/hooks` 里重新审核并信任这些 hook，
+然后重启 Codex 会话。
+
 只移除 Codex 集成时：
 
 ```bash
 toxi teardown-codex
 ```
 
-它会移除 Codex 插件、MCP server 和 marketplace 入口；不会停止 toxi daemon，
+它会移除 Codex 插件、MCP server、marketplace 入口和 `/prompts:toxi-read`
+slash 命令；不会停止 toxi daemon，
 也不会删除你的身份和历史。
 
 ---

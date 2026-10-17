@@ -15,7 +15,8 @@ toxi is a communication layer between agents and people that needs no server: ev
            │   IPC: request/response + event subscription (Unix socket, length-prefixed JSON)
 ┌─ L2 engine: toxi-daemon ───────────────────────────────────────────────────┐
 │ identity · contacts · profile cards · peer trust · reassembly · receipts · │
-│ queue/retry · rooms · files · event bus · SQLite · inbox.flag              │
+│ queue/retry · rooms · files · archive/search · event bus · SQLite ·        │
+│ inbox.flag                                                                 │
 └──────────────────────────────────┬─────────────────────────────────────────┘
 ┌─ L3 protocol: envelope v2 (carried on L1, implemented by L2) ───────────────┐
 │ text(+session, part, thread, reply_to, kind, …) · profile · receipt · ack · room · file │
@@ -39,14 +40,14 @@ toxi is a communication layer between agents and people that needs no server: ev
 | `toxi mcp serve` | the MCP server (stdio) that Claude Code / Codex launch | the agent runtime |
 | hooks | `claude-code-plugin/hooks/*` and `plugins/toxi/hooks/*` | the agent runtime at lifecycle points |
 
-Per identity directory: `tox_state.bin` (keys + friend list), `chat.db` (contacts, messages, rooms, invites), `profile.json` (own card), `config.toml`, `media/` (received files, outgoing attachments), `inbox.flag`, `daemon.sock`, `daemon.log`. All private (0700 / 0600).
+Per identity directory: `tox_state.bin` (keys + friend list), `chat.db` (contacts, messages, friend requests, invites, rooms, room members, pending introductions), `archive.db` (messages moved out by archiving; created by the first archive), `profile.json` (own card), `config.toml`, `media/` (received files, outgoing attachments), `inbox.flag`, `daemon.sock`, `daemon.log`. All private (0700 / 0600).
 
 ## Data flow of one message
 
 1. `send` (CLI / MCP / room fan-out) → IPC `send_message` → row stored as `queued` → if toxcore says the friend is connected, the envelope goes out and the row becomes `sent` (long bodies as `part` chunks, bodies over 64 KB as a file).
 2. The receiver's daemon stores it once (dedup by uuid), ACKs it, reassembles parts, touches `inbox.flag`, emits `message.new` to subscribers, and schedules the `on_message` hook / webhook (debounced, only once the message is complete).
-3. Delivery into an agent: Claude Code's PostToolUse / Stop / SessionStart hooks or `wait_for_message` call `peer-inbox`, which marks the messages read and renders them with the sender's card, session, thread tags and the trust-level guide. Marking read sends a `receipt`.
-4. The sender sees `delivered` (ack) then `read` (receipt), live on `toxi watch`, or by blocking with `--wait-read`.
+3. Delivery into an agent: Claude Code's PostToolUse / Stop / SessionStart hooks or `wait_for_message` call `peer-inbox`, which marks the messages read and renders them with the sender's card, session, thread tags and the trust-level guide. Marking read records a receipt as owed (`receipt_pending`); it is sent only if the sender's card lists the `receipt` cap — at once if the sender is online, otherwise on reconnect or by the periodic sweep.
+4. The sender sees `delivered` (ack), then `read` (receipt), then `handled` (a `done` receipt: the receiver answered with `reply_to`, or marked it handled with `toxi done` / MCP `mark_handled`, which also records it as handled on the receiver's side), live on `toxi watch`, or by blocking with `--wait-read`.
 
 ## The adapter contract
 
@@ -71,7 +72,7 @@ local alias   ──►  [peers.<alias>] trust = observer | collaborator | owner
 every injected line:  alias [agent/grok @ host · operator jeff · session x] (#thread · kind): body
 ```
 
-Trust comes from the operator who paired the two identities; the card tells you *what* you are talking to; `dirs` routes a peer to the one session that works with it.
+Trust comes from the operator who paired the two identities; the card tells you *what* you are talking to; `owner` marks the user's own device, whose messages count as the user's. Delivery to sessions: a message starting with `@name` goes only to the session labelled `name`; a fresh reply goes back to the session that sent the message it answers (30 minutes); otherwise `dirs` routes a peer to the one session that works with it.
 
 ## Where things live
 
@@ -80,6 +81,7 @@ Trust comes from the operator who paired the two identities; the card tells you 
 | ctypes binding | `src/toxi/tox.py` |
 | envelope encode/validate | `src/toxi/envelope.py` |
 | daemon (IPC, callbacks, queue, parts, receipts, rooms, files, events, hooks) | `src/toxi/daemon.py` |
+| archive and search (IPC `archive_messages`, `archive_status`, `search_messages`; daily auto-archive into `archive.db` by `[archive] after_days`) | `src/toxi/daemon.py` |
 | config parsing | `src/toxi/config.py` |
 | peer delivery and wording | `src/toxi/peers.py` |
 | pairing invites | `src/toxi/invite.py` |

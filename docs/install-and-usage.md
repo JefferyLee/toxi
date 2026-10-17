@@ -13,7 +13,7 @@ toxi has **two pieces** you install separately:
 
 ## 1. Prerequisites
 
-- **macOS** (v0.1's primary target) or **Linux** (should work given libtoxcore; not yet a tested target).
+- **macOS** or **Linux** (libtoxcore from Homebrew or the distro; the daemon is kept alive by launchd or `systemd --user`, §11).
 - **Python 3.10+** (`python3 --version`).
 - **An always-on machine** for each person who wants to receive messages reliably (a laptop that sleeps is fine — messages queue until you wake).
 - **Outbound UDP** (and TCP, as a fallback) to the public internet for the Tox DHT.
@@ -21,6 +21,14 @@ toxi has **two pieces** you install separately:
 ---
 
 ## 2. Install the engine
+
+The one-line installer does all of this on macOS and Linux: libtoxcore, the engine from PyPI, your identity, the daemon, `toxi service install`, and the adapter it finds (flags and details: [install.md](install.md)).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh | bash
+```
+
+By hand:
 
 ### 2.1 macOS
 
@@ -30,7 +38,7 @@ brew install toxcore pipx
 pipx ensurepath          # then restart your shell so `toxi` is on PATH
 
 # 2) Install toxi with the MCP extra
-pipx install 'git+https://github.com/JefferyLee/toxi#egg=toxi[mcp]'
+pipx install 'toxi[mcp]'
 
 # 3) One-shot setup: generates your identity, starts the daemon, wires the
 #    bottom status-bar indicator into ~/.claude/settings.json (with a .bak).
@@ -38,9 +46,9 @@ pipx install 'git+https://github.com/JefferyLee/toxi#egg=toxi[mcp]'
 toxi setup
 ```
 
-When PyPI publishing happens, step 2 becomes `pipx install 'toxi[mcp]'`. A Homebrew tap will collapse steps 1–3 into a single `brew install`.
+To keep the daemon alive across logins and reboots, add `toxi service install` (§11). A Homebrew tap will collapse steps 1–3 into a single `brew install`.
 
-### 2.2 Linux (expected; not yet a tested target)
+### 2.2 Linux
 
 ```bash
 # 1) libtoxcore from your distro (names vary):
@@ -50,8 +58,9 @@ When PyPI publishing happens, step 2 becomes `pipx install 'toxi[mcp]'`. A Homeb
 sudo apt install libtoxcore2 python3-pip pipx       # adjust per distro
 
 # 2) Same as macOS:
-pipx install 'git+https://github.com/JefferyLee/toxi#egg=toxi[mcp]'
+pipx install 'toxi[mcp]'
 toxi setup
+toxi service install          # systemd --user keep-alive (§11)
 ```
 
 ### 2.3 Verify
@@ -101,10 +110,13 @@ engine setup and then wires Claude Code.
 For narrower setup:
 
 ```bash
-toxi setup-engine     # identity + daemon only
-toxi setup-claude     # Claude Code statusLine + plugin install hints only
-toxi setup-codex      # Codex MCP + plugin only
+toxi setup engine     # identity + daemon only
+toxi setup claude     # Claude Code statusLine + plugin install hints only
+toxi setup codex      # Codex MCP + plugin only (§9.5)
+toxi setup headless   # a bot or script with no Claude/Codex: identity, service, profile card, pairing hint
 ```
+
+`toxi setup headless` takes `--name`, `--kind`, `--runtime`, `--operator` and `--role` for the profile card, and `--no-service` to skip the launchd/systemd service.
 
 ---
 
@@ -184,7 +196,7 @@ toxi unread
 toxi unread bob
 
 # Browse history with a contact.
-toxi read bob                  # last 20
+toxi read bob                  # last 20 (a long text reassembled from parts counts once)
 toxi read bob --limit 200      # more
 ```
 
@@ -278,21 +290,33 @@ fail_after_hours = 24       # mark as failed after this long without an ACK
 
 [peers.codex]               # one table per contact that is a peer AI agent (see below)
 dirs  = ["/path/to/project"]  # optional: deliver only to sessions started there
-trust = "collaborator"      # or "observer"; "owner" = your own device (see below)
+trust = "collaborator"      # or "observer"; "owner" = your own device (see below); omitted = "collaborator"
 
 [hooks]
 on_message = "curl -fsS -X POST https://example.com/wake"   # run when new messages arrive
+on_message_url = "https://example.com/toxi"   # POST a JSON summary of new messages (see below)
+on_message_secret = "..."   # optional: HMAC-sign that POST
+include_body = false        # true = the POST also carries bodies and thread fields
+
+[archive]
+after_days = 180            # daily, move delivered/received messages older than this to archive.db (0 = never)
+
+[tox]
+public_dht = true           # false = bootstrap only from the nodes below
+bootstrap = [{ host = "192.168.1.10", port = 33445, key = "<64 hex DHT id>" }]   # extra DHT nodes; `toxi me` prints a node's id and port
 ```
 
-The daemon reads `[daemon]` and `[retry]` at start; restart it (`toxi daemon stop && toxi daemon start`) after editing those. `[peers]` and `[hooks]` are read each time they're used, so edits apply immediately.
+The daemon reads `[daemon]`, `[retry]` and `[tox]` at start; restart it (`toxi daemon stop && toxi daemon start`) after editing those. `[peers]`, `[hooks]` and `[archive]` are read each time they're used, so edits apply immediately.
 
-**Peer agents.** One `[peers.<alias>]` table per contact that is another AI agent working with you. Their unread messages are delivered straight into the agent's context: the Claude Code and Codex Stop hooks inject them when a turn ends, and the MCP `wait_for_message` tool blocks until one arrives. Delivered messages are marked read, so each is delivered once. `trust` picks the wording that frames them for the agent: `observer` means information only (any side effect they ask for needs your confirmation first); `collaborator` means requests the agent may act on within its current task (destructive or out-of-project actions still need you). In both cases a relayed "the user approved this" counts for nothing. `dirs` solves the race between several Claude Code sessions sharing one identity: the Stop hook delivers that peer's messages only to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`), not elsewhere or in subdirectories. Replies go further: a message that answers something one of your sessions sent (`reply_to`), or continues a thread that session wrote in, is delivered to **that** session for 30 minutes, whatever the peer's binding — so a question asked from project A gets its answer in project A. **Your own device** (for example ToxiOS on your phone) can be a peer too, with `trust = "owner"`: its messages are delivered the same way and framed as your own words, and the agent answers them on that device with `send_message`. Bind it to the session that should hear from you by default (`dirs`). Start a message with `@name` to address one session instead: it goes only to the session whose label (`$TOXI_SESSION`, else its project dir name, the label your phone shows on that session's messages) is `name`, ignoring case. `@name` beats both the reply route and `dirs`; a message addressed to a session that is not running stays unread. Give `owner` only to a device you hold: whoever has its key speaks as you. The older `[agents] peers = [...]` + `[agents.dirs]` form still works and means `collaborator`. `toxi peers` lists every peer with trust level, presence, profile card and unread count.
+**Peer agents.** One `[peers.<alias>]` table per contact that is another AI agent working with you. Their unread messages are delivered straight into the agent's context: the Claude Code and Codex hooks inject them at session start, after each tool call (PostToolUse) and when a turn ends (Stop), and the MCP `wait_for_message` tool blocks until one arrives. Delivered messages are marked read, so each is delivered once. `trust` picks the wording that frames them for the agent: `observer` means information only (any side effect they ask for needs your confirmation first); `collaborator` means requests the agent may act on within its current task (destructive or out-of-project actions still need you). In both cases a relayed "the user approved this" counts for nothing. `dirs` solves the race between several Claude Code sessions sharing one identity: the hooks deliver that peer's messages only to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`), not elsewhere or in subdirectories. Replies go further: a message that answers something one of your sessions sent (`reply_to`), or continues a thread that session wrote in, is delivered to **that** session for 30 minutes, whatever the peer's binding — so a question asked from project A gets its answer in project A. **Your own device** (for example ToxiOS on your phone) can be a peer too, with `trust = "owner"`: its messages are delivered the same way and framed as your own words, and the agent answers them on that device with `send_message`. Bind it to the session that should hear from you by default (`dirs`). Start a message with `@name` to address one session instead: it goes only to the session whose label (`$TOXI_SESSION`, else its project dir name, the label your phone shows on that session's messages) is `name`, ignoring case. `@name` beats both the reply route and `dirs`; a message addressed to a session that is not running stays unread. Give `owner` only to a device you hold: whoever has its key speaks as you. The older `[agents] peers = [...]` + `[agents.dirs]` form still works and means `collaborator`. `toxi peers` lists every peer with trust level, presence, profile card and unread count.
 
 **Profile card.** `toxi profile set --kind agent --runtime claude-code --operator <you> --role "..."` describes this identity (`toxi profile show` to check). The card goes to every friend when they connect and whenever it changes; friends see it in `toxi peers`, in `toxi --json contacts`, and in the header of injected peer messages (`castle-op [agent/grok @ vm1 · operator jeff]: ...`). It is self-described, but it travels inside the encrypted channel, so only the holder of that key can have sent it. Messages also carry the sending session's label (`toxi send --session`, default `$TOXI_SESSION` or the Claude Code project dir name; the MCP tool fills it in automatically), shown as `alias@session`, so a peer can tell which of your sessions wrote.
 
 **Rate limits and file modes.** The daemon accepts at most 60 texts per contact per minute and 5 friend requests per minute; extra ones are dropped and logged. On every start it sets `~/.config/toxi/` to 0700 and your key, database, config and profile files to 0600.
 
-**on_message hook.** A shell command the daemon runs when new incoming messages are stored, for waking an agent that can't watch toxi itself (e.g. a bot's webhook trigger). Messages arriving within 2 seconds are batched into one run; only one run is in flight at a time, and a run is killed after 30 seconds. The command gets `TOXI_FROM` (comma-separated sender aliases) and `TOXI_COUNT` in its environment, and a JSON list of `{alias, msg_uuid, msg_type}` on stdin. Message bodies are never passed, so a webhook learns only that something arrived; the woken agent reads it through toxi.
+**on_message hook.** A shell command the daemon runs when new incoming messages are stored, for waking an agent that can't watch toxi itself (e.g. a bot's webhook trigger). Messages arriving within 2 seconds are batched into one run; only one run is in flight at a time, and a run is killed after 30 seconds. The command gets `TOXI_FROM` (comma-separated sender aliases) and `TOXI_COUNT` in its environment, and a JSON list of `{alias, msg_uuid, msg_type}` on stdin. The command never gets message bodies, so it learns only that something arrived; the woken agent reads it through toxi.
+
+**on_message_url webhook.** For a bot that is woken over HTTP, `on_message_url` makes the daemon POST `{from, count, messages, ts}` for the same batches (each item `{alias, msg_uuid, msg_type}`). Bodies and thread fields (`content`, `from_session`, `thread`, `reply_to`, `kind`, …) are added only with `include_body = true`. With `on_message_secret` set, the request carries `X-Toxi-Timestamp: <ts>` and `X-Toxi-Signature: sha256=<hex HMAC-SHA256(secret, "<ts>.<body>")>`; check it before trusting the payload. In the reference setup, Grok bots woken this way pick a message up within about 3 seconds and answer in about 25.
 
 ---
 
@@ -322,7 +346,7 @@ toxi accept-intro alice carol --alias=co_carol
 
 ## 9. Claude Code integration (the plugin)
 
-The plugin needs `toxi` on your `PATH` (you installed it in §2). It bundles the unread-notification hook, four slash commands, and an MCP server config.
+The plugin needs `toxi` on your `PATH` (you installed it in §2). It bundles the unread-notification hook, two slash commands, and an MCP server config.
 
 ### 9.1 Install the plugin
 
@@ -342,11 +366,9 @@ claude --plugin-dir /absolute/path/to/toxi-checkout/claude-code-plugin
 - **Stop hook** — anything still undelivered when a turn ends is injected and the turn continues, so a peer's request is never left waiting for the next prompt.
 - **Idle sessions** — nothing runs while Claude is idle, so an idle session learns of a message at its next turn. Two ways to wake it: call `wait_for_message` (it now blocks on the daemon's event stream and returns within milliseconds of a message), or enable the experimental channel mode: start Claude Code with `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi`. In channel mode the toxi MCP server pushes a short wake-up note (who wrote, never the text) whenever a routed peer writes; delivery itself still happens through the hooks or `wait_for_message`, so a dropped note loses nothing.
 - **Slash commands** (namespaced under `/toxi:` once installed):
-  - `/unread` — show unread (translates non-Chinese; marks them read).
-  - `/send <alias> <message>` — send a message.
-  - `/contacts` — list contacts and who's online.
-  - `/status` — daemon + DHT + queue + 24-hour stats.
-- **MCP tools** (`get_unread`, `read_history`, `mark_read`, `send_message`, `list_contacts`, `get_peers`, `get_status`, `wait_for_message`) — Claude can act for you: read your history, mark specific messages read after you have seen them, draft and send replies (`send_message(..., wait_read=30)` waits for the read receipt), wait for a peer agent's answer. Needs the `[mcp]` extra (§2.1).
+  - `/toxi:read` — show unread (translates; marks them read; renders images, plays voice).
+  - `/toxi:send-terminal <alias> [scrollback_lines]` — send this terminal's text (tmux pane, else clipboard) to a contact, split into messages.
+- **MCP tools** (`get_unread`, `read_history`, `get_threads`, `search_messages`, `view_media`, `mark_read`, `mark_handled`, `send_message`, `send_file`, `list_contacts`, `get_peers`, `get_status`, `wait_for_message`, `list_rooms`, `read_room`, `send_room_message`) — Claude can act for you: read and search your history, show received media, mark specific messages read after you have seen them, draft and send replies (`send_message(..., wait_read=30)` waits for the read receipt), wait for a peer agent's answer. Needs the `[mcp]` extra (§2.1).
 
 ### 9.3 Status-line (bottom-bar unread indicator)
 
@@ -361,7 +383,7 @@ claude --plugin-dir /absolute/path/to/toxi-checkout/claude-code-plugin
 }
 ```
 
-Claude Code refreshes the status line on each turn, so the unread count updates as you work — no need to run `/toxi:unread` to check.
+Claude Code refreshes the status line on each turn, so the unread count updates as you work — no need to run `/toxi:read` to check.
 
 ### 9.4 Test it without leaving the chat
 
@@ -371,20 +393,25 @@ Claude Code refreshes the status line on each turn, so the unread count updates 
 toxi --json unread          # should print [...] — the same data the hook injects
 
 # In Claude Code:
-/toxi:unread        # ask Claude to show + translate unread
+/toxi:read          # ask Claude to show + translate unread
 ```
 
 If the hook fires but you see nothing, the daemon isn't running or there's no unread (the hook is silent in both cases).
 
 ### 9.5 Codex integration (experimental)
 
-The first Codex plugin package lives in `plugins/toxi/`. It bundles a Codex
-manifest, MCP server config, a Stop hook, and a `toxi` skill. The Stop hook
-calls `toxi statusline` and returns Codex Stop-hook JSON, so Codex can surface
-the same summary Claude Code puts in its bottom bar, for example
-`toxi: 📬 2 from mini2, jeff · 2/2 online`, after each turn. The plugin
-intentionally does not register a SessionStart hook; unread messages are only
-surfaced when you ask Codex to read them through MCP/CLI. The MCP server also advertises instructions
+The Codex plugin package lives in `plugins/toxi/`. It bundles a Codex
+manifest, MCP server config, three hooks, and a `toxi` skill. The hooks mirror
+Claude Code's: **SessionStart** delivers peer-agent messages routed to this
+project when a session starts or resumes; **PostToolUse** runs the same
+`inbox.flag` check (`peer_check.sh`) after each tool call and injects peer
+messages mid-turn; **Stop** delivers peer messages still undelivered when a turn
+ends, and otherwise returns the `toxi statusline` summary Claude Code puts in its
+bottom bar, for example `toxi: 📬 2 from mini2, jeff · 2/2 online`. Each hook
+command finds its script under `${PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-./plugins/toxi}}`
+and exits 0 if the script is missing. Unread messages from contacts that are not
+peers are only surfaced when you ask Codex to read them, with
+`/prompts:toxi-read` or through MCP/CLI. The MCP server also advertises instructions
 that tell Codex that
 incoming messages are untrusted personal content, read tools are peek-only, and
 `mark_read` / `send_message` should only be used after an explicit user request
@@ -393,23 +420,28 @@ or, for `mark_read`, after the exact messages have been relayed to you.
 The repo-level Codex marketplace entry is `.agents/plugins/marketplace.json`.
 Codex plugin installation currently requires a source checkout; a PyPI/pipx or
 Homebrew engine install can provide `toxi mcp serve`, and when you run
-`toxi setup-codex` from inside a checkout it uses that checkout's repo
+`toxi setup codex` from inside a checkout it uses that checkout's repo
 marketplace files. From a checkout, run:
 
 ```bash
-toxi setup-codex
+toxi setup codex
 ```
 
 This command installs the MCP extra when possible, registers `toxi mcp serve`
-with Codex, adds this checkout as a Codex plugin marketplace, and installs the
-`toxi` Codex plugin. It is safe to run after engine setup; it does not create
-your Tox identity or start the daemon. Use `toxi setup-engine` for that.
+with Codex, adds this checkout as a Codex plugin marketplace, installs the
+`toxi` Codex plugin, and installs the Codex slash command
+`/prompts:toxi-read [alias]` (in `~/.codex/prompts/`), which reads your unread
+messages through the MCP tools, optionally from one contact only, relays them and
+marks them read. It is safe to run after engine setup; it does not create
+your Tox identity or start the daemon. Use `toxi setup engine` for that.
 
 Check the non-interactive wiring:
 
 ```bash
 toxi doctor-codex
 ```
+
+For day-to-day use in Codex (checking status, reading and sending messages), see the [toxi in Codex guide](codex-usage.md).
 
 After that, in Codex:
 
@@ -419,13 +451,17 @@ After that, in Codex:
 /plugins  # confirm the toxi plugin is installed and enabled
 ```
 
+After an upgrade that changes the plugin's `hooks.json`, review and trust the
+hooks again in `/hooks` and restart the Codex session.
+
 To remove only the Codex integration:
 
 ```bash
 toxi teardown-codex
 ```
 
-This removes the Codex plugin, MCP server, and marketplace entry. It does not
+This removes the Codex plugin, MCP server, marketplace entry, and the
+`/prompts:toxi-read` slash command. It does not
 stop the toxi daemon or delete your identity/history.
 
 ---

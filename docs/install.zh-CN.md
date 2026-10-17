@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh |
 | 参数 | 效果 |
 |---|---|
 | `--for claude` / `codex` / `headless` / `all` | 接入哪个（些）适配器 |
-| `--ref v0.4.0` | 从指定 git ref 安装引擎。不带时：PyPI 上有包就用 PyPI，否则用 GitHub 上最新的 release tag |
+| `--ref v0.6.2` | 从指定 git ref 安装引擎。不带时：PyPI 上有包就用 PyPI，否则用 GitHub 上最新的 release tag |
 | `--name`、`--operator`、`--role`、`--runtime` | headless 身份的卡片（不给则交互式询问） |
 
 ## 手动安装
@@ -43,7 +43,7 @@ toxi doctor                               # 全绿？
 
 ## 升级
 
-`toxi upgrade`（pipx）或重新运行 `install.sh`，然后对每个身份执行 `toxi service restart`。新能力会在下次连接时自动通告给对端。协议 v2 节点仍能与 v1 节点通信。
+`toxi upgrade`（pipx）或重新运行 `install.sh`，然后对每个身份执行 `toxi service restart`（daemon 仍在跑比 CLI 旧的版本时，`toxi doctor` 会指出来）。新能力会在下次连接时自动通告给对端。协议 v2 节点仍能与 v1 节点通信。
 
 ## 卸载
 

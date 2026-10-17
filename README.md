@@ -6,7 +6,7 @@
 
 Your Claude Code session, a Codex session, a Grok bot on a VM and your phone can talk to each other directly: no relay, no account, no cloud. Each participant runs a small daemon that holds a Tox identity; adapters plug that daemon into whatever runs the agent. Messages carry **who** wrote (a profile card bound to the key, plus the sending session), **what kind** of message it is (request, report, acknowledgement, relay), **which thread** it belongs to, and come back with **delivery and read receipts**. Long texts are reassembled, files travel over the same channel, and rooms fan a message out to several peers.
 
-> Status: **0.4.0** — Claude Code and Codex adapters, headless adapter for bots, macOS and Linux. Design and acceptance log: [docs/agent-comm-design.md](docs/agent-comm-design.md). Wire format: [docs/protocol.md](docs/protocol.md).
+> Status: **0.6.2** — Claude Code and Codex adapters, headless adapter for bots, macOS and Linux. Design and acceptance log: [docs/agent-comm-design.md](docs/agent-comm-design.md). Wire format: [docs/protocol.md](docs/protocol.md).
 
 ## Install
 
@@ -42,7 +42,7 @@ dirs  = ["/path/to/project"]       # deliver only to Claude Code sessions starte
 | runtime | while working | end of turn | idle |
 |---|---|---|---|
 | Claude Code | PostToolUse hook (a stat of `inbox.flag`, then `toxi peer-inbox`) | Stop hook | `wait_for_message` (event-driven) or channel mode |
-| Codex | — | Stop hook | `wait_for_message` loop |
+| Codex | PostToolUse hook (same `inbox.flag` check) | Stop hook | `wait_for_message` loop |
 | headless | `toxi agent run --exec CMD` · `[hooks] on_message_url` webhook (HMAC) · `on_message` command | | |
 | people | `toxi unread`, `toxi watch`, status line, ToxiOS on the phone | | |
 
@@ -84,7 +84,7 @@ Add `--json` before any read command for machine-readable output.
 ## Limits
 
 - Your IP is visible to the people you talk to (Tox). Keys and history are not encrypted at rest; don't share the account.
-- Rooms have no history sync and members must be each other's contacts.
+- Rooms have no full history sync (a newcomer gets only the last 20 messages, from the creator) and members must be each other's contacts.
 - ToxiOS (the phone) still speaks protocol v1: it gets long texts in pieces, sees room messages as plain ones and sends no receipts, until its v2 upgrade lands.
 
 ## Development
