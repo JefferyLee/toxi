@@ -450,7 +450,7 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - `wait_for_message` 在事件流提前中断时自动重连。到期仍没有消息时返回 `reconnects=N`。
 - 未查明：那天早上 06:01 到 08:51 之间，launchd 托管的 daemon 为什么没有任何日志。
 
-### 未发布：一条消息只给一个会话，公共收件箱（2026-10-22）
+### 0.6.4 一条消息只给一个会话，公共收件箱（2026-10-22，v0.6.4）
 
 - 问题：Ada 上所有 Claude Code 会话共用 `ada` 身份。给某个会话的消息也会出现在其它会话里：状态栏、`/toxi:read` 和 Stop hook 摘要都会显示。没有绑定目录的 peer，谁先问就给谁。
 - 每个会话在 `<TOXI_HOME>/sessions/<agent pid>.json` 登记启动目录和唯一的名字（`TOXI_SESSION` 或目录名，重名加 `-2`、`-3`）。agent 进程退出，登记项随之结束。
