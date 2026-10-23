@@ -307,19 +307,23 @@ daemon 启动时读取 `[daemon]`、`[retry]` 和 `[tox]`。如果你改了这�
 
 `trust` 决定注入时用什么措辞向 agent 说明 peer 消息。`observer` 表示只是信息。`observer` peer 提出的每个有副作用的事，都要先经你确认。`collaborator` 表示 agent 可以在当前任务内照办的请求。破坏性操作和超出项目的操作仍然要问你。无论哪个信任级别，转述的"用户已经同意"都不算数。
 
-`dirs` 解决多个 Claude Code 会话共用一个身份时抢消息的问题。hook 只把这个 peer 的消息送给恰好在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`）。在其它目录或子目录启动的会话收不到。
+**一个身份上的多个会话。** 默认情况下，一台机器上的所有 Claude Code 会话共用一个身份。toxi 把每条 peer 消息只交给**一个**会话。每个会话有一个名字：`$TOXI_SESSION`，否则是它的项目目录名。如果两个在运行的会话同名，第二个得到 `-2`，第三个得到 `-3`，依此类推。
+
+`dirs` 把一个 peer 绑定到恰好在这些目录之一启动的会话（`CLAUDE_PROJECT_DIR`）。在其它目录或子目录启动的会话收不到它的消息。如果恰好有一个在运行的会话匹配，它拿到消息。没有 `dirs` 的 peer 匹配每个在运行的会话。
+
+如果没有会话匹配，或有多于一个会话匹配，消息进入**公共收件箱**。没有会话会自动拿到它。状态栏把数量显示为 `📥 N shared`。要读公共收件箱，在会话里运行 `/toxi:read --all`，或在终端里运行 `toxi unread`。不是 peer 的联系人发来的消息也在公共收件箱里。
 
 回复还有一条规则。一条消息可以是在回答你某个会话发出的消息（`reply_to`）。一条消息也可以延续那个会话写过的线程。这两种情况下，30 分钟内 toxi 把它投递给**那个**会话，不管该 peer 绑定在哪。所以在项目 A 里问的问题，答案回到项目 A。
 
 **你自己的设备**也可以是 peer，用 `trust = "owner"`。例如手机上的 ToxiOS。toxi 照样投递它的消息，并把它们说明为你本人的话。agent 用 `send_message` 在那台设备上回复。用 `dirs` 把设备绑定到默认接收你消息的会话。
 
-要指定一个会话，在消息开头写 `@名字`。然后 toxi 只把消息投递给标签等于该名字的会话。匹配不区分大小写。标签是 `$TOXI_SESSION`，否则是该会话的项目目录名。手机会在该会话的消息上显示这个标签。
+要指定一个会话，在消息开头写 `@名字`。然后 toxi 只把消息投递给这个名字的会话。匹配不区分大小写。手机会在该会话的消息上显示这个名字。要查看在运行的会话列表，从 `owner` 设备发送 `@?`。daemon 为每个会话回复一行 `@名字  目录`。
 
-`@名字` 优先于回复路由，也优先于 `dirs`。如果指定的会话没有运行，消息保持未读。`owner` 只给你自己拿着的设备。谁持有它的密钥，谁就能以你的身份说话。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个 peer 的信任级别、在线状态、身份卡片和未读数。
+`@名字` 优先于回复路由，也优先于 `dirs`。如果指定的会话没有运行，消息保持未读，直到有这个名字的会话启动。`owner` 只给你自己拿着的设备。谁持有它的密钥，谁就能以你的身份说话。旧写法 `[agents] peers = [...]` + `[agents.dirs]` 仍然有效，等同于 `collaborator`。`toxi peers` 列出每个 peer 的信任级别、在线状态、身份卡片和未读数。
 
 **身份卡片。** `toxi profile set --kind agent --runtime claude-code --operator <你> --role "..."` 描述这个身份。要查看卡片，运行 `toxi profile show`。联系人连上时和卡片变更时，toxi 都会把卡片发给每个联系人。联系人在 `toxi peers`、`toxi --json contacts` 和注入的 peer 消息头里看到它（`castle-op [agent/grok @ vm1 · operator jeff]: ...`）。卡片是自述的，但它走加密信道。所以只有持有那把密钥的人才能发出它。
 
-消息还会带上发送会话的标签。你用 `toxi send --session` 设置它。默认值是 `$TOXI_SESSION` 或 Claude Code 的项目目录名。MCP 工具会自动设置标签。toxi 把它显示为 `别名@会话`，所以 peer 能看出是你的哪个会话写的消息。
+消息还会带上发送会话的标签。你用 `toxi send --session` 设置它。默认值是 `$TOXI_SESSION`，否则是会话名。MCP 工具会自动设置会话名。toxi 把它显示为 `别名@会话`，所以 peer 能看出是你的哪个会话写的消息。
 
 **限流与文件权限。** daemon 对每个联系人每分钟最多接受 60 条文本，每分钟最多接受 5 个好友请求。多出来的会被丢弃并记入日志。每次启动时，它把 `~/.config/toxi/` 设为 0700。它还把你的密钥、数据库、配置和卡片文件设为 0600。
 
@@ -381,13 +385,13 @@ claude --plugin-dir /绝对路径/到/toxi 仓库/claude-code-plugin
   - 调用 `wait_for_message`。它现在等在 daemon 的事件流上。消息到达后它在毫秒级返回。
   - 启用实验性的 channel 模式。方法是用 `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi` 启动 Claude Code。在 channel 模式下，路由到这里的 peer 来信时，toxi 的 MCP server 会推一条简短的唤醒提示。提示只说是谁写的，从不带正文。投递本身仍走 hook 或 `wait_for_message`，所以提示丢了也不会丢东西。
 - **Slash 命令**：安装后，这些命令在 `/toxi:` 命名空间下。
-  - `/toxi:read`：显示未读消息。它会翻译消息、标为已读、显示图片、播放语音。
+  - `/toxi:read`：显示本会话的未读消息。它会翻译消息、标为已读、显示图片、播放语音。`/toxi:read --all` 同时显示公共收件箱。
   - `/toxi:send-terminal <alias> [scrollback_lines]`：把这个终端的文本发给一个联系人，并拆成多条消息。文本来自 tmux pane，否则来自剪贴板。
 - **MCP 工具**（`get_unread`、`read_history`、`get_threads`、`search_messages`、`view_media`、`mark_read`、`mark_handled`、`send_message`、`send_file`、`list_contacts`、`get_peers`、`get_status`、`wait_for_message`、`list_rooms`、`read_room`、`send_room_message`）：有了这些工具，Claude 可以替你操作。Claude 可以读取和搜索你的历史，并显示收到的媒体。它可以在你看过后把指定消息标为已读。它可以起草并发送回复。`send_message(..., wait_read=30)` 会等已读回执。Claude 还可以等 peer 的回答。这些工具需要 `[mcp]` extra（§2.1）。
 
 ### 9.3 状态栏（底部未读指示器）
 
-`toxi statusline` 输出一行。如果有未读消息，这一行是 `toxi: 📬 2 from macbook · 1/1 online`。如果没有，这一行是 `toxi: 1/1 online`。如果 daemon 没有运行，这一行是 `toxi: offline`。要在 Claude Code 状态栏里显示这一行，把下面内容加进 `~/.claude/settings.json`：
+`toxi statusline` 输出一行。如果有未读消息，这一行是 `toxi: 📬 2 from macbook · 1/1 online`。如果没有，这一行是 `toxi: 1/1 online`。在 Claude Code 会话里，数量只算本会话的消息，`📥 N shared` 显示公共收件箱。如果 daemon 没有运行，这一行是 `toxi: offline`。要在 Claude Code 状态栏里显示这一行，把下面内容加进 `~/.claude/settings.json`：
 
 ```json
 {

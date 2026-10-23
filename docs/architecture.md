@@ -92,11 +92,16 @@ every injected line:  alias [agent/grok @ host · operator jeff · session x] (#
 
 The trust level comes from the operator who paired the two identities. The profile card tells you *what* you talk to. The `owner` level marks a device of the user. Messages from an `owner` count as messages from the user.
 
-The daemon delivers a message to a session with these rules, in this order:
+Several agent sessions can share one identity. A session registers in `<TOXI_HOME>/sessions/` the first time that it asks for its messages. The entry holds the pid of the agent process, the start directory and a name. The name is `$TOXI_SESSION` or the directory name. If a live session already has that name, toxi adds `-2`, `-3` and so on. The entry goes away when the agent process stops.
 
-- If a message starts with `@name`, it goes only to the session with the label `name`.
+toxi gives each peer message to one session. It uses these rules, in this order:
+
+- If a message starts with `@name`, it goes only to the session `name`. If that session is not running, the message waits for it.
 - If a message is a reply, it goes back to the session that sent the original message. This route stays valid for 30 minutes.
-- In other cases, `dirs` routes a peer to the one session that works with it.
+- In other cases, `dirs` selects the session. If the peer has no `dirs`, each live session is a candidate.
+- If no session matches, or more than one session matches, the message goes to the **shared inbox**. No session gets it automatically.
+
+In a session, `toxi unread` and the status line show only the messages of that session. `toxi unread --all` also shows the shared inbox. A session never sees the messages of another session. Messages from contacts that are not peers are always in the shared inbox. If an `owner` device sends `@?`, the daemon answers with the list of live sessions.
 
 ## Where things live
 
@@ -108,6 +113,7 @@ The daemon delivers a message to a session with these rules, in this order:
 | archive and search: IPC `archive_messages`, `archive_status` and `search_messages`. A daily auto-archive moves messages into `archive.db`, controlled by `[archive] after_days`. | `src/toxi/daemon.py` |
 | config parsing | `src/toxi/config.py` |
 | peer delivery and wording | `src/toxi/peers.py` |
+| session registry | `src/toxi/sessions.py` |
 | pairing invites | `src/toxi/invite.py` |
 | launchd / systemd services | `src/toxi/service.py` |
 | CLI | `src/toxi/cli.py` |

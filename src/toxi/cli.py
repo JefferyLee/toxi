@@ -13,7 +13,7 @@ import time
 import click
 from pathlib import Path
 
-from . import __version__, bootstrap, client, config, envelope, invite, paths, peers, service
+from . import __version__, bootstrap, client, config, envelope, invite, paths, peers, service, sessions
 from .tox import Tox
 
 _CONNECTION = {0: "offline", 1: "connected (TCP)", 2: "connected (UDP)"}
@@ -39,10 +39,12 @@ def _emit(ctx, data) -> bool:
 
 def _default_session() -> str | None:
     """Label of the session sending a message (design §4.1): $TOXI_SESSION, else
-    the Claude Code project dir name. The CLI never guesses from the cwd."""
+    the session's name (see sessions.py) or Claude Code project dir name. The
+    CLI never guesses from the cwd."""
     s = os.environ.get("TOXI_SESSION")
     if not s and os.environ.get("CLAUDE_PROJECT_DIR"):
-        s = os.path.basename(os.path.normpath(os.environ["CLAUDE_PROJECT_DIR"]))
+        me = sessions.current()  # its unique name, so that a reply finds it
+        s = me["name"] if me else os.path.basename(os.path.normpath(os.environ["CLAUDE_PROJECT_DIR"]))
     return (s or "")[:64] or None
 
 
@@ -414,6 +416,7 @@ def _toxi_segment() -> str:
     try:
         st = client.request("get_status")
         msgs = client.request("get_messages", {"unread_only": True, "limit": 100})["messages"]
+        msgs, shared = peers.split(msgs, sessions.current())
     except client.DaemonNotRunning:
         return f"{_YELLOW}toxi: offline{_RESET}"
     except Exception:  # a status line must never crash the prompt with a traceback
@@ -422,6 +425,8 @@ def _toxi_segment() -> str:
     name = st.get("name", "").strip()
     prefix = f"toxi({name})" if name else "toxi"
     online = f"{st['contacts_online']}/{st['contacts_total']} online"
+    if shared:  # messages for no session in particular (design: session routing)
+        online = f"📥 {len(shared)} shared · {online}"
     if not msgs:
         return f"{prefix}: {_DIM}{online}{_RESET}"
 
@@ -479,20 +484,31 @@ def statusline(segment):
 
 @cli.command()
 @click.argument("alias", required=False)
+@click.option("--all", "show_all", is_flag=True,
+              help="In an agent session: also show the shared inbox.")
 @click.pass_context
-def unread(ctx, alias):
-    """Show unread messages (optionally just from one contact)."""
+def unread(ctx, alias, show_all):
+    """Show unread messages (optionally just from one contact).
+
+    In an agent session, shows only the messages for this session; the
+    messages of other sessions on this identity are never shown."""
     msgs = _call("get_messages", {"alias": alias, "unread_only": True, "limit": 100})["messages"]
+    mine, shared = peers.split(msgs, sessions.current())
+    keep = {id(m) for m in (mine + shared if show_all else mine)}
+    msgs = [m for m in msgs if id(m) in keep]
+    hidden = 0 if show_all else len(shared)
     # --json is a programmatic peek (e.g. the Claude Code hook); it must not mark read.
     if _emit(ctx, msgs):
         return
     if not msgs:
         click.echo("No unread messages.")
-        return
-    click.echo(f"[{len(msgs)} unread]")
-    for m in reversed(msgs):  # oldest first
-        click.echo(f"  {_sender(m)} ({_ago(m['created_at'])}): {_content(m)}")
-    _call("mark_read", {"msg_uuids": [m["msg_uuid"] for m in msgs]})
+    else:
+        click.echo(f"[{len(msgs)} unread]")
+        for m in reversed(msgs):  # oldest first
+            click.echo(f"  {_sender(m)} ({_ago(m['created_at'])}): {_content(m)}")
+        _call("mark_read", {"msg_uuids": [m["msg_uuid"] for m in msgs]})
+    if hidden:
+        click.echo(f"{hidden} more in the shared inbox: `toxi unread --all` shows them.")
 
 
 @cli.command()

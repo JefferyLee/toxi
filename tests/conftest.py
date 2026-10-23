@@ -34,3 +34,11 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_dht)
         elif "toxcore" in item.keywords and not run_toxcore:
             item.add_marker(skip_toxcore)
+
+
+@pytest.fixture(autouse=True)
+def _own_sessions_dir(tmp_path_factory, monkeypatch):
+    """Keep the session registry of every test out of the real TOXI_HOME."""
+    from toxi import sessions
+    d = tmp_path_factory.mktemp("sessions")
+    monkeypatch.setattr(sessions, "_dir", lambda: d)

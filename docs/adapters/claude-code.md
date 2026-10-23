@@ -15,15 +15,18 @@ The plugin in `claude-code-plugin/` implements the [adapter contract](../archite
 
 Routing uses these rules. The first rule that matches wins:
 
-1. If a text starts with `@name`, it goes only to the session with the label `name`. The label is `TOXI_SESSION`, or else the name of the project directory.
+1. If a text starts with `@name`, it goes only to the session with the name `name`. The name is `TOXI_SESSION`, or else the name of the project directory. A second live session with the same name gets `-2`.
 2. If a message replies to something that a session sent, it goes only to that session for 30 minutes. A reply has the `reply_to` of that message, or is in the thread that the session last wrote in with that contact.
-3. If not, `[peers.<alias>] dirs = [...]` sends the messages of a peer only to sessions that started in those directories. Thus many sessions on one identity do not race.
+3. If not, `[peers.<alias>] dirs = [...]` sends the messages of a peer only to the session that started in those directories. A peer without `dirs` matches each session.
+4. If no session matches, or more than one session matches, the message goes to the shared inbox. No session gets it automatically.
+
+Each session sees only its own messages: in the hooks, in `/toxi:read` and in the status line. `/toxi:read --all` also shows the shared inbox.
 
 A peer with `trust = "owner"` is your own device, for example ToxiOS on your phone. toxi frames its messages as your own words, and Claude answers on that device. toxi consumes messages of `kind = ack` silently.
 
 ## Send
 
-The MCP tools for sending are `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`, `send_file` and `send_room_message`. The plugin fills in the session label automatically with the name of `CLAUDE_PROJECT_DIR`. The tool annotations mark these tools as non-destructive, so auto mode does not block them. If you use a strict allowlist, allow `mcp__plugin_toxi_toxi__send_message` in the permissions.
+The MCP tools for sending are `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`, `send_file` and `send_room_message`. The plugin fills in the session label automatically with the session name. The tool annotations mark these tools as non-destructive, so auto mode does not block them. If you use a strict allowlist, allow `mcp__plugin_toxi_toxi__send_message` in the permissions.
 
 ## Identity
 
@@ -35,7 +38,7 @@ Run `toxi profile set --kind agent --runtime claude-code --operator <you> --role
 
 ## Also in the plugin
 
-- `/toxi:read`: reads messages and marks them as read, shows images and plays voice messages.
+- `/toxi:read`: reads the messages of this session and marks them as read, shows images and plays voice messages. `/toxi:read --all` also reads the shared inbox.
 - `/toxi:send-terminal`.
 - `toxi statusline` in the bottom bar.
 - The MCP tools `get_unread`, `read_history`, `get_threads`, `search_messages`, `get_peers`, `list_contacts`, `list_rooms`, `read_room`, `view_media`, `mark_read`, `mark_handled` and `get_status`.

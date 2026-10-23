@@ -15,15 +15,18 @@
 
 路由使用以下规则。取第一条命中的规则：
 
-1. 文本以 `@name` 开头时，只到达标签为 `name` 的会话。标签是 `TOXI_SESSION`，否则是项目目录名。
+1. 文本以 `@name` 开头时，只到达名为 `name` 的会话。名字是 `TOXI_SESSION`，否则是项目目录名。同名的第二个在运行的会话得到 `-2`。
 2. 消息回复某个会话发出的内容时，30 分钟内只到达那个会话。回复是指 `reply_to` 指向那条消息，或者处在该会话最近与该联系人对话的线程里。
-3. 否则，`[peers.<alias>] dirs = [...]` 让一个 peer 的消息只到达在那些目录启动的会话。这样同一身份上的多个会话不会互相争抢。
+3. 否则，`[peers.<alias>] dirs = [...]` 让一个 peer 的消息只到达在那些目录启动的那个会话。没有 `dirs` 的 peer 匹配每个会话。
+4. 如果没有会话匹配，或有多于一个会话匹配，消息进入公共收件箱。没有会话会自动拿到它。
+
+每个会话只看到自己的消息：hook、`/toxi:read` 和状态栏里都是。`/toxi:read --all` 同时显示公共收件箱。
 
 `trust = "owner"` 的 peer 是你自己的设备，例如手机上的 ToxiOS。toxi 把它的消息当作你本人的话加措辞，Claude 在那台设备上回答。toxi 静默消费 `kind = ack` 的消息。
 
 ## 发送
 
-用于发送的 MCP 工具是 `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`、`send_file` 和 `send_room_message`。插件自动用 `CLAUDE_PROJECT_DIR` 的名字填充会话标签。工具注解把这些工具标为非破坏性，所以 auto 模式不会拦下它们。如果你用严格白名单，在权限里放行 `mcp__plugin_toxi_toxi__send_message`。
+用于发送的 MCP 工具是 `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`、`send_file` 和 `send_room_message`。插件自动用会话名填充会话标签。工具注解把这些工具标为非破坏性，所以 auto 模式不会拦下它们。如果你用严格白名单，在权限里放行 `mcp__plugin_toxi_toxi__send_message`。
 
 ## 身份
 
@@ -35,7 +38,7 @@
 
 ## 插件里还有
 
-- `/toxi:read`：读取消息并标为已读，显示图片，播放语音消息。
+- `/toxi:read`：读取本会话的消息并标为已读，显示图片，播放语音消息。`/toxi:read --all` 同时读取公共收件箱。
 - `/toxi:send-terminal`。
 - 底部栏里的 `toxi statusline`。
 - MCP 工具 `get_unread`、`read_history`、`get_threads`、`search_messages`、`get_peers`、`list_contacts`、`list_rooms`、`read_room`、`view_media`、`mark_read`、`mark_handled` 和 `get_status`。

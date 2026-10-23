@@ -195,9 +195,12 @@ A periodic sweep sends un-acked `sent` texts again after `ack_timeout`. The swee
 
 A node routes replies locally. This is node behaviour, not wire format. The node applies these rules in this order:
 
-1. If a text starts with `@name`, the node delivers it only to the session with the label `name`. The label is `TOXI_SESSION`. If `TOXI_SESSION` is not set, the label is the name of the project directory. The match is case-insensitive.
+1. If a text starts with `@name`, the node delivers it only to the session with the name `name`. The name is `TOXI_SESSION`, or else the name of the project directory. If another live session has that name, the node adds `-2`, `-3` and so on. The match is case-insensitive.
 2. Otherwise, the node uses its record of which of its own sessions sent each message. This record never goes on the wire. The node delivers an incoming `reply_to` to that session, or to the session that wrote last in the same thread with that contact. This link is valid for 30 minutes from the `created_at` of the incoming message.
 3. After 30 minutes, or if no such link exists, the node applies the configured binding of the peer.
+4. If no live session matches, or more than one session matches, the message stays in the shared inbox. No session gets it automatically.
+
+The `from_session` of an outgoing message is the name of the sending session. A peer that wants to address that session can start its text with `@` and that name.
 
 ## 6. Limits and abuse resistance
 

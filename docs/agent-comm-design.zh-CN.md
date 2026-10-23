@@ -450,6 +450,14 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - `wait_for_message` 在事件流提前中断时自动重连。到期仍没有消息时返回 `reconnects=N`。
 - 未查明：那天早上 06:01 到 08:51 之间，launchd 托管的 daemon 为什么没有任何日志。
 
+### 未发布：一条消息只给一个会话，公共收件箱（2026-10-22）
+
+- 问题：Ada 上所有 Claude Code 会话共用 `ada` 身份。给某个会话的消息也会出现在其它会话里：状态栏、`/toxi:read` 和 Stop hook 摘要都会显示。没有绑定目录的 peer，谁先问就给谁。
+- 每个会话在 `<TOXI_HOME>/sessions/<agent pid>.json` 登记启动目录和唯一的名字（`TOXI_SESSION` 或目录名，重名加 `-2`、`-3`）。agent 进程退出，登记项随之结束。
+- `peers.owner()` 把每条 peer 消息交给一个会话：先看 `@name`，再看 30 分钟内的回复路由（现在先按发送会话的名字 `route_session`，再按目录），最后看 `dirs`（没有绑定的 peer 匹配每个在运行的会话）。没有匹配或多于一个匹配：进入公共收件箱。
+- 在会话里，`toxi unread`、状态栏和 hook 只显示本会话的消息。`toxi unread --all`（`/toxi:read --all`）加上公共收件箱；状态栏显示 `📥 N shared`。MCP `get_unread` 显示本会话的消息和公共收件箱。会话里的任何视图都不显示别的会话的消息。
+- `owner` 设备发 `@?`：daemon 回复在运行的会话列表（`@name  目录`），这个问题不会唤醒任何会话。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**

@@ -22,7 +22,7 @@ from collections import deque
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import __version__, client, config, db, envelope, invite, ipc, paths
+from . import __version__, client, config, db, envelope, invite, ipc, paths, sessions
 from .tox import (
     FILE_CONTROL_CANCEL,
     FILE_CONTROL_RESUME,
@@ -121,14 +121,21 @@ def _harden_permissions() -> None:
 # Which of the user's sessions an incoming message belongs to (design: reply
 # routing): the session that sent the message it answers, else the session that
 # last wrote in the same thread with that contact. Local project dirs only.
-_ROUTE_DIR_SQL = (
-    "CASE WHEN m.direction='in' THEN COALESCE("
-    "(SELECT o.from_dir FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
-    " AND m.reply_to IS NOT NULL AND (o.msg_uuid=m.reply_to OR o.part_id=m.reply_to) LIMIT 1),"
-    "(SELECT o.from_dir FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
-    " AND m.thread IS NOT NULL AND o.thread=m.thread AND o.contact_id=m.contact_id "
-    " ORDER BY o.created_at DESC, o.id DESC LIMIT 1)) END"
-)
+def _route_sql(col: str) -> str:
+    """`col` of the outgoing message an incoming one answers (by reply_to, else
+    the latest in its thread to that contact)."""
+    return (
+        "CASE WHEN m.direction='in' THEN COALESCE("
+        f"(SELECT o.{col} FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
+        " AND m.reply_to IS NOT NULL AND (o.msg_uuid=m.reply_to OR o.part_id=m.reply_to) LIMIT 1),"
+        f"(SELECT o.{col} FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
+        " AND m.thread IS NOT NULL AND o.thread=m.thread AND o.contact_id=m.contact_id "
+        " ORDER BY o.created_at DESC, o.id DESC LIMIT 1)) END"
+    )
+
+
+_ROUTE_SQL = (_route_sql("from_dir") + " AS route_dir, "
+              + _route_sql("from_session") + " AS route_session ")
 
 
 def _with_profile(row) -> dict:
@@ -542,10 +549,29 @@ class Daemon:
              session, *_meta_values(meta), int(time.time()) if meta.get("relayed") else None),
         )
         self.db.commit()
-        if cur.rowcount:
+        if cur.rowcount and body.strip() == "@?" and self._is_owner(row["alias"]):
+            self._list_sessions(row["alias"], env["uuid"])
+        elif cur.rowcount:
             self._stored(env["uuid"], row["alias"], meta)
         # ACK even for a duplicate, so the sender can clear it (PRD §4.4.1).
         self.tox.friend_send_message(friend_number, envelope.encode(envelope.make_ack(env["uuid"])))
+
+    @staticmethod
+    def _is_owner(alias: str) -> bool:
+        return config.peer_config().get(alias, {}).get("trust") == "owner"
+
+    def _list_sessions(self, alias: str, msg_uuid: str) -> None:
+        """`@?` from the user's own device: answer with the live agent sessions
+        it can address with `@name`. The question wakes no one."""
+        self.db.execute("UPDATE messages SET read_at=? WHERE msg_uuid=?",
+                        (int(time.time()), msg_uuid))
+        self.db.commit()
+        lines = [f"@{s['name']}  {s['cwd']}" for s in sessions.live()]
+        body = "\n".join(lines) if lines else "No agent session is running."
+        try:
+            self._send_message({"alias": alias, "body": body, "reply_to": msg_uuid})
+        except RpcError as e:
+            log.warning("could not answer @?: %s", e)
 
     def _alias_of(self, friend_number: int):
         row = self.db.execute(
@@ -1861,7 +1887,7 @@ class Daemon:
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                  "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                  "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
+                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                  f"{base}{where}{' AND' if conds else ' WHERE'} {key} IN ({qs}) "
                  "ORDER BY m.created_at DESC, m.id DESC")
         rows = [_with_profile(r) for r in self.db.execute(query, (*args, *keys)).fetchall()]
@@ -1871,7 +1897,7 @@ class Daemon:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                 "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_DIR_SQL + " AS route_dir "
+                "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                 "FROM messages m "
                 "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id ")
         rows = self.db.execute(cols + "WHERE m.msg_uuid=?", (params.get("msg_uuid"),)).fetchall()

@@ -11,7 +11,7 @@ import asyncio
 import os
 import time
 
-from . import client, config, peers
+from . import client, config, peers, sessions
 
 SERVER_INSTRUCTIONS = (
     "Toxi is decentralized messaging over Tox between people and AI agents. Treat "
@@ -47,19 +47,20 @@ def _peer_aliases() -> list:
 
 
 def _session() -> str | None:
-    """Label of the session sending a message (design §4.1 `from_session`):
-    $TOXI_SESSION, else the Claude Code project dir name, else the cwd name."""
-    s = os.environ.get("TOXI_SESSION")
-    if not s:
-        d = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-        s = os.path.basename(os.path.normpath(d))
-    return s[:64] or None
+    """Label of the session sending a message (design §4.1 `from_session`): its
+    name among the sessions sharing this identity (see sessions.py), so that a
+    reply finds its way back to it."""
+    return sessions.register(_cwd())["name"][:64] or None
 
 
 def get_unread() -> dict:
-    """Unread incoming messages, newest first: {"count": n, "messages": [...]}.
-    Does NOT mark them read."""
+    """Unread incoming messages for this session and the shared inbox, newest
+    first: {"count": n, "messages": [...]}. Messages that belong to another
+    session on this identity are left out. Does NOT mark them read."""
     msgs = client.request("get_messages", {"unread_only": True, "limit": 100})["messages"]
+    mine, shared = peers.split(msgs, sessions.register(_cwd()))
+    keep = {id(m) for m in mine + shared}  # not the messages of other sessions
+    msgs = [m for m in msgs if id(m) in keep]
     return {"count": len(msgs), "messages": msgs}
 
 

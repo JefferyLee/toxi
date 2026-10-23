@@ -11,12 +11,11 @@ Stop hook or the wait_for_message MCP tool) and marked read on delivery, so the
 same message is never injected twice. The wording that frames them depends on
 the peer's trust level and is defined here, once, for every adapter.
 """
-import os
 import re
 import time
 from pathlib import Path
 
-from . import client, config
+from . import client, config, sessions
 
 ROUTE_TTL = 1800  # seconds a reply stays pinned to the session that asked
 
@@ -50,8 +49,8 @@ GUIDES = {
 }
 GUIDE = GUIDES["collaborator"]
 
-# `@name` at the start of a message addresses one session: the one whose
-# label (TOXI_SESSION, else its project dir name) is `name`, case-insensitive.
+# `@name` at the start of a message addresses one session: the live session
+# whose name (see sessions.py) is `name`, case-insensitive.
 _TARGET = re.compile(r"\s*@([\w.-]+)")
 
 
@@ -63,47 +62,72 @@ def target(m: dict) -> str | None:
     return hit.group(1).lower() if hit else None
 
 
-def session_names(cwd: str) -> set:
-    names = {os.path.basename(os.path.normpath(cwd)).lower()}
-    if os.environ.get("TOXI_SESSION"):
-        names.add(os.environ["TOXI_SESSION"].lower())
-    return names
-
-
 def _same_dir(a: str, b: str) -> bool:
     return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
 
 
-def routed_to(m: dict, cwd: str | None, spec: dict | None) -> bool:
-    """Does an incoming peer message belong to the session started in `cwd`?
+def owner(m: dict, spec: dict | None, live: list) -> str | None:
+    """Name of the one session an incoming peer message belongs to, or None for
+    the shared inbox.
 
-    A message that starts with `@name` goes only to the session labelled `name`.
-    A fresh reply (the message answers something a session sent, or continues a
-    thread that session wrote in) goes to that session only, wherever the peer
-    is bound. Otherwise the peer's `dirs` binding decides; an unbound peer goes
-    anywhere. `cwd=None` (no session context) takes everything.
+    1. `@name` at the start: that session, also when it is not running yet.
+    2. A fresh reply (it answers something a session sent, or continues a thread
+       that session wrote in): that session, by its name, else the one live
+       session in the dir it sent from.
+    3. Otherwise the peer's `dirs` decide: the one live session started in one
+       of them; for an unbound peer, the one live session.
+    No candidate, or two or more, means the shared inbox.
     """
-    if cwd is None:
-        return True
     name = target(m)
     if name:
-        return name in session_names(cwd)
+        return name
     route = m.get("route_dir")
     if route and time.time() - (m.get("created_at") or 0) < ROUTE_TTL:
-        return _same_dir(cwd, route)
-    dirs = (spec or {}).get("dirs") or []
-    return not dirs or any(_same_dir(cwd, d) for d in dirs)
+        by_name = (m.get("route_session") or "").lower()
+        if any(s["name"].lower() == by_name for s in live):
+            return by_name
+        cands = [s for s in live if _same_dir(s["cwd"], route)]
+    else:
+        dirs = (spec or {}).get("dirs") or []
+        cands = [s for s in live if not dirs or any(_same_dir(s["cwd"], d) for d in dirs)]
+    return cands[0]["name"].lower() if len(cands) == 1 else None
+
+
+def routed_to(m: dict, cwd: str | None, spec: dict | None) -> bool:
+    """Does an incoming peer message belong to the session started in `cwd`?
+    `cwd=None` (no session context, e.g. a headless agent) takes everything."""
+    if cwd is None:
+        return True
+    me = sessions.register(cwd)
+    return owner(m, spec, sessions.live()) == me["name"].lower()
+
+
+def split(msgs: list, me: dict | None) -> tuple:
+    """(this session's, shared inbox) of unread messages; messages that belong
+    to another live session are in neither. Without a session: (all, [])."""
+    if me is None:
+        return msgs, []
+    cfg, live = config.peer_config(), sessions.live()
+    names = {s["name"].lower() for s in live}
+    mine, shared = [], []
+    for m in msgs:
+        o = owner(m, cfg[m["alias"]], live) if m["alias"] in cfg else None
+        if o == me["name"].lower():
+            mine.append(m)
+        elif o not in names:
+            shared.append(m)
+    return mine, shared
 
 
 def take(alias: str | None = None, cwd: str | None = None, thread: str | None = None) -> list:
     """Unread messages from peers (or from `alias`), oldest first; marks them read.
 
-    With `cwd` (the dir a Stop hook's session was started in), a peer bound to
-    dirs in its config is only delivered when `cwd` is exactly one of them, so
-    several sessions sharing one identity (including ones started in its
-    subdirs) don't race for its messages. `thread` limits delivery to one
-    thread. Each message gets a `trust` key. Messages of kind `ack` are marked
-    read but not delivered: an acknowledgement never wakes an agent.
+    With `cwd` (the dir the session was started in), only the messages that
+    belong to this session (see `owner`) are delivered, so several sessions
+    sharing one identity never get each other's messages. `thread` limits
+    delivery to one thread. Each message gets a `trust` key. Messages of kind
+    `ack` are marked read but not delivered: an acknowledgement never wakes an
+    agent.
     """
     cfg = config.peer_config()
     if not alias and not cfg:
@@ -114,9 +138,12 @@ def take(alias: str | None = None, cwd: str | None = None, thread: str | None = 
     msgs = client.request("get_messages", params)["messages"]
     if alias:
         msgs = [m for m in reversed(msgs) if m["alias"] == alias]
+    elif cwd is None:
+        msgs = [m for m in reversed(msgs) if m["alias"] in cfg]
     else:
+        me, live = sessions.register(cwd), sessions.live()
         msgs = [m for m in reversed(msgs)
-                if m["alias"] in cfg and routed_to(m, cwd, cfg[m["alias"]])]
+                if m["alias"] in cfg and owner(m, cfg[m["alias"]], live) == me["name"].lower()]
     for m in msgs:
         m["trust"] = cfg.get(m["alias"], {}).get("trust", "observer")
     if msgs:

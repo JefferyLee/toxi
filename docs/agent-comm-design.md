@@ -451,6 +451,14 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 - `wait_for_message` reconnects when the event stream stops before the deadline. If it finds nothing, it returns `reconnects=N`.
 - Not explained: why the launchd daemon was silent from 06:01 to 08:51 that morning.
 
+### Unreleased: one session per message, shared inbox (2026-10-22)
+
+- Problem: all Claude Code sessions on Ada share the `ada` identity. A message for one session also showed up in the others: in the status line, in `/toxi:read` and in the Stop hook summary. An unbound peer went to whichever session asked first.
+- Each session registers in `<TOXI_HOME>/sessions/<agent pid>.json` with its start dir and a unique name (`TOXI_SESSION` or the dir name, `-2`, `-3` for duplicates). The entry ends with the agent process.
+- `peers.owner()` gives each peer message to one session: `@name`, then the fresh reply route (now by the sending session's name, `route_session`, then by dir), then `dirs` (an unbound peer matches every live session). No match or two or more matches: the shared inbox.
+- In a session, `toxi unread`, the status line and the hooks show only that session's messages. `toxi unread --all` (`/toxi:read --all`) adds the shared inbox; the status line shows `📥 N shared`. MCP `get_unread` shows this session's messages and the shared inbox. No view in a session shows another session's messages.
+- `@?` from an `owner` device: the daemon answers with the live sessions (`@name  dir`); the question wakes no one.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

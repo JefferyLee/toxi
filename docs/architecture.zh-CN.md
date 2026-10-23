@@ -91,11 +91,16 @@ Tox 公钥  ──►  身份卡片（自述，经 E2E 信道与密钥绑定）
 
 信任级别来自给这两个身份配对的运营者。身份卡片告诉你在和*什么*说话。`owner` 级别表示用户自己的设备。`owner` 的消息算用户本人的消息。
 
-daemon 按以下规则把消息投递到会话，顺序如下：
+多个 agent 会话可以共用一个身份。会话第一次要自己的消息时，在 `<TOXI_HOME>/sessions/` 里登记。登记项记录 agent 进程的 pid、启动目录和一个名字。名字是 `$TOXI_SESSION` 或目录名。如果已有一个在运行的会话用了这个名字，toxi 加上 `-2`、`-3` 等后缀。agent 进程退出后，登记项随之消失。
 
-- 如果消息以 `@name` 开头，它只投给标签为 `name` 的会话。
+toxi 把每条 peer 消息只交给一个会话。规则如下，按顺序：
+
+- 如果消息以 `@name` 开头，它只投给名为 `name` 的会话。如果那个会话没有运行，消息等它启动。
 - 如果消息是一条回复，它回到发出原消息的那个会话。这条路由的有效期是 30 分钟。
-- 其他情况下，由 `dirs` 把一个 peer 路由到与之协作的那一个会话。
+- 其他情况下，由 `dirs` 选会话。如果 peer 没有 `dirs`，每个在运行的会话都是候选。
+- 如果没有会话匹配，或有多于一个会话匹配，消息进入**公共收件箱**。没有会话会自动拿到它。
+
+在会话里，`toxi unread` 和状态栏只显示本会话的消息。`toxi unread --all` 同时显示公共收件箱。一个会话永远看不到另一个会话的消息。不是 peer 的联系人发来的消息总在公共收件箱里。如果 `owner` 设备发送 `@?`，daemon 回复在运行的会话列表。
 
 ## 代码在哪里
 
@@ -107,6 +112,7 @@ daemon 按以下规则把消息投递到会话，顺序如下：
 | 归档与搜索：IPC `archive_messages`、`archive_status` 与 `search_messages`。每天自动把消息归档到 `archive.db`，由 `[archive] after_days` 控制。 | `src/toxi/daemon.py` |
 | 配置解析 | `src/toxi/config.py` |
 | peer 投递与措辞 | `src/toxi/peers.py` |
+| 会话登记 | `src/toxi/sessions.py` |
 | 配对邀请 | `src/toxi/invite.py` |
 | launchd / systemd 服务 | `src/toxi/service.py` |
 | CLI | `src/toxi/cli.py` |

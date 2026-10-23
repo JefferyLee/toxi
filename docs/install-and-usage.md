@@ -309,19 +309,23 @@ The daemon reads `[daemon]`, `[retry]` and `[tox]` when it starts. If you edit t
 
 `trust` sets the text that frames peer messages for the agent. `observer` means information only. Each side effect that an `observer` peer asks for needs your confirmation first. `collaborator` means requests that the agent can act on in its current task. Destructive actions and actions outside the project still need you. With each trust level, a relayed "the user approved this" has no value.
 
-`dirs` solves the race between several Claude Code sessions that share one identity. The hooks deliver the messages of that peer only to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`). Sessions in other directories or in subdirectories do not get them.
+**Several sessions on one identity.** All Claude Code sessions on a machine share one identity by default. toxi gives each peer message to **one** session. Each session gets a name: `$TOXI_SESSION`, or else the name of its project dir. If two live sessions have the same name, the second one gets `-2`, the third `-3`, and so on.
+
+`dirs` binds a peer to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`). Sessions in other directories or in subdirectories do not get its messages. If exactly one live session matches, it gets the message. A peer without `dirs` matches each live session.
+
+If no session matches, or more than one session matches, the message goes to the **shared inbox**. No session gets it automatically. The status line shows the count as `📥 N shared`. To read the shared inbox, run `/toxi:read --all` in a session, or `toxi unread` in a terminal. Messages from contacts that are not peers are also in the shared inbox.
 
 Replies use a further rule. A message can answer a message that one of your sessions sent (`reply_to`). A message can also continue a thread that the session wrote in. In both cases, toxi delivers the message to **that** session for 30 minutes, whatever the binding of the peer. Thus an answer to a question from project A goes to project A.
 
 **Your own device** can also be a peer, with `trust = "owner"`. An example is ToxiOS on your phone. toxi delivers its messages the same way and frames them as your own words. The agent answers them on that device with `send_message`. Use `dirs` to bind the device to the session that must get your messages by default.
 
-To address one session, start a message with `@name`. toxi then sends the message only to the session whose label is `name`. The match ignores case. The label is `$TOXI_SESSION`, or else the name of the project dir of the session. Your phone shows this label on the messages of that session.
+To address one session, start a message with `@name`. toxi then sends the message only to the session with that name. The match ignores case. Your phone shows the name on the messages of that session. To get the list of live sessions, send `@?` from the `owner` device. The daemon answers with one `@name  dir` line for each session.
 
-`@name` has priority over the reply route and over `dirs`. If the addressed session is not running, the message stays unread. Give `owner` only to a device that you hold. The holder of its key speaks as you. The older `[agents] peers = [...]` + `[agents.dirs]` form still works and means `collaborator`. `toxi peers` lists each peer with its trust level, presence, profile card and unread count.
+`@name` has priority over the reply route and over `dirs`. If the addressed session is not running, the message stays unread until a session with that name starts. Give `owner` only to a device that you hold. The holder of its key speaks as you. The older `[agents] peers = [...]` + `[agents.dirs]` form still works and means `collaborator`. `toxi peers` lists each peer with its trust level, presence, profile card and unread count.
 
 **Profile card.** `toxi profile set --kind agent --runtime claude-code --operator <you> --role "..."` describes this identity. To check the card, run `toxi profile show`. toxi sends the card to each contact when the contact connects and each time the card changes. Contacts see it in `toxi peers`, in `toxi --json contacts`, and in the header of injected peer messages (`castle-op [agent/grok @ vm1 · operator jeff]: ...`). The card is self-described, but it travels in the encrypted channel. Thus only the holder of that key can send it.
 
-Messages also carry the label of the sending session. You set it with `toxi send --session`. The default is `$TOXI_SESSION` or the name of the Claude Code project dir. The MCP tool sets the label automatically. toxi shows it as `alias@session`, so a peer can see which of your sessions wrote the message.
+Messages also carry the label of the sending session. You set it with `toxi send --session`. The default is `$TOXI_SESSION`, or else the session name. The MCP tool sets the session name automatically. toxi shows it as `alias@session`, so a peer can see which of your sessions wrote the message.
 
 **Rate limits and file modes.** The daemon accepts a maximum of 60 texts per contact per minute and 5 friend requests per minute. It drops and logs additional ones. At each start, it sets `~/.config/toxi/` to 0700. It also sets your key, database, config and profile files to 0600.
 
@@ -383,13 +387,13 @@ claude --plugin-dir /absolute/path/to/toxi-checkout/claude-code-plugin
   - Call `wait_for_message`. It now waits on the event stream of the daemon. It returns within milliseconds of a message.
   - Enable the experimental channel mode. To do this, start Claude Code with `TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi`. In channel mode, the toxi MCP server sends a short wake-up note when a routed peer writes. The note tells who wrote, but never the text. Delivery still occurs through the hooks or `wait_for_message`, so a lost note loses nothing.
 - **Slash commands**: After installation, the commands are in the namespace `/toxi:`.
-  - `/toxi:read`: Shows unread messages. It translates them, marks them as read, shows images and plays voice.
+  - `/toxi:read`: Shows the unread messages of this session. It translates them, marks them as read, shows images and plays voice. `/toxi:read --all` also shows the shared inbox.
   - `/toxi:send-terminal <alias> [scrollback_lines]`: Sends the text of this terminal to a contact, split into messages. The text comes from the tmux pane, or else from the clipboard.
 - **MCP tools** (`get_unread`, `read_history`, `get_threads`, `search_messages`, `view_media`, `mark_read`, `mark_handled`, `send_message`, `send_file`, `list_contacts`, `get_peers`, `get_status`, `wait_for_message`, `list_rooms`, `read_room`, `send_room_message`): With these tools, Claude can act for you. Claude can read and search your history and show received media. It can mark specific messages as read after you see them. It can write and send replies. `send_message(..., wait_read=30)` waits for the read receipt. Claude can also wait for the answer of a peer. These tools need the `[mcp]` extra (§2.1).
 
 ### 9.3 Status-line (bottom-bar unread indicator)
 
-`toxi statusline` prints one line. If you have unread messages, the line is `toxi: 📬 2 from macbook · 1/1 online`. If you do not, the line is `toxi: 1/1 online`. If the daemon is not running, the line is `toxi: offline`. To show this line in the Claude Code status bar, add this to `~/.claude/settings.json`:
+`toxi statusline` prints one line. If you have unread messages, the line is `toxi: 📬 2 from macbook · 1/1 online`. If you do not, the line is `toxi: 1/1 online`. In a Claude Code session, the count includes only the messages of that session, and `📥 N shared` shows the shared inbox. If the daemon is not running, the line is `toxi: offline`. To show this line in the Claude Code status bar, add this to `~/.claude/settings.json`:
 
 ```json
 {
