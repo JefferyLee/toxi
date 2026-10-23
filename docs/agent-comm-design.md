@@ -463,6 +463,10 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 
 - Claude Code's Bash tool does not set `CLAUDE_PROJECT_DIR`. A `toxi send` that a session ran through Bash had no session dir and no session name, so the reply fell back to the peer's `dirs` binding and reached another session. The CLI now takes the session name and dir from the session registry first.
 
+### 0.6.6 Plugin updates keep old version folders (2026-10-23, v0.6.6)
+
+- `toxi reinstall-plugin` and `install.sh --for claude` deleted the previous plugin version folder. A running Claude Code session calls its hooks from that folder until `/reload-plugins`, so its hooks failed and it got no peer messages. A reply to that session waited 30 minutes, then the route expired and the peer's `dirs` binding gave it to another session. Old version folders now stay.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

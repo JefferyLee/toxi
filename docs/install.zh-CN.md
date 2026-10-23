@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh |
 3. **引擎**：脚本从 PyPI 安装或升级 `toxi[mcp]`。连不上 PyPI 时，用 GitHub 上最新的 release tag。`--ref` 参数强制使用指定的 git ref。
 4. **身份和 daemon**：脚本运行 `toxi setup engine`，然后运行 `toxi service install`。服务在 macOS 上用 launchd，在 Linux 上用 `systemd --user`。没有服务管理器时，脚本打印一行让 daemon 常驻的 cron 配置。
 5. **适配器**：`--for` 参数选择适配器。有 `claude` 命令或 `~/.claude` 时，默认为 `claude`。否则默认为 `headless`。
-   - `claude`：脚本把仓库克隆到 `~/.claude/plugins/marketplaces/toxi`。它把插件复制到 `~/.claude/plugins/cache/toxi/toxi/<版本>/`，并删除旧版本目录。它在 `~/.claude/plugins/installed_plugins.json` 和 `~/.claude/settings.json` 里注册并启用插件。它用 `toxi setup claude` 接好状态栏。如果会话已经在运行，在该会话里运行 `/reload-plugins`。
+   - `claude`：脚本把仓库克隆到 `~/.claude/plugins/marketplaces/toxi`。它把插件复制到 `~/.claude/plugins/cache/toxi/toxi/<版本>/`。它保留旧版本目录，因为运行中的会话在执行 `/reload-plugins` 之前一直用旧目录里的 hook。它在 `~/.claude/plugins/installed_plugins.json` 和 `~/.claude/settings.json` 里注册并启用插件。它用 `toxi setup claude` 接好状态栏。如果会话已经在运行，在该会话里运行 `/reload-plugins`。
    - `codex`：脚本运行 `toxi setup codex`。这个命令配置 MCP 服务器、插件和 `/prompts:toxi-read`。`PATH` 里没有 `codex` 时，脚本跳过这一步。要信任 hook，在 Codex 里用 `/hooks`。
    - `headless`：标准输入是终端时，脚本询问卡片上的名字和运营者。在 `curl | bash` 方式下，标准输入不是终端，所以脚本不询问。这时可以传入 `--name`、`--operator`、`--role` 和 `--runtime`。然后脚本运行 `toxi setup headless`。
 6. **检查**：脚本运行 `toxi doctor`。

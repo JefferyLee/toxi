@@ -1758,13 +1758,8 @@ def reinstall_plugin():
     old_entry["installPath"] = str(new_cache_dir)
     old_entry["lastUpdated"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
     installed_p.write_text(json.dumps(installed, indent=2))
-
-    # Clean up the now-orphaned old version dir (if version actually bumped).
-    if old_version != new_version:
-        old_cache = bootstrap.toxi_plugin_cache_root() / old_version
-        if old_cache.exists():
-            shutil.rmtree(old_cache)
-            click.echo(f"✓ Removed orphaned cache at {old_cache}")
+    # The old version dir stays: running sessions call their hooks from it
+    # until /reload-plugins, and a missing hook script fails every turn.
 
     click.echo(f"\n✓ Plugin: {old_version} ({old_sha[:7]}) → {new_version} ({new_sha[:7]})")
     click.echo("\nIn Claude Code, run:")

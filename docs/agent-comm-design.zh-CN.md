@@ -462,6 +462,10 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 
 - Claude Code 的 Bash 工具不设置 `CLAUDE_PROJECT_DIR`。会话通过 Bash 执行的 `toxi send` 没有会话目录和会话名，所以回复退回到 peer 的 `dirs` 绑定，落到了别的会话。现在 CLI 先从会话登记里取会话名和目录。
 
+### 0.6.6 插件更新保留旧版本目录（2026-10-23，v0.6.6）
+
+- `toxi reinstall-plugin` 和 `install.sh --for claude` 会删掉上一个插件版本目录。运行中的 Claude Code 会话在 `/reload-plugins` 之前一直从那个目录调用 hook，所以 hook 失败，收不到 peer 消息。给这个会话的回复等了 30 分钟，路由过期后按 peer 的 `dirs` 绑定交给了别的会话。现在旧版本目录保留。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**

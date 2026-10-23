@@ -121,7 +121,7 @@ if want claude; then
     VERSION="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "${PLUGIN_SRC}/.claude-plugin/plugin.json")"
     SHA="$(git -C "${MARKETPLACE_DIR}" rev-parse HEAD)"
     DEST="${CACHE_ROOT}/${VERSION}"; rm -rf "${DEST}"; mkdir -p "${DEST}"; cp -R "${PLUGIN_SRC}/." "${DEST}/"
-    for d in "${CACHE_ROOT}"/*/; do [ -d "$d" ] && [ "$(basename "$d")" != "${VERSION}" ] && rm -rf "$d"; done
+    # Older version dirs stay: running sessions call their hooks from them until /reload-plugins.
     python3 - "${VERSION}" "${SHA}" "${DEST}" "${MARKETPLACE_DIR}" "${REPO}" <<'PY'
 import json, os, sys, time
 version, sha, install_path, marketplace, repo = sys.argv[1:6]
