@@ -459,6 +459,10 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 - In a session, `toxi unread`, the status line and the hooks show only that session's messages. `toxi unread --all` (`/toxi:read --all`) adds the shared inbox; the status line shows `📥 N shared`. MCP `get_unread` shows this session's messages and the shared inbox. No view in a session shows another session's messages.
 - `@?` from an `owner` device: the daemon answers with the live sessions (`@name  dir`); the question wakes no one.
 
+### 0.6.5 CLI sends keep the reply route (2026-10-23, v0.6.5)
+
+- Claude Code's Bash tool does not set `CLAUDE_PROJECT_DIR`. A `toxi send` that a session ran through Bash had no session dir and no session name, so the reply fell back to the peer's `dirs` binding and reached another session. The CLI now takes the session name and dir from the session registry first.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

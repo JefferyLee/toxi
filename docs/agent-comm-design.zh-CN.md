@@ -458,6 +458,10 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - 在会话里，`toxi unread`、状态栏和 hook 只显示本会话的消息。`toxi unread --all`（`/toxi:read --all`）加上公共收件箱；状态栏显示 `📥 N shared`。MCP `get_unread` 显示本会话的消息和公共收件箱。会话里的任何视图都不显示别的会话的消息。
 - `owner` 设备发 `@?`：daemon 回复在运行的会话列表（`@name  目录`），这个问题不会唤醒任何会话。
 
+### 0.6.5 CLI 发送保留回复路由（2026-10-23，v0.6.5）
+
+- Claude Code 的 Bash 工具不设置 `CLAUDE_PROJECT_DIR`。会话通过 Bash 执行的 `toxi send` 没有会话目录和会话名，所以回复退回到 peer 的 `dirs` 绑定，落到了别的会话。现在 CLI 先从会话登记里取会话名和目录。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**

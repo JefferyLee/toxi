@@ -39,18 +39,23 @@ def _emit(ctx, data) -> bool:
 
 def _default_session() -> str | None:
     """Label of the session sending a message (design §4.1): $TOXI_SESSION, else
-    the session's name (see sessions.py) or Claude Code project dir name. The
-    CLI never guesses from the cwd."""
+    the name of the agent session that runs this command (see sessions.py), else
+    the Claude Code project dir name. The CLI never guesses from the cwd."""
     s = os.environ.get("TOXI_SESSION")
-    if not s and os.environ.get("CLAUDE_PROJECT_DIR"):
-        me = sessions.current()  # its unique name, so that a reply finds it
-        s = me["name"] if me else os.path.basename(os.path.normpath(os.environ["CLAUDE_PROJECT_DIR"]))
+    me = None if s else sessions.current()  # its unique name, so that a reply finds it
+    if me:
+        s = me["name"]
+    elif not s and os.environ.get("CLAUDE_PROJECT_DIR"):
+        s = os.path.basename(os.path.normpath(os.environ["CLAUDE_PROJECT_DIR"]))
     return (s or "")[:64] or None
 
 
 def _default_session_dir() -> str | None:
-    """The project dir of the session sending this, for reply routing (local only)."""
-    return os.environ.get("CLAUDE_PROJECT_DIR") or None
+    """The project dir of the session sending this, for reply routing (local only).
+    Claude Code's Bash tool does not set CLAUDE_PROJECT_DIR, so the registered
+    session's dir comes first."""
+    me = sessions.current()
+    return (me or {}).get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or None
 
 
 def _sender(m: dict) -> str:

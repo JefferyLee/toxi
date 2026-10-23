@@ -115,3 +115,15 @@ def test_at_question_mark_from_the_owner_lists_sessions(tmp_path, monkeypatch):
     (tmp_path / "config.toml").write_text('[peers.codex]\ntrust = "collaborator"\n')
     _incoming(d, "@?")
     assert woke  # only the owner's device gets the list
+
+
+def test_cli_send_from_a_session_shell_carries_its_name_and_dir(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)  # Claude Code's Bash tool
+    sessions.register("/w/toxi", pid=101)
+    sessions.register("/w/toxi", pid=102)
+    _as(monkeypatch, 102)
+    from toxi import cli as cli_mod
+    assert (cli_mod._default_session(), cli_mod._default_session_dir()) == ("toxi-2", "/w/toxi")
+    _as(monkeypatch, 999)  # a plain terminal: no session
+    assert (cli_mod._default_session(), cli_mod._default_session_dir()) == (None, None)
