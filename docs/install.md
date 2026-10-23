@@ -50,7 +50,7 @@ less install.sh && bash install.sh --for codex
 | flag | effect |
 |---|---|
 | `--for claude` / `codex` / `headless` / `all` | Selects the adapter or adapters to set up. |
-| `--ref v0.6.2` | Installs the engine from a git ref. Without this flag, the script uses PyPI if the package is published there. If not, it uses the latest GitHub release tag. |
+| `--ref v0.6.3` | Installs the engine from a git ref. Without this flag, the script uses PyPI if the package is published there. If not, it uses the latest GitHub release tag. |
 | `--name`, `--operator`, `--role`, `--runtime` | Set the card of the headless identity. Without these flags, the script asks for the values interactively. |
 
 ## Platforms

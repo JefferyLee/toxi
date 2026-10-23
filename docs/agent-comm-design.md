@@ -444,6 +444,13 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 
 ---
 
+### 0.6.3 One daemon per identity (2026-10-22, v0.6.3)
+
+- Incident: from 10-17 08:51 to 10-22 15:01, Ada ran two daemons on the `ada` identity. The launchd daemon did not answer the 5-second socket probe in time, so a second daemon started and took the socket. Both daemons used the same Tox key. Contacts saw Ada come and go, messages arrived 7 to 12 minutes late, and DHT status changed 50 to 100 times a day.
+- Fix: the daemon holds an exclusive lock on `<TOXI_HOME>/daemon.lock` for its whole life. A second daemon exits. `toxi daemon start`, `setup` and `upgrade` do not start a daemon while the lock is held. `toxi doctor` reports a lock holder that does not answer.
+- `wait_for_message` reconnects when the event stream stops before the deadline. If it finds nothing, it returns `reconnects=N`.
+- Not explained: why the launchd daemon was silent from 06:01 to 08:51 that morning.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

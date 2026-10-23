@@ -443,6 +443,13 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 
 ---
 
+### 0.6.3 一个身份只跑一个 daemon（2026-10-22，v0.6.3）
+
+- 事故：10-17 08:51 到 10-22 15:01，Ada 上 `ada` 身份同时跑着两个 daemon。launchd 托管的 daemon 没能在 5 秒内回应命令通道的探测，于是又启动了第二个，并接管了命令通道。两个 daemon 用同一把 Tox 密钥。联系人看到 Ada 时在线时离线，消息晚 7 到 12 分钟才到，DHT 状态每天变化 50 到 100 次。
+- 修复：daemon 在整个运行期间对 `<TOXI_HOME>/daemon.lock` 持有排他锁，第二个 daemon 会退出。锁被占用时，`toxi daemon start`、`setup` 和 `upgrade` 不会启动新的 daemon。`toxi doctor` 会报告占着锁却不回应的 daemon。
+- `wait_for_message` 在事件流提前中断时自动重连。到期仍没有消息时返回 `reconnects=N`。
+- 未查明：那天早上 06:01 到 08:51 之间，launchd 托管的 daemon 为什么没有任何日志。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**

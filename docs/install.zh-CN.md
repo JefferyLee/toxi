@@ -50,7 +50,7 @@ less install.sh && bash install.sh --for codex
 | 参数 | 效果 |
 |---|---|
 | `--for claude` / `codex` / `headless` / `all` | 选择要接入的一个或多个适配器。 |
-| `--ref v0.6.2` | 从指定 git ref 安装引擎。不带这个参数时，PyPI 上有包就用 PyPI。否则用 GitHub 上最新的 release tag。 |
+| `--ref v0.6.3` | 从指定 git ref 安装引擎。不带这个参数时，PyPI 上有包就用 PyPI。否则用 GitHub 上最新的 release tag。 |
 | `--name`、`--operator`、`--role`、`--runtime` | 设置 headless 身份的卡片。不带这些参数时，脚本交互式询问。 |
 
 ## 平台
