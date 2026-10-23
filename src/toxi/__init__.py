@@ -1,3 +1,3 @@
 """toxi: decentralized messaging for AI coding agents, over Tox."""
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
