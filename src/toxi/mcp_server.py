@@ -237,19 +237,36 @@ async def wait_for_message(alias: str | None = None, timeout: int = 60,
     if time.monotonic() >= deadline:
         return {"messages": [], "timed_out": True}
     aliases = [alias] if alias else _peer_aliases()
-    try:
-        async for ev in client.asubscribe(aliases or None, deadline=deadline):
-            if ev.get("event") == "message.new" and ev["data"].get("direction") == "in":
-                msgs = take()
-                if msgs:
-                    return _delivered(msgs)
-    except client.DaemonError as e:
-        if e.code != "METHOD_NOT_FOUND":
-            raise
-        return await _poll_for_message(take, deadline)  # daemon too old to stream
-    except client.DaemonNotRunning:
-        return await _poll_for_message(take, deadline)  # take() reports the real state
-    return {"messages": [], "timed_out": True}
+    reconnects = 0
+    while True:
+        try:
+            async for ev in client.asubscribe(aliases or None, deadline=deadline):
+                if ev.get("event") == "message.new" and ev["data"].get("direction") == "in":
+                    msgs = take()
+                    if msgs:
+                        return _delivered(msgs)
+        except client.DaemonError as e:
+            if e.code != "METHOD_NOT_FOUND":
+                raise
+            return await _poll_for_message(take, deadline)  # daemon too old to stream
+        except client.DaemonNotRunning:
+            pass  # restarting, or gone: retry until the deadline
+        if time.monotonic() >= deadline:
+            break
+        # The stream ended early: the daemon restarted or dropped us. Wait for
+        # it, catch up on anything that arrived meanwhile, and listen again.
+        reconnects += 1
+        await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        try:
+            msgs = take()
+        except client.DaemonNotRunning:
+            continue
+        if msgs:
+            return _delivered(msgs)
+    res = {"messages": [], "timed_out": True}
+    if reconnects:
+        res["reconnects"] = reconnects  # the daemon restarted while we waited
+    return res
 
 
 async def _poll_for_message(take, deadline: float) -> dict:

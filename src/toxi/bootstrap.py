@@ -205,6 +205,22 @@ def identity_initialized() -> bool:
     return paths.tox_state_path().exists()
 
 
+def daemon_locked() -> bool:
+    """True when a daemon process holds this identity's lock, even if it is
+    too busy to answer. Starting another daemon then would duplicate the key."""
+    import fcntl
+    p = paths.lock_path()
+    if not p.exists():
+        return False
+    with open(p, "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+
+
 def daemon_running() -> bool:
     try:
         client.request("get_status")

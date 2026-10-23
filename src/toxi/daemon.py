@@ -2155,7 +2155,30 @@ def _setup_logging() -> None:
     log.setLevel(getattr(logging, config.daemon_log_level().upper(), logging.INFO))
 
 
+def hold_instance_lock(attempts: int = 30):
+    """Take this identity's daemon lock and keep it for the life of the process.
+
+    Two daemons on one identity run the same Tox key twice: they knock each
+    other offline, and both write the same database. The socket probe alone
+    cannot prevent that, because a busy daemon can miss its 5 s answer. The
+    lock is held by the kernel, so a busy or hung daemon still owns it. A few
+    retries cover a client that probes the lock at the same moment.
+    """
+    import fcntl
+    paths.ensure_config_dir()
+    f = open(paths.lock_path(), "a")
+    for _ in range(attempts):
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except BlockingIOError:
+            time.sleep(0.1)
+    f.close()
+    raise SystemExit(f"daemon already running for {paths.config_dir()}")
+
+
 def main() -> None:
+    lock = hold_instance_lock()  # noqa: F841 — held until the process exits
     try:
         Daemon().run()
     except KeyboardInterrupt:

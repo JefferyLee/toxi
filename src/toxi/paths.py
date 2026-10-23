@@ -35,6 +35,10 @@ def pid_path() -> Path:
     return config_dir() / "daemon.pid"
 
 
+def lock_path() -> Path:
+    return config_dir() / "daemon.lock"
+
+
 def log_path() -> Path:
     return config_dir() / "daemon.log"
 

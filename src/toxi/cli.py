@@ -1005,8 +1005,12 @@ def _doctor_checks() -> list:
         if f.exists() and (f.stat().st_mode & 0o077):
             add(False, "permissions", f"{f.name} is group/world readable — the daemon fixes this on start")
     running = bootstrap.daemon_running()
-    add(running, "daemon", "running" if running else "not running — `toxi daemon start`, or "
-        "`toxi service install` to keep it alive")
+    if not running and bootstrap.daemon_locked():
+        add(False, "daemon", "a daemon holds the lock but does not answer — busy or hung; "
+            "`toxi service restart`")
+    else:
+        add(running, "daemon", "running" if running else "not running — `toxi daemon start`, or "
+            "`toxi service install` to keep it alive")
     st = service.status()
     if st["installed"]:
         add(st["running"], "service", f"{'running' if st['running'] else 'installed but not running'} — {st['path']}")
@@ -1132,6 +1136,13 @@ def daemon():
 def _spawn_daemon(timeout: float = 10.0) -> int:
     """Spawn the daemon detached and poll until it answers. Returns the PID."""
     paths.ensure_config_dir()
+    deadline = time.time() + 5  # a daemon that was just told to stop may still be exiting
+    while bootstrap.daemon_locked() and time.time() < deadline:
+        time.sleep(0.1)
+    if bootstrap.daemon_locked():
+        raise click.ClickException(
+            "a daemon for this identity is running but does not answer (busy?). "
+            "Not starting a second one. Wait, or run `toxi service restart`.")
     proc = subprocess.Popen(
         [sys.executable, "-m", "toxi.daemon"],
         stdout=subprocess.DEVNULL,

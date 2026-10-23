@@ -235,3 +235,42 @@ def test_send_message_can_wait_for_the_read_receipt(monkeypatch):
     monkeypatch.setattr(mcp_server.client, "request", req)
     res = asyncio.run(mcp_server.send_message("bob", "hi", wait_read=5))
     assert res["status"] == "read" and res["read"] is True
+
+
+def test_wait_for_message_reconnects_when_the_daemon_restarts(tmp_path, monkeypatch):
+    import asyncio
+    _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
+    state = {"subs": 0, "takes": 0}
+
+    def take(alias=None, cwd=None, thread=None):
+        state["takes"] += 1
+        if state["takes"] == 2:
+            raise mcp_server.client.DaemonNotRunning("restarting")
+        return [] if state["takes"] < 3 else [{"msg_uuid": "1", "alias": "codex", "msg_type": "text",
+                                               "content": "after restart", "trust": "observer"}]
+
+    async def flaky_sub(aliases=None, context=0, *, deadline=None, sock_path=None):
+        state["subs"] += 1
+        if state["subs"] == 1:
+            return  # the stream ends early: the daemon went away
+        yield {"event": "message.new", "data": {"direction": "in", "alias": "codex"}}
+
+    monkeypatch.setattr(mcp_server.peers, "take", take)
+    monkeypatch.setattr(mcp_server.client, "asubscribe", flaky_sub)
+    res = asyncio.run(mcp_server.wait_for_message(timeout=10))
+    assert res["messages"][0]["content"] == "after restart"
+    assert "timed_out" not in res
+
+
+def test_wait_for_message_says_when_it_reconnected_but_found_nothing(tmp_path, monkeypatch):
+    import asyncio
+    _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
+
+    async def gone(*a, **k):
+        raise mcp_server.client.DaemonNotRunning("down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(mcp_server.peers, "take", lambda *a, **k: [])
+    monkeypatch.setattr(mcp_server.client, "asubscribe", gone)
+    res = asyncio.run(mcp_server.wait_for_message(timeout=2))
+    assert res["timed_out"] is True and res["reconnects"] >= 1

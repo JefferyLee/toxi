@@ -49,6 +49,7 @@ Each identity directory contains these files:
 - `config.toml`.
 - `media/`: received files and outgoing attachments.
 - `inbox.flag`, `daemon.sock` and `daemon.log`.
+- `daemon.lock`. The daemon holds an exclusive lock on this file while it runs. A second daemon for the same identity cannot start, even if the first daemon is too busy to answer.
 
 All these files are private. The directory mode is 0700 and the file mode is 0600.
 

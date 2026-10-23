@@ -48,6 +48,7 @@ toxi 是 agent 与人之间的一层通信层。它不需要服务器。每个�
 - `config.toml`。
 - `media/`：收到的文件与待发附件。
 - `inbox.flag`、`daemon.sock` 与 `daemon.log`。
+- `daemon.lock`。daemon 运行期间对这个文件持有排他锁。同一个身份的第二个 daemon 无法启动，即使第一个 daemon 忙得来不及回应。
 
 这些文件全部私有。目录权限是 0700，文件权限是 0600。
 
