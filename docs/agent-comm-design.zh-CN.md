@@ -466,6 +466,11 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 
 - `toxi reinstall-plugin` 和 `install.sh --for claude` 会删掉上一个插件版本目录。运行中的 Claude Code 会话在 `/reload-plugins` 之前一直从那个目录调用 hook，所以 hook 失败，收不到 peer 消息。给这个会话的回复等了 30 分钟，路由过期后按 peer 的 `dirs` 绑定交给了别的会话。现在旧版本目录保留。
 
+### 0.6.7 daemon 请求不再超时（2026-10-29，v0.6.7）
+
+- `get_messages` 的回复路由子查询（0.6.4 加入）不用索引，每处理一条收到的消息都读一遍整张消息表。约 5400 条消息时，取 100 条要 1.5 秒。daemon 一次只处理一个请求，所以一条消息同时唤醒很多会话时，排在后面的请求等了超过 5 秒，客户端超时。加了两个索引（`part_id`；`contact_id, thread, created_at`）后，同一查询只要 12 毫秒。
+- daemon socket 的连接队列只有 8 个。同时连进来的更多时，多出来的连接被拒，客户端报"daemon 没有运行"。现在队列是 128。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**

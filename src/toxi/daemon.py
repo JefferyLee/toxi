@@ -1541,7 +1541,7 @@ class Daemon:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.bind(str(sp))
         os.chmod(sp, 0o600)
-        s.listen(8)
+        s.listen(128)  # one session per project, each with hooks and an MCP server
         self.sock = s
         self._sel.register(s, selectors.EVENT_READ, data=None)
         paths.pid_path().write_text(str(os.getpid()))

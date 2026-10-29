@@ -118,6 +118,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, decl in cols:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    # On added columns, so here and not in SCHEMA. They keep the reply-route
+    # subqueries in get_messages from scanning the whole table once per row.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_part ON messages(part_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(contact_id, thread, created_at)")
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

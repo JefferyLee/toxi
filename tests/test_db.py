@@ -62,3 +62,13 @@ def test_connect_migrates_pre_v2_schema(tmp_path):
     assert "invites" in {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     db.connect(p).close()  # re-running the migration is a no-op
+
+
+def test_route_subqueries_use_indexes(tmp_path):
+    # A full scan per incoming row made get_messages take seconds on a few
+    # thousand messages, and other daemon requests timed out behind it.
+    from toxi.daemon import _ROUTE_SQL
+    conn = db.connect(tmp_path / "chat.db")
+    plan = [r["detail"] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT " + _ROUTE_SQL + " FROM messages m")]
+    assert "SCAN o" not in plan, plan

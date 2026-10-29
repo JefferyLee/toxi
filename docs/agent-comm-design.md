@@ -467,6 +467,11 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 
 - `toxi reinstall-plugin` and `install.sh --for claude` deleted the previous plugin version folder. A running Claude Code session calls its hooks from that folder until `/reload-plugins`, so its hooks failed and it got no peer messages. A reply to that session waited 30 minutes, then the route expired and the peer's `dirs` binding gave it to another session. Old version folders now stay.
 
+### 0.6.7 Daemon requests no longer time out (2026-10-29, v0.6.7)
+
+- The reply-route subqueries of `get_messages` (added in 0.6.4) used no index, so they read the whole message table once for each incoming row. With about 5400 messages, 100 rows took 1.5 s. The daemon serves one request at a time, so when a message woke many sessions together, the requests behind it waited more than 5 s and the clients timed out. Two indexes (`part_id`; `contact_id, thread, created_at`) make the same query take 12 ms.
+- The daemon socket accepted a queue of only 8 connections. When more connected at the same time, the extra connections were refused and the client reported "daemon is not running". The queue is now 128.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**
