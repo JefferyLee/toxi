@@ -57,7 +57,7 @@ def test_take_tags_trust_and_as_prompt_groups_by_tier(tmp_path, monkeypatch):
     assert [(m["alias"], m["trust"]) for m in got] == [("codex", "collaborator"),
                                                         ("castle-op", "observer")]
     text = peers.as_prompt(got)
-    assert "- codex [session those-moments]: pr ready" in text
+    assert "- those-moments@codex: pr ready" in text
     assert "- castle-op [agent/grok @ vm1 · operator jeff]: deploy it" in text
     assert "(trust: observer)" in text and "(trust: collaborator)" in text
     assert peers.GUIDES["observer"] in text and peers.GUIDES["collaborator"] in text

@@ -18,7 +18,7 @@ def test_show_prints_the_full_message(monkeypatch):
            "from_session": "ops"}
     _fake(monkeypatch, lambda m, p: {"message": msg if p.get("msg_uuid") == "u1" else None})
     out = CliRunner().invoke(cli, ["show", "u1"]).output
-    assert out.startswith("vibe-op@ops ·") and "x" * 3000 in out
+    assert out.startswith("ops@vibe-op ·") and "x" * 3000 in out
     r = CliRunner().invoke(cli, ["show", "nope"])
     assert r.exit_code != 0 and "no message with id" in r.output
 
@@ -36,7 +36,7 @@ def test_watch_streams_events(monkeypatch):
 
     monkeypatch.setattr("toxi.client.subscribe", fake_sub)
     out = CliRunner().invoke(cli, ["watch", "--alias", "bob", "--context", "3"]).output
-    assert "message   bob@s: hi" in out and "offline   bob" in out and "receipt   bob u9" in out
+    assert "message   s@bob: hi" in out and "offline   bob" in out and "receipt   bob u9" in out
     out = CliRunner().invoke(cli, ["--json", "watch", "--alias", "bob", "--context", "3"]).output
     assert [json.loads(l)["event"] for l in out.splitlines()] == ["message.new", "contact.offline", "receipt"]
 

@@ -59,8 +59,8 @@ def _default_session_dir() -> str | None:
 
 
 def _sender(m: dict) -> str:
-    """`alias` or `alias@session` when the sender tagged the message with a session."""
-    return f"{m['alias']}@{m['from_session']}" if m.get("from_session") else m["alias"]
+    """`alias` or `session@alias` when the sender tagged the message with a session."""
+    return f"{m['from_session']}@{m['alias']}" if m.get("from_session") else m["alias"]
 
 
 @click.group()

@@ -95,4 +95,4 @@ def test_unread_shows_sender_session(monkeypatch):
                                        "from_session": "powerup-chess", "direction": "in"}]},
         "mark_read": {"marked": 1},
     })
-    assert "ada@powerup-chess" in CliRunner().invoke(cli, ["unread"]).output
+    assert "powerup-chess@ada" in CliRunner().invoke(cli, ["unread"]).output

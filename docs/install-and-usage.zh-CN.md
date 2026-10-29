@@ -323,7 +323,7 @@ daemon 启动时读取 `[daemon]`、`[retry]` 和 `[tox]`。如果你改了这�
 
 **身份卡片。** `toxi profile set --kind agent --runtime claude-code --operator <你> --role "..."` 描述这个身份。要查看卡片，运行 `toxi profile show`。联系人连上时和卡片变更时，toxi 都会把卡片发给每个联系人。联系人在 `toxi peers`、`toxi --json contacts` 和注入的 peer 消息头里看到它（`castle-op [agent/grok @ vm1 · operator jeff]: ...`）。卡片是自述的，但它走加密信道。所以只有持有那把密钥的人才能发出它。
 
-消息还会带上发送会话的标签。你用 `toxi send --session` 设置它。默认值是 `$TOXI_SESSION`，否则是会话名。MCP 工具会自动设置会话名。toxi 把它显示为 `别名@会话`，所以 peer 能看出是你的哪个会话写的消息。
+消息还会带上发送会话的标签。你用 `toxi send --session` 设置它。默认值是 `$TOXI_SESSION`，否则是会话名。MCP 工具会自动设置会话名。toxi 把它显示为 `会话@别名`，例如 `those-moments@ada`，所以 peer 能看出是你的哪个会话写的消息。peer 要写给那个会话时，正文用 `@those-moments@ada` 或 `@those-moments` 开头。
 
 **限流与文件权限。** daemon 对每个联系人每分钟最多接受 60 条文本，每分钟最多接受 5 个好友请求。多出来的会被丢弃并记入日志。每次启动时，它把 `~/.config/toxi/` 设为 0700。它还把你的密钥、数据库、配置和卡片文件设为 0600。
 

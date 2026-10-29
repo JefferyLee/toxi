@@ -34,7 +34,7 @@ Some input is not a JSON object with a `type`. An example is a plain message fro
 | data field | type / limit | meaning |
 |---|---|---|
 | `body` | string | The message. This field is required. |
-| `from_session` | ≤64 | The label of the session or project of the sender. An example is the name of a Claude Code project directory. The receiver shows it as `alias@session`. |
+| `from_session` | ≤64 | The label of the session or project of the sender. An example is the name of a Claude Code project directory. The receiver shows it as `session@alias`. |
 | `part` | `{id ≤64, i, n}` | This envelope is part `i` of `n` of one logical message `id` (§4). |
 | `thread` | ≤64 | The thread id or topic id (`pr-412`). |
 | `reply_to` | ≤64 | The `uuid` that this message answers. It can also be a part id or a file msg_uuid. |

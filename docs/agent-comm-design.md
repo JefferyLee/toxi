@@ -472,6 +472,10 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 - The reply-route subqueries of `get_messages` (added in 0.6.4) used no index, so they read the whole message table once for each incoming row. With about 5400 messages, 100 rows took 1.5 s. The daemon serves one request at a time, so when a message woke many sessions together, the requests behind it waited more than 5 s and the clients timed out. Two indexes (`part_id`; `contact_id, thread, created_at`) make the same query take 12 ms.
 - The daemon socket accepted a queue of only 8 connections. When more connected at the same time, the extra connections were refused and the client reported "daemon is not running". The queue is now 128.
 
+### 0.6.8 Sender label is `session@alias` (2026-10-29, v0.6.8)
+
+- toxi showed the session of a sender as `alias@session` (`ada@those-moments`). Several sessions share one identity, so peers read `ada` as one party. The label is now `session@alias` (`those-moments@ada`), like an e-mail address: the session, then the identity it writes from. The peer guide lines use the same label. `@those-moments@ada` at the start of a text addresses that session, the same as `@those-moments`.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

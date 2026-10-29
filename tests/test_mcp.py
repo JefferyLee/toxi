@@ -174,7 +174,7 @@ def test_channel_note_is_a_wakeup_without_the_body(tmp_path, monkeypatch):
     _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "collaborator"\n')
     n = mcp_server.channel_note({"alias": "codex", "msg_uuid": "u1", "from_session": "tm",
                                  "profile": None, "content": "SECRET BODY"})
-    assert "codex [session tm]" in n["content"] and "wait_for_message" in n["content"]
+    assert "tm@codex" in n["content"] and "wait_for_message" in n["content"]
     assert "SECRET" not in n["content"]
     assert n["meta"] == {"alias": "codex", "trust": "collaborator", "msg_uuid": "u1"}
     assert all(k.replace("_", "").isalnum() for k in n["meta"])  # channel meta key rules

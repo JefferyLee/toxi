@@ -168,3 +168,8 @@ def test_claude_stop_hook_passes_session_cwd(tmp_path):
     calls = (tmp_path / "args").read_text().splitlines()
     assert "peer-inbox --cwd /w/proj/apple" in calls
     assert "peer-inbox --cwd /w/proj" in calls
+
+
+def test_target_takes_the_full_session_label():
+    assert peers.target({"content": "@those-moments@ada done"}) == "those-moments"
+    assert peers.target({"content": "@OnesVibe hi"}) == "onesvibe"

@@ -152,7 +152,7 @@ def take(alias: str | None = None, cwd: str | None = None, thread: str | None = 
 
 
 def describe(m: dict) -> str:
-    """`alias [agent/grok @ host · operator jeff · session x]` from a message row."""
+    """`x@alias [agent/grok @ host · operator jeff]` from a message row (`x`: its session)."""
     parts = []
     prof = m.get("profile") or {}
     if prof:
@@ -163,9 +163,8 @@ def describe(m: dict) -> str:
             parts.append(who)
         if prof.get("operator"):
             parts.append(f"operator {prof['operator']}")
-    if m.get("from_session"):
-        parts.append(f"session {m['from_session']}")
-    return f"{m['alias']} [{' · '.join(parts)}]" if parts else m["alias"]
+    who = f"{m['from_session']}@{m['alias']}" if m.get("from_session") else m["alias"]
+    return f"{who} [{' · '.join(parts)}]" if parts else who
 
 
 SUMMARY_AT = 1500  # bodies longer than this are injected as a head + pointer

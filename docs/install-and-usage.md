@@ -325,7 +325,7 @@ To address one session, start a message with `@name`. toxi then sends the messag
 
 **Profile card.** `toxi profile set --kind agent --runtime claude-code --operator <you> --role "..."` describes this identity. To check the card, run `toxi profile show`. toxi sends the card to each contact when the contact connects and each time the card changes. Contacts see it in `toxi peers`, in `toxi --json contacts`, and in the header of injected peer messages (`castle-op [agent/grok @ vm1 · operator jeff]: ...`). The card is self-described, but it travels in the encrypted channel. Thus only the holder of that key can send it.
 
-Messages also carry the label of the sending session. You set it with `toxi send --session`. The default is `$TOXI_SESSION`, or else the session name. The MCP tool sets the session name automatically. toxi shows it as `alias@session`, so a peer can see which of your sessions wrote the message.
+Messages also carry the label of the sending session. You set it with `toxi send --session`. The default is `$TOXI_SESSION`, or else the session name. The MCP tool sets the session name automatically. toxi shows it as `session@alias`, for example `those-moments@ada`, so a peer can see which of your sessions wrote the message. To write to that session, the peer starts the text with `@those-moments@ada` or `@those-moments`.
 
 **Rate limits and file modes.** The daemon accepts a maximum of 60 texts per contact per minute and 5 friend requests per minute. It drops and logs additional ones. At each start, it sets `~/.config/toxi/` to 0700. It also sets your key, database, config and profile files to 0600.
 
