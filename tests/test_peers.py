@@ -170,6 +170,11 @@ def test_claude_stop_hook_passes_session_cwd(tmp_path):
     assert "peer-inbox --cwd /w/proj" in calls
 
 
-def test_target_takes_the_full_session_label():
+def test_target_takes_the_full_session_label(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOXI_HOME", str(tmp_path))
+    (tmp_path / "profile.json").write_text('{"name": "ada"}')
     assert peers.target({"content": "@those-moments@ada done"}) == "those-moments"
+    assert peers.target({"content": "those-moments@ADA done"}) == "those-moments"
     assert peers.target({"content": "@OnesVibe hi"}) == "onesvibe"
+    assert peers.target({"content": "jeff@example.com wrote"}) is None
+    assert peers.target({"content": "those-moments@codex hi"}) is None

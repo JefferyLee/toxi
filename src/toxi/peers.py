@@ -11,11 +11,12 @@ Stop hook or the wait_for_message MCP tool) and marked read on delivery, so the
 same message is never injected twice. The wording that frames them depends on
 the peer's trust level and is defined here, once, for every adapter.
 """
+import json
 import re
 import time
 from pathlib import Path
 
-from . import client, config, sessions
+from . import client, config, paths, sessions
 
 ROUTE_TTL = 1800  # seconds a reply stays pinned to the session that asked
 
@@ -50,16 +51,32 @@ GUIDES = {
 GUIDE = GUIDES["collaborator"]
 
 # `@name` at the start of a message addresses one session: the live session
-# whose name (see sessions.py) is `name`, case-insensitive.
+# whose name (see sessions.py) is `name`, case-insensitive. So does the label
+# `name@me` (with or without the leading `@`), where `me` is this identity's name.
 _TARGET = re.compile(r"\s*@([\w.-]+)")
+_LABEL = re.compile(r"\s*([\w.-]+)@([\w.-]+)")
+
+
+def _my_name() -> str:
+    try:
+        return (json.loads(paths.profile_path().read_text()).get("name") or "").lower()
+    except (OSError, ValueError):
+        return ""
 
 
 def target(m: dict) -> str | None:
-    """The session a message is addressed to with a leading `@name`, lower-cased."""
+    """The session a message is addressed to with a leading `@name` or
+    `name@me`, lower-cased."""
     if m.get("msg_type", "text") != "text":
         return None
-    hit = _TARGET.match(m.get("content") or "")
-    return hit.group(1).lower() if hit else None
+    text = m.get("content") or ""
+    hit = _TARGET.match(text)
+    if hit:
+        return hit.group(1).lower()
+    hit = _LABEL.match(text)
+    if hit and hit.group(2).lower() == _my_name():
+        return hit.group(1).lower()
+    return None
 
 
 def _same_dir(a: str, b: str) -> bool:
