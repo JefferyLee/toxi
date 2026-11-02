@@ -481,6 +481,12 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 - The macOS service ran the daemon with `ProcessType=Background`. macOS then gives it priority 4 and throttles its disk I/O. When the machine was busy (builds, simulators), the daemon stopped for up to 25 s, and the requests of the sessions timed out after 5 s. The service now uses `ProcessType=Standard`. Under full CPU load a request takes 0.03 s (median) and 2 s at most. To get the change, run `toxi service install` again.
 - A text can address a session with `name@me` too, where `me` is the name of the receiving identity (`those-moments@ada`, with or without a leading `@`).
 
+### 0.6.10 Session names follow Claude Code (2026-11-02, v0.6.10)
+
+- The toxi name of a session was `TOXI_SESSION` or the project dir name, with `-2`, `-3` for duplicates. It ignored the name that the user gave the Claude Code session (`/rename`), so a session that the user calls `those-moments-op` was `those-moments-4` in toxi. toxi now reads that name from `~/.claude/sessions/<pid>.json` (only when `nameSource` is `user`). The order is `TOXI_SESSION`, then the Claude Code name, then the dir name.
+- toxi checks the name each time the session registers (hooks, MCP). A rename takes effect. A session with a suffix gets the plain name when the session that had it stops, so a new session takes over the threads of the session it replaces.
+- A renamed session keeps its earlier names (`former`) while it runs. `@old-name` and replies to messages that it sent under the old name still reach it. No other session can take the old name, so no reply goes to the wrong session. No announcement to peers is necessary: they see the new label on the next message.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

@@ -1,6 +1,6 @@
 {
   "name": "toxi",
-  "version": "0.6.9",
+  "version": "0.6.10",
   "description": "Decentralized messaging for Codex, over Tox.",
   "author": {
     "name": "Jeffery Li",

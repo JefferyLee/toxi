@@ -480,6 +480,12 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - macOS 服务以前用 `ProcessType=Background` 运行 daemon。macOS 因此给它优先级 4，并限制它的磁盘 I/O。机器忙时（编译、模拟器），daemon 会停住最长 25 秒，会话的请求在 5 秒后超时。服务现在用 `ProcessType=Standard`。CPU 满载时，请求中位 0.03 秒，最长 2 秒。要让改动生效，再运行一次 `toxi service install`。
 - 正文也可以用 `名字@本机身份` 寻址会话，`本机身份` 是接收方身份的名字（`those-moments@ada`，前面带不带 `@` 都可以）。
 
+### 0.6.10 会话名跟随 Claude Code（2026-11-02，v0.6.10）
+
+- 会话的 toxi 名以前是 `TOXI_SESSION` 或项目目录名，重名加 `-2`、`-3`。它不看用户给 Claude Code 会话起的名字（`/rename`），所以用户叫 `those-moments-op` 的会话，在 toxi 里是 `those-moments-4`。toxi 现在从 `~/.claude/sessions/<pid>.json` 读这个名字（只在 `nameSource` 为 `user` 时）。顺序是 `TOXI_SESSION`，然后 Claude Code 名字，然后目录名。
+- 会话每次登记（钩子、MCP）时，toxi 都重新检查名字。改名随即生效。带后缀的会话在原来用这个名字的会话停止后，改用不带后缀的名字，于是新会话接手它所替换的会话的线程。
+- 改过名的会话在运行期间保留旧名字（`former`）。`@旧名字` 和对它用旧名字发出的消息的回复仍然到达它。其他会话不能拿走这个旧名字，所以回复不会送错会话。不需要向 peer 公告：它们在下一条消息上就看到新标签。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**
