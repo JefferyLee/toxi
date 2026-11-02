@@ -87,7 +87,9 @@ def render_plist() -> bytes:
         "EnvironmentVariables": _env(),
         "RunAtLoad": True,
         "KeepAlive": True,
-        "ProcessType": "Background",
+        # Not "Background": macOS then runs us at priority 4 with throttled I/O,
+        # and a busy machine (builds, simulators) stalls every request past 5 s.
+        "ProcessType": "Standard",
         "StandardOutPath": log,
         "StandardErrorPath": log,
     })

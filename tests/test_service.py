@@ -23,6 +23,7 @@ def test_rendered_definitions(tmp_path, monkeypatch):
     prog = pl["ProgramArguments"]
     assert prog[0].endswith("toxi-daemon") or prog[1:] == ["-m", "toxi.daemon"]
     assert pl["EnvironmentVariables"]["TOXI_HOME"] == str(tmp_path / "home")
+    assert pl["ProcessType"] == "Standard"  # "Background" starves the daemon under load
     unit = service.render_unit()
     assert ("toxi-daemon" in unit or "-m toxi.daemon" in unit) and "Restart=always" in unit
     assert "TOXI_HOME=" in unit
