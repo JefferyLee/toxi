@@ -475,6 +475,11 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 
 - toxi 以前把发送方的会话显示为 `别名@会话`（`ada@those-moments`）。多个会话共用一个身份，peer 会把 `ada` 当成一个对话方。现在标签改为 `会话@别名`（`those-moments@ada`），和邮箱地址一样：先是会话，再是它所用的身份。peer 指引里的标签也一样。正文以 `@those-moments@ada` 开头，和 `@those-moments` 一样，寻址那个会话。
 
+### 0.6.9 daemon 以正常优先级运行（2026-11-01，v0.6.9）
+
+- macOS 服务以前用 `ProcessType=Background` 运行 daemon。macOS 因此给它优先级 4，并限制它的磁盘 I/O。机器忙时（编译、模拟器），daemon 会停住最长 25 秒，会话的请求在 5 秒后超时。服务现在用 `ProcessType=Standard`。CPU 满载时，请求中位 0.03 秒，最长 2 秒。要让改动生效，再运行一次 `toxi service install`。
+- 正文也可以用 `名字@本机身份` 寻址会话，`本机身份` 是接收方身份的名字（`those-moments@ada`，前面带不带 `@` 都可以）。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 **马上要收的尾**

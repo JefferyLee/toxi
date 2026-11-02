@@ -476,6 +476,11 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 
 - toxi showed the session of a sender as `alias@session` (`ada@those-moments`). Several sessions share one identity, so peers read `ada` as one party. The label is now `session@alias` (`those-moments@ada`), like an e-mail address: the session, then the identity it writes from. The peer guide lines use the same label. `@those-moments@ada` at the start of a text addresses that session, the same as `@those-moments`.
 
+### 0.6.9 The daemon runs at normal priority (2026-11-01, v0.6.9)
+
+- The macOS service ran the daemon with `ProcessType=Background`. macOS then gives it priority 4 and throttles its disk I/O. When the machine was busy (builds, simulators), the daemon stopped for up to 25 s, and the requests of the sessions timed out after 5 s. The service now uses `ProcessType=Standard`. Under full CPU load a request takes 0.03 s (median) and 2 s at most. To get the change, run `toxi service install` again.
+- A text can address a session with `name@me` too, where `me` is the name of the receiving identity (`those-moments@ada`, with or without a leading `@`).
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**
