@@ -64,6 +64,23 @@ def test_claude_session_name_wins_and_comes_back_when_freed(tmp_path, monkeypatc
     assert sessions.register(cwd, pid=102)["name"] == "website"
 
 
+def test_a_renamed_session_keeps_its_old_name_for_routing(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    cwd = str(tmp_path / "those-moments")
+    sessions.register(cwd, pid=101)  # those-moments
+    assert sessions.register(cwd, pid=102)["name"] == "those-moments-2"
+    _claude_name(tmp_path, 101, "website")
+    assert sessions.register(cwd, pid=101) == {**sessions.current(101), "former": ["those-moments"]}
+    # 101 still lives, so 102 does not take its old name, and a reply to
+    # something 101 sent as `those-moments` still reaches 101.
+    assert sessions.register(cwd, pid=102)["name"] == "those-moments-2"
+    live = sessions.live()
+    reply = {"msg_type": "text", "content": "ok", "route_dir": cwd,
+             "route_session": "those-moments", "created_at": time.time()}
+    assert peers.owner(reply, None, live) == "website"
+    assert peers.owner({"msg_type": "text", "content": "@those-moments hi"}, None, live) == "website"
+
+
 def test_owner_picks_one_session_or_the_shared_inbox(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "")
     sessions.register("/w/toxi", pid=101)

@@ -92,7 +92,7 @@ every injected line:  alias [agent/grok @ host · operator jeff · session x] (#
 
 The trust level comes from the operator who paired the two identities. The profile card tells you *what* you talk to. The `owner` level marks a device of the user. Messages from an `owner` count as messages from the user.
 
-Several agent sessions can share one identity. A session registers in `<TOXI_HOME>/sessions/` the first time that it asks for its messages. The entry holds the pid of the agent process, the start directory and a name. The name is `$TOXI_SESSION`, the name that the user gave the Claude Code session (`/rename`), or the directory name. If a live session already has that name, toxi adds `-2`, `-3` and so on. toxi checks the name each time the session registers again: a rename takes effect, and a session with a suffix gets the plain name when the session that had it stops. The entry goes away when the agent process stops.
+Several agent sessions can share one identity. A session registers in `<TOXI_HOME>/sessions/` the first time that it asks for its messages. The entry holds the pid of the agent process, the start directory and a name. The name is `$TOXI_SESSION`, the name that the user gave the Claude Code session (`/rename`), or the directory name. If a live session already has that name, toxi adds `-2`, `-3` and so on. toxi checks the name each time the session registers again: a rename takes effect, and a session with a suffix gets the plain name when the session that had it stops. A renamed session keeps its earlier names in `former` while it runs. Routing uses them, and no other session gets them. The entry goes away when the agent process stops.
 
 toxi gives each peer message to one session. It uses these rules, in this order:
 

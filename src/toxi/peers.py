@@ -97,10 +97,10 @@ def owner(m: dict, spec: dict | None, live: list) -> str | None:
     """
     name = target(m)
     if name:
-        return name
+        return sessions.resolve(name, live)
     route = m.get("route_dir")
     if route and time.time() - (m.get("created_at") or 0) < ROUTE_TTL:
-        by_name = (m.get("route_session") or "").lower()
+        by_name = sessions.resolve(m.get("route_session") or "", live)
         if any(s["name"].lower() == by_name for s in live):
             return by_name
         cands = [s for s in live if _same_dir(s["cwd"], route)]

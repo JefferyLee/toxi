@@ -5,9 +5,11 @@ peer messages (hooks, the MCP server). The key is the pid of its agent process;
 the entry holds the dir the session was started in and a name that is unique
 among the live sessions (ignoring case): $TOXI_SESSION, else the name the user
 gave the Claude Code session (/rename), else the dir name, with -2, -3 ...
-added when another live session has that name. The name is checked again each
-time the session registers: a rename takes effect, and a session with a suffix
-takes the plain name back when the session that had it ends. A session ends
+added when another live session has that name, or had it before a rename. The
+name is checked again each time the session registers: a rename takes effect,
+and a session with a suffix takes the plain name back when the session that had
+it ends. A session keeps its earlier names (`former`), so replies to messages
+it sent under an earlier name still find it. A session ends
 when its agent process ends. One JSON file per session in <TOXI_HOME>/sessions/.
 """
 import fcntl
@@ -79,6 +81,16 @@ def live() -> list:
     return sorted(out, key=lambda s: s.get("since", 0))
 
 
+def resolve(name: str, live: list) -> str:
+    """The current name (lower case) of the live session called `name` now or
+    before a rename; `name` itself when no live session has it."""
+    name = name.lower()
+    for s in live:
+        if name in (n.lower() for n in [s["name"], *s.get("former", [])]):
+            return s["name"].lower()
+    return name
+
+
 def current(pid: int | None = None) -> dict | None:
     """This session's entry, if it registered. Never registers."""
     try:
@@ -108,7 +120,8 @@ def register(cwd: str, pid: int | None = None) -> dict:
                 or os.path.basename(cwd) or "session")
         base = re.sub(r"[^\w.-]+", "-", base).strip("-")[:60] or "session"
         mine = current(pid)
-        taken = {s["name"].lower() for s in live() if s["pid"] != pid}
+        taken = {n.lower() for s in live() if s["pid"] != pid
+                 for n in [s["name"], *s.get("former", [])]}
         if mine and mine.get("cwd") == cwd and mine.get("base") == base \
                 and (mine["name"].lower() == base.lower() or base.lower() in taken):
             return mine
@@ -117,6 +130,11 @@ def register(cwd: str, pid: int | None = None) -> dict:
             n += 1
             name = f"{base}-{n}"
         since = mine["since"] if mine else time.time()
+        # Only a rename in place keeps the old names; a move is a new start.
+        kept = mine.get("former", []) + [mine["name"]] if mine and mine["cwd"] == cwd else []
+        former = [n for n in kept if n.lower() != name.lower()]
         mine = {"pid": pid, "cwd": cwd, "base": base, "name": name, "since": since}
+        if former:
+            mine["former"] = former
         (_dir() / f"{pid}.json").write_text(json.dumps(mine))
         return mine
