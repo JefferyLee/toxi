@@ -15,7 +15,7 @@ The plugin in `claude-code-plugin/` implements the [adapter contract](../archite
 
 Routing uses these rules. The first rule that matches wins:
 
-1. If a text starts with `@name`, it goes only to the session with the name `name`. The name is `TOXI_SESSION`, or else the name of the project directory. A second live session with the same name gets `-2`.
+1. If a text starts with `@name`, it goes only to the session with the name `name`. The name is `TOXI_SESSION`, or else the name that you gave the session with `/rename`, or else the name of the project directory. A second live session with the same name gets `-2`, until the first one stops.
 2. If a message replies to something that a session sent, it goes only to that session for 30 minutes. A reply has the `reply_to` of that message, or is in the thread that the session last wrote in with that contact.
 3. If not, `[peers.<alias>] dirs = [...]` sends the messages of a peer only to the session that started in those directories. A peer without `dirs` matches each session.
 4. If no session matches, or more than one session matches, the message goes to the shared inbox. No session gets it automatically.

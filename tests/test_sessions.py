@@ -37,6 +37,33 @@ def test_names_are_unique_and_ended_sessions_go_away(tmp_path, monkeypatch):
     assert not (sessions._dir() / "999.json").exists()
 
 
+def _claude_name(tmp_path, pid, name, source="user"):
+    d = sessions.Path(sessions.os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{pid}.json").write_text(json.dumps({"pid": pid, "name": name, "nameSource": source}))
+
+
+def test_claude_session_name_wins_and_comes_back_when_freed(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    cwd = str(tmp_path / "those-moments")
+    _claude_name(tmp_path, 102, "those-moments-op", source="auto")  # not the user's
+    assert sessions.register(cwd, pid=102)["name"] == "those-moments"
+    _claude_name(tmp_path, 101, "those moments op")
+    old = sessions.register(cwd, pid=101)
+    assert old["name"] == "those-moments-op"
+    _claude_name(tmp_path, 103, "those-moments-op")  # started later, same name
+    new = sessions.register(cwd, pid=103)
+    assert new["name"] == "those-moments-op-2"
+    LIVE.discard(101)  # the old one ends
+    try:
+        again = sessions.register(cwd, pid=103)
+    finally:
+        LIVE.add(101)
+    assert again["name"] == "those-moments-op" and again["since"] == new["since"]
+    _claude_name(tmp_path, 102, "website")  # /rename while it runs
+    assert sessions.register(cwd, pid=102)["name"] == "website"
+
+
 def test_owner_picks_one_session_or_the_shared_inbox(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch, "")
     sessions.register("/w/toxi", pid=101)

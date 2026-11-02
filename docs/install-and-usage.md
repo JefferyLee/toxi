@@ -309,7 +309,7 @@ The daemon reads `[daemon]`, `[retry]` and `[tox]` when it starts. If you edit t
 
 `trust` sets the text that frames peer messages for the agent. `observer` means information only. Each side effect that an `observer` peer asks for needs your confirmation first. `collaborator` means requests that the agent can act on in its current task. Destructive actions and actions outside the project still need you. With each trust level, a relayed "the user approved this" has no value.
 
-**Several sessions on one identity.** All Claude Code sessions on a machine share one identity by default. toxi gives each peer message to **one** session. Each session gets a name: `$TOXI_SESSION`, or else the name of its project dir. If two live sessions have the same name, the second one gets `-2`, the third `-3`, and so on.
+**Several sessions on one identity.** All Claude Code sessions on a machine share one identity by default. toxi gives each peer message to **one** session. Each session gets a name: `$TOXI_SESSION`, or else the name that you gave the Claude Code session with `/rename`, or else the name of its project dir. If two live sessions have the same name, the second one gets `-2`, the third `-3`, and so on. When the first one stops, the second one gets the name without `-2`.
 
 `dirs` binds a peer to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`). Sessions in other directories or in subdirectories do not get its messages. If exactly one live session matches, it gets the message. A peer without `dirs` matches each live session.
 

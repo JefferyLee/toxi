@@ -3,9 +3,12 @@
 A Claude Code or Codex session registers here the first time it asks for its
 peer messages (hooks, the MCP server). The key is the pid of its agent process;
 the entry holds the dir the session was started in and a name that is unique
-among the live sessions (ignoring case): $TOXI_SESSION, else the dir name, with -2, -3 ...
-added when another live session has that name. A session ends when its agent
-process ends. One JSON file per session in <TOXI_HOME>/sessions/.
+among the live sessions (ignoring case): $TOXI_SESSION, else the name the user
+gave the Claude Code session (/rename), else the dir name, with -2, -3 ...
+added when another live session has that name. The name is checked again each
+time the session registers: a rename takes effect, and a session with a suffix
+takes the plain name back when the session that had it ends. A session ends
+when its agent process ends. One JSON file per session in <TOXI_HOME>/sessions/.
 """
 import fcntl
 import json
@@ -84,6 +87,16 @@ def current(pid: int | None = None) -> dict | None:
         return None
 
 
+def _claude_name(pid: int) -> str | None:
+    """The name the user gave the Claude Code session with this pid, if any."""
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    try:
+        s = json.loads((home / "sessions" / f"{pid}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return s.get("name") if s.get("nameSource") == "user" else None
+
+
 def register(cwd: str, pid: int | None = None) -> dict:
     """This session's entry; registers it (or moves it to `cwd`) if needed."""
     pid = pid or agent_pid()
@@ -91,16 +104,19 @@ def register(cwd: str, pid: int | None = None) -> dict:
     _dir().mkdir(parents=True, exist_ok=True)
     with open(_dir() / ".lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        base = os.environ.get("TOXI_SESSION") or os.path.basename(cwd) or "session"
-        base = re.sub(r"[^\w.-]+", "-", base)[:60]
+        base = (os.environ.get("TOXI_SESSION") or _claude_name(pid)
+                or os.path.basename(cwd) or "session")
+        base = re.sub(r"[^\w.-]+", "-", base).strip("-")[:60] or "session"
         mine = current(pid)
-        if mine and mine.get("cwd") == cwd and mine.get("base") == base:
-            return mine
         taken = {s["name"].lower() for s in live() if s["pid"] != pid}
+        if mine and mine.get("cwd") == cwd and mine.get("base") == base \
+                and (mine["name"].lower() == base.lower() or base.lower() in taken):
+            return mine
         name, n = base, 1
         while name.lower() in taken:
             n += 1
             name = f"{base}-{n}"
-        mine = {"pid": pid, "cwd": cwd, "base": base, "name": name, "since": time.time()}
+        since = mine["since"] if mine else time.time()
+        mine = {"pid": pid, "cwd": cwd, "base": base, "name": name, "since": since}
         (_dir() / f"{pid}.json").write_text(json.dumps(mine))
         return mine

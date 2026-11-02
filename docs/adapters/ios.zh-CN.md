@@ -21,4 +21,4 @@ trust = "owner"
 dirs  = ["/path/to/project"]   # 默认接收你消息的会话
 ```
 
-agent 随后把每条消息当作你在那个会话里亲手输入的。agent 在手机上回答。要改投另一个会话，让消息以 `@name` 开头。`name` 是那个会话的 `TOXI_SESSION`，否则是它的项目目录名。设备丢失时，见 [../security.zh-CN.md](../security.zh-CN.md)。
+agent 随后把每条消息当作你在那个会话里亲手输入的。agent 在手机上回答。要改投另一个会话，让消息以 `@name` 开头。`name` 是那个会话的 `TOXI_SESSION`，否则是你给那个 Claude Code 会话起的名字，否则是它的项目目录名。设备丢失时，见 [../security.zh-CN.md](../security.zh-CN.md)。

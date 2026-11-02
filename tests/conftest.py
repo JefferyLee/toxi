@@ -38,7 +38,9 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(autouse=True)
 def _own_sessions_dir(tmp_path_factory, monkeypatch):
-    """Keep the session registry of every test out of the real TOXI_HOME."""
+    """Keep the session registry of every test out of the real TOXI_HOME, and
+    the names of the real Claude Code sessions out of the tests."""
     from toxi import sessions
     d = tmp_path_factory.mktemp("sessions")
     monkeypatch.setattr(sessions, "_dir", lambda: d)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude")))

@@ -21,4 +21,4 @@ trust = "owner"
 dirs  = ["/path/to/project"]   # the session that gets your messages by default
 ```
 
-The agent then treats each message as if you typed it in that session. The agent answers on the phone. To address a different session, start the message with `@name`. `name` is the `TOXI_SESSION` of that session, or else the name of its project directory. If you lose the device, see [../security.md](../security.md).
+The agent then treats each message as if you typed it in that session. The agent answers on the phone. To address a different session, start the message with `@name`. `name` is the `TOXI_SESSION` of that session, or else the name that you gave the Claude Code session, or else the name of its project directory. If you lose the device, see [../security.md](../security.md).
