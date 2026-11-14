@@ -487,6 +487,11 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 - toxi checks the name each time the session registers (hooks, MCP). A rename takes effect. A session with a suffix gets the plain name when the session that had it stops, so a new session takes over the threads of the session it replaces.
 - A renamed session keeps its earlier names (`former`) while it runs. `@old-name` and replies to messages that it sent under the old name still reach it. No other session can take the old name, so no reply goes to the wrong session. No announcement to peers is necessary: they see the new label on the next message.
 
+### 0.6.11 Texts that no session can take go back to the sender (2026-11-13, v0.6.11)
+
+- A peer text whose `@name` matched no running session, or that had no `@name` while toxi could not tell which session it was for, stayed in the shared inbox. No session read the shared inbox, so the messages waited for days (`@scout-daily`, `@Power-Up-Chess`, unaddressed texts from Belinda). Now the daemon checks each peer text when it arrives. If no live session owns it, the daemon marks it handled and sends a `bounce` to the sender (`reply_to` = the text), with the names of the running sessions for `collaborator` and `owner` peers. The check is strict: no match by dir name or name suffix.
+- No bounce for an `ack`, a `bounce` (so two nodes cannot bounce in a loop), relayed history, room messages, or when no session runs at all (headless identities; the message waits for the next session). Texts from contacts that are not peers still go to the shared inbox.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 **Loose ends**

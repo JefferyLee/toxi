@@ -19,7 +19,7 @@ PROFILE_KEYS = ("kind", "name", "runtime", "model", "host", "operator", "role", 
 PROFILE_KINDS = ("agent", "human", "service")
 
 # Structured fields a text may carry besides its body (design §4.5).
-KINDS = ("msg", "request", "report", "ack", "relay")
+KINDS = ("msg", "request", "report", "ack", "relay", "bounce")
 META_KEYS = ("thread", "reply_to", "kind", "needs_human", "tags", "room", "room_msg", "relayed")
 
 

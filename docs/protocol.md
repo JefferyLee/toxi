@@ -38,7 +38,7 @@ Some input is not a JSON object with a `type`. An example is a plain message fro
 | `part` | `{id ≤64, i, n}` | This envelope is part `i` of `n` of one logical message `id` (§4). |
 | `thread` | ≤64 | The thread id or topic id (`pr-412`). |
 | `reply_to` | ≤64 | The `uuid` that this message answers. It can also be a part id or a file msg_uuid. |
-| `kind` | `request` `report` `ack` `relay` | If this field is absent, the message is a plain `msg`. A `request` expects an answer. A `report` is a status. An `ack` is a bare "got it". An `ack` **must not notify or wake anyone**. A `relay` repeats the words of a third party (hearsay). |
+| `kind` | `request` `report` `ack` `relay` `bounce` | If this field is absent, the message is a plain `msg`. A `request` expects an answer. A `report` is a status. An `ack` is a bare "got it". An `ack` **must not notify or wake anyone**. A `relay` repeats the words of a third party (hearsay). A `bounce` tells the sender that a text was not delivered (section 5). A node never bounces a `bounce` or an `ack`. |
 | `needs_human` | bool | A person must make this decision, not an agent. |
 | `tags` | ≤8 strings ≤24 | Free-form labels (`WARN`, `OUTAGE`). |
 | `room` | ≤64 | The id of the room for this message (§3.6). |
@@ -198,7 +198,7 @@ A node routes replies locally. This is node behaviour, not wire format. The node
 1. If a text starts with `@name`, `@name@me` or `name@me`, the node delivers it only to the session with the name `name`. `me` is the name on the card of the node. The name is `TOXI_SESSION`, or else the name that the user gave the Claude Code session, or else the name of the project directory. If another live session has that name, the node adds `-2`, `-3` and so on. When that other session stops, the session gets the name without the suffix. A session that was renamed keeps its earlier names while it runs: `@old-name` and replies to what it sent under the old name still reach it, and no other session can take the old name. The match is case-insensitive.
 2. Otherwise, the node uses its record of which of its own sessions sent each message. This record never goes on the wire. The node delivers an incoming `reply_to` to that session, or to the session that wrote last in the same thread with that contact. This link is valid for 30 minutes from the `created_at` of the incoming message.
 3. After 30 minutes, or if no such link exists, the node applies the configured binding of the peer.
-4. If no live session matches, or more than one session matches, the message stays in the shared inbox. No session gets it automatically.
+4. If no live session matches, or more than one session matches, the node does not deliver the text. It marks the text as handled and sends a `bounce` to the sender, with `reply_to` set to the text. A `collaborator` or `owner` peer also gets the names of the live sessions. The sender corrects the `@name` and sends the text again. Exceptions: the node does not bounce an `ack`, a `bounce`, relayed history or a room message, and it does not bounce when no session runs at all (a headless identity). Texts from contacts that are not peers stay in the shared inbox.
 
 The `from_session` of an outgoing message is the name of the sending session. A peer that wants to address that session can start its text with `@` and that name.
 

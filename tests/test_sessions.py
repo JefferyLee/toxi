@@ -171,3 +171,45 @@ def test_cli_send_from_a_session_shell_carries_its_name_and_dir(tmp_path, monkey
     assert (cli_mod._default_session(), cli_mod._default_session_dir()) == ("toxi-2", "/w/toxi")
     _as(monkeypatch, 999)  # a plain terminal: no session
     assert (cli_mod._default_session(), cli_mod._default_session_dir()) == (None, None)
+
+
+def _incoming_in(d, body, **meta):
+    _incoming(d, body, **meta)  # its bounce, if any, is stored after it
+    return d.db.execute("SELECT msg_uuid FROM messages WHERE direction='in' "
+                        "ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def _bounces(d):
+    return d.db.execute("SELECT content, reply_to, thread FROM messages "
+                        "WHERE direction='out' AND kind='bounce' ORDER BY id").fetchall()
+
+
+def test_a_text_no_session_can_take_goes_back_to_the_sender(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, '[peers.codex]\ntrust = "collaborator"\n')
+    d = _daemon(tmp_path, monkeypatch)
+    sessions.register("/w/those-moments", pid=101)
+    sessions.register("/w/OnesVibe", pid=102)
+    unread = lambda u: d._get_message({"msg_uuid": u})["message"]["read_at"] is None  # noqa: E731
+
+    ok = _incoming_in(d, "@OnesVibe deploy done")
+    assert unread(ok) and _bounces(d) == []
+    wrong = _incoming_in(d, "@scout-daily batch 201", thread="scout-daily")
+    assert not unread(wrong)
+    body, reply_to, thread = _bounces(d)[-1]
+    assert (reply_to, thread) == (wrong, "scout-daily") and not body.startswith("@")
+    assert "'scout-daily'" in body and "OnesVibe, those-moments" in body
+    vague = _incoming_in(d, "W9 progress")  # no @name, two sessions, no binding
+    assert not unread(vague) and "no @name" in _bounces(d)[-1][0]
+    n = len(_bounces(d))
+    assert unread(_incoming_in(d, "@nobody", kind="bounce")) and len(_bounces(d)) == n  # no loops
+    assert unread(_incoming_in(d, "@nobody", kind="ack")) and len(_bounces(d)) == n
+
+    (tmp_path / "config.toml").write_text('[peers.codex]\ntrust = "observer"\n')
+    _incoming_in(d, "@nobody hi")
+    assert "Running sessions" not in _bounces(d)[-1][0]  # observers do not see the list
+
+    LIVE.difference_update({101, 102, 103})  # no session runs: keep it for the next one
+    try:
+        assert unread(_incoming_in(d, "@nobody hi")) and len(_bounces(d)) == n + 1
+    finally:
+        LIVE.update({101, 102, 103})

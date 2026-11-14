@@ -313,7 +313,7 @@ The daemon reads `[daemon]`, `[retry]` and `[tox]` when it starts. If you edit t
 
 `dirs` binds a peer to sessions started in exactly one of those directories (`CLAUDE_PROJECT_DIR`). Sessions in other directories or in subdirectories do not get its messages. If exactly one live session matches, it gets the message. A peer without `dirs` matches each live session.
 
-If no session matches, or more than one session matches, the message goes to the **shared inbox**. No session gets it automatically. The status line shows the count as `📥 N shared`. To read the shared inbox, run `/toxi:read --all` in a session, or `toxi unread` in a terminal. Messages from contacts that are not peers are also in the shared inbox.
+If no session matches, or more than one session matches, toxi does not deliver the message. It marks it as handled and sends a **bounce** back to the sender: "Not delivered: no session named 'x' is running here …". A `collaborator` or `owner` peer also gets the names of the running sessions. The sender then sends the message again with the exact `@name`. If no session runs at all, toxi keeps the message for the next session. Messages from contacts that are not peers go to the **shared inbox**. No session gets them automatically. The status line shows the count as `📥 N shared`. To read the shared inbox, run `/toxi:read --all` in a session, or `toxi unread` in a terminal.
 
 Replies use a further rule. A message can answer a message that one of your sessions sent (`reply_to`). A message can also continue a thread that the session wrote in. In both cases, toxi delivers the message to **that** session for 30 minutes, whatever the binding of the peer. Thus an answer to a question from project A goes to project A.
 

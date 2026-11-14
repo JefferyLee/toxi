@@ -22,7 +22,7 @@ from collections import deque
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import __version__, client, config, db, envelope, invite, ipc, paths, sessions
+from . import __version__, client, config, db, envelope, invite, ipc, paths, peers, sessions
 from .tox import (
     FILE_CONTROL_CANCEL,
     FILE_CONTROL_RESUME,
@@ -643,11 +643,49 @@ class Daemon:
     def _stored(self, msg_uuid: str, alias: str, meta: dict) -> None:
         """A text was stored: wake hooks and flag unless it is a mere `ack`
         (design §4.5: acknowledgements never wake anyone) or relayed room
-        history (old news, stored as already read); always tell subscribers."""
+        history (old news, stored as already read); always tell subscribers.
+        A peer text that no running session can take goes back (`_bounce`)."""
+        if self._bounce(msg_uuid, alias, meta):
+            return
         wake = meta.get("kind") != "ack" and not meta.get("relayed")
         if wake:
             self._queue_hook(alias, msg_uuid, "text")
         self._announce(msg_uuid, alias, wake=wake)
+
+    def _bounce(self, msg_uuid: str, alias: str, meta: dict) -> bool:
+        """A text from a peer that no live session owns: its `@name` is not a
+        running session, or toxi cannot tell which session it is for. Mark it
+        handled and tell the sender, so it does not wait in the shared inbox.
+        Never for acks, bounces or relayed history, and not when no session
+        runs at all (a headless identity, or sessions not started yet)."""
+        spec = config.peer_config().get(alias)
+        if spec is None or meta.get("kind") in ("ack", "bounce") or meta.get("relayed"):
+            return False
+        live = sessions.live()
+        if not live:
+            return False
+        m = self._get_message({"msg_uuid": msg_uuid}).get("message")
+        if not m or m.get("room_id"):
+            return False
+        names = {s["name"].lower() for s in live}
+        if peers.owner(m, spec, live) in names:
+            return False
+        now = int(time.time())
+        self.db.execute("UPDATE messages SET read_at=?, handled_at=?, status='read' WHERE msg_uuid=?",
+                        (now, now, msg_uuid))
+        self.db.commit()
+        name = peers.target(m)
+        why = (f"no session named {name!r} is running here." if name else
+               "it has no @name, and toxi cannot tell which session it is for.")
+        body = f"Not delivered: {why} Start the text with the exact @name of one session and send it again."
+        if spec.get("trust") in ("collaborator", "owner"):
+            body += " Running sessions: " + ", ".join(sorted(s["name"] for s in live)) + "."
+        try:
+            self._send_message({"alias": alias, "body": body, "reply_to": m["msg_uuid"],
+                                "thread": m.get("thread"), "kind": "bounce"})
+        except RpcError as e:
+            log.warning("could not bounce %s: %s", msg_uuid, e)
+        return True
 
     def _tick_parts(self) -> None:
         now = time.time()
