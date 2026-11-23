@@ -4,6 +4,7 @@ directly; everything else goes through the daemon.
 """
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -433,6 +434,9 @@ def _toxi_segment() -> str:
         msgs = client.request("get_messages", {"unread_only": True, "limit": 100})["messages"]
         msgs, shared = peers.split(msgs, sessions.current())
     except client.DaemonNotRunning:
+        why = service.last_error() if service.installed() else None
+        if why:  # e.g. a library the daemon cannot import: say so where the user looks
+            return f"{_BOLD_RED}toxi stopped: {why[:70]}{_RESET}"
         return f"{_YELLOW}toxi: offline{_RESET}"
     except Exception:  # a status line must never crash the prompt with a traceback
         return f"{_YELLOW}toxi: error{_RESET}"
@@ -858,6 +862,55 @@ def show(ctx, msg_uuid):
     click.echo(_content(m))
 
 
+_TRACE_STEPS = [("written (sender's clock)", "created_at"), ("received here", "received_at"),
+                ("first sent", "sent_at"), ("last sent", "last_attempt_at"),
+                ("delivered (ACK)", "delivered_at"), ("read by the contact", "read_receipt_at"),
+                ("read here", "read_at"), ("handled", "handled_at")]
+
+
+def _trace_log(prefix: str) -> list:
+    """Lines of daemon.log (and its rotated copies, oldest first) that name the id."""
+    base = paths.log_path()
+    files = [base.with_name(f"{base.name}.{i}") for i in range(5, 0, -1)] + [base]
+    lines = []
+    for f in files:
+        try:
+            with open(f, errors="replace") as fh:
+                lines += [ln.rstrip("\n") for ln in fh if prefix in ln]
+        except OSError:
+            pass
+    return lines
+
+
+@cli.command()
+@click.argument("msg_uuid")
+@click.pass_context
+def trace(ctx, msg_uuid):
+    """Why was a message late? Each step of one message with its time, then the
+    daemon's log lines about it (ids appear there by their first 8 chars)."""
+    m = _call("get_message", {"msg_uuid": msg_uuid}).get("message")
+    if m is None:
+        raise click.ClickException(f"no message with id {msg_uuid}")
+    steps = [(label, m[k]) for label, k in _TRACE_STEPS if m.get(k)]
+    logs = _trace_log(m["msg_uuid"][:8])
+    if _emit(ctx, {"msg_uuid": m["msg_uuid"], "alias": m["alias"], "direction": m["direction"],
+                   "status": m["status"], "steps": dict((k, m[k]) for _, k in _TRACE_STEPS if m.get(k)),
+                   "log": logs}):
+        return
+    who = f"to {m['alias']}" if m["direction"] == "out" else f"from {_sender(m)}"
+    click.echo(f"{m['msg_uuid']} · {who} · {m['status']}")
+    start = steps[0][1] if steps else 0
+    for label, ts in sorted(steps, key=lambda x: x[1]):
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        click.echo(f"  {when}  +{ts - start:>6}s  {label}")
+    if logs:
+        click.echo("daemon.log:")
+        for ln in logs[-40:]:
+            click.echo(f"  {ln}")
+    else:
+        click.echo("daemon.log: no lines name this id (older daemons logged less)")
+
+
 @cli.command()
 @click.option("--alias", "aliases", multiple=True, help="Only events about this contact (repeatable).")
 @click.option("--context", default=0, metavar="N",
@@ -895,6 +948,7 @@ def service_cmd():
 @service_cmd.command("install")
 def service_install():
     """Install and start the background service for this identity."""
+    _require_identity()
     if bootstrap.daemon_running():
         _call("shutdown")  # the service manager starts its own instance
         for _ in range(50):
@@ -1040,19 +1094,139 @@ def agent_run(command, aliases, context, session, timeout):
             return
 
 
+def _version_key(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def _code_time() -> float:
+    """When the code this CLI runs was installed (or, in a checkout, last edited)."""
+    pkg = Path(__file__).resolve().parent
+    return max((f.stat().st_mtime for f in pkg.glob("*.py")), default=0.0)
+
+
+def _ps() -> dict:
+    """pid -> (ppid, start time, command) for every process, from `ps`."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,lstart=,command="], capture_output=True,
+                             text=True, timeout=10, env=dict(os.environ, LC_ALL="C")).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    procs = {}
+    for line in out.splitlines():
+        f = line.split(None, 7)
+        if len(f) < 8:
+            continue
+        try:
+            started = time.mktime(time.strptime(" ".join(f[2:7]), "%a %b %d %H:%M:%S %Y"))
+            procs[int(f[0])] = (int(f[1]), started, f[7])
+        except ValueError:
+            continue
+    return procs
+
+
+def _stale_mcp() -> list:
+    """`toxi mcp serve` processes that started before the current code: they
+    run the old code until their agent session restarts. With that session."""
+    procs, since, out = _ps(), _code_time(), []
+    for pid, (ppid, started, cmd) in procs.items():
+        if "toxi mcp serve" not in cmd and "toxi.mcp_server" not in cmd:
+            continue
+        if started >= since - 1:
+            continue
+        agent, p = None, ppid
+        for _ in range(8):  # up to the claude / codex process that started it
+            if p not in procs:
+                break
+            name = os.path.basename(procs[p][2].split()[0]).lower()
+            if "claude" in name or "codex" in name:
+                agent = {"pid": p, "command": name}
+                break
+            p = procs[p][0]
+        out.append({"pid": pid, "started": int(started), "agent": agent})
+    return out
+
+
+def _codex_bin() -> str | None:
+    app = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+    return shutil.which("codex") or (app if os.path.exists(app) else None)
+
+
+def _codex_marketplace() -> dict | None:
+    """[marketplaces.toxi] of Codex's config.toml: where Codex takes the toxi plugin from."""
+    import tomllib
+    cfg = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
+    try:
+        return tomllib.loads(cfg.read_text()).get("marketplaces", {}).get("toxi")
+    except (OSError, ValueError):
+        return None
+
+
 def _doctor_checks() -> list:
-    """Every check as {"ok": True|False|None(info), "check": str, "detail": str}."""
+    """This machine, then the identity of TOXI_HOME."""
+    return _machine_checks() + _home_checks()
+
+
+def _machine_checks() -> list:
+    """Once per machine: the engine, libtoxcore, the plugins, old MCP servers.
+    Each check is {"ok": True|False|None(info), "check": str, "detail": str}."""
     out = []
 
     def add(ok, check, detail=""):
         out.append({"ok": ok, "check": check, "detail": detail})
 
     add(True, "engine", f"toxi {__version__} — {sys.executable}")
+    if "/Cellar/python@" in os.path.realpath(sys.executable):
+        add(None, "python", "toxi's venv uses a Homebrew python@ that `brew upgrade` can remove; "
+            "then run `pipx reinstall toxi`")
     try:
-        from .tox import Tox as _Tox  # noqa: F401
+        from . import tox as _tox
+        _tox.load()
         add(True, "libtoxcore", "loadable")
     except Exception as e:  # ToxError or import failure
         add(False, "libtoxcore", f"{e}")
+    plugin = bootstrap.toxi_plugin_cache_root()
+    if plugin.exists():
+        versions = sorted((p.name for p in plugin.iterdir()
+                           if p.is_dir() and re.fullmatch(r"\d+\.\d+\.\d+", p.name)), key=_version_key)
+        latest = versions[-1] if versions else "?"
+        hooks = plugin / latest / "hooks" / "hooks.json"
+        fresh = (latest == __version__ and hooks.exists() and "wake_hook" in hooks.read_text())
+        add(fresh, "claude plugin", f"{latest} installed" + ("" if fresh else
+            f", CLI is {__version__} — `toxi reinstall-plugin` (or `toxi upgrade`), then restart the sessions"))
+    elif Path.home().joinpath(".claude").exists():
+        add(None, "claude plugin", "not installed — `install.sh --for claude`")
+    if shutil.which("codex"):
+        ok, text = _codex_stdout(["mcp", "list"])
+        add(ok and "toxi" in text, "codex", "MCP server registered" if ok and "toxi" in text
+            else "codex found but toxi MCP not registered — `toxi setup codex`")
+    market = _codex_marketplace()
+    if market:
+        src = str(market.get("source", ""))
+        if market.get("source_type") == "local":
+            ok = (Path(src) / ".agents" / "plugins" / "marketplace.json").exists()
+            add(ok, "codex plugin", f"from {src}" + ("" if ok else " — that dir is gone; `toxi setup codex` "
+                                                      "in a toxi checkout, or a Git source"))
+        else:
+            ref = market.get("ref") or "the default branch"
+            ok = ref == f"v{__version__}"
+            add(ok, "codex plugin", f"from {src} at {ref}" + ("" if ok else " — `toxi upgrade` moves it to "
+                                                              f"v{__version__}"))
+    stale = _stale_mcp()
+    if stale:
+        who = ", ".join(f"{s['agent']['command']} pid {s['agent']['pid']}" if s["agent"] else f"pid {s['pid']}"
+                        for s in stale[:6])
+        add(False, "mcp servers", f"{len(stale)} `toxi mcp serve` started before this code — restart "
+            f"these sessions: {who}" + (" …" if len(stale) > 6 else ""))
+    return out
+
+
+def _home_checks() -> list:
+    """For the identity of TOXI_HOME: its files, daemon, service and peers."""
+    out = []
+
+    def add(ok, check, detail=""):
+        out.append({"ok": ok, "check": check, "detail": detail})
+
     home = paths.config_dir()
     add(bootstrap.identity_initialized(), "identity", f"{paths.tox_state_path()}"
         + ("" if bootstrap.identity_initialized() else " — run `toxi init` or `toxi setup engine`"))
@@ -1066,11 +1240,15 @@ def _doctor_checks() -> list:
         add(False, "daemon", "a daemon holds the lock but does not answer — busy or hung; "
             "`toxi service restart`")
     else:
-        add(running, "daemon", "running" if running else "not running — `toxi daemon start`, or "
-            "`toxi service install` to keep it alive")
+        why = None if running else service.last_error()
+        add(running, "daemon", "running" if running else "not running"
+            + (f" — last error in service.log: {why}" if why else "")
+            + " — `toxi daemon start`, or `toxi service install` to keep it alive")
     st = service.status()
     if st["installed"]:
         add(st["running"], "service", f"{'running' if st['running'] else 'installed but not running'} — {st['path']}")
+        if not service.current():
+            add(False, "service file", "written by an older toxi — `toxi service install` (or `toxi upgrade`)")
     else:
         add(None, "service", "not installed — `toxi service install` survives reboots")
     if running:
@@ -1101,36 +1279,45 @@ def _doctor_checks() -> list:
         elif known and spec.get("key") and known[alias] != spec["key"]:
             problems.append("key does not match the contact's public key")
         add(not problems, f"peer {alias}", f"{spec['trust']}" + (f" — {', '.join(problems)}" if problems else ""))
-    plugin = bootstrap.toxi_plugin_cache_root()
-    if plugin.exists():
-        versions = sorted(p.name for p in plugin.iterdir() if p.is_dir())
-        hooks = plugin / (versions[-1] if versions else "") / "hooks" / "hooks.json"
-        has_post = hooks.exists() and "PostToolUse" in hooks.read_text()
-        add(has_post, "claude plugin", f"{versions[-1] if versions else '?'} installed"
-            + ("" if has_post else " — old hooks; rerun install.sh and /reload-plugins"))
-    elif Path.home().joinpath(".claude").exists():
-        add(None, "claude plugin", "not installed — `install.sh --for claude`")
-    if shutil.which("codex"):
-        ok, text = _codex_stdout(["mcp", "list"])
-        add(ok and "toxi" in text, "codex", "MCP server registered" if ok and "toxi" in text
-            else "codex found but toxi MCP not registered — `toxi setup codex`")
     return out
 
 
 @cli.command()
+@click.option("--all", "all_homes", is_flag=True,
+              help="Check every identity on this machine (each TOXI_HOME with a service), not only this one.")
 @click.pass_context
-def doctor(ctx):
+def doctor(ctx, all_homes):
     """Check this machine's toxi setup end to end and say what to fix."""
-    checks = _doctor_checks()
-    if _emit(ctx, checks):
+    sections = [("this machine", _machine_checks())]
+    if all_homes:
+        sections += [(str(h), _in_home(h, _home_checks)) for h in service.homes()]
+    else:
+        sections.append((str(paths.config_dir()), _home_checks()))
+    if _emit(ctx, sections if all_homes else [c for _, cs in sections for c in cs]):
         return
-    for c in checks:
-        mark = "✓" if c["ok"] else ("⚠" if c["ok"] is False else "ℹ")
-        click.echo(f"  {mark} {c['check']:14} {c['detail']}")
-    bad = [c for c in checks if c["ok"] is False]
+    for title, checks in sections:
+        if all_homes:
+            click.echo(f"{title}:")
+        for c in checks:
+            mark = "✓" if c["ok"] else ("⚠" if c["ok"] is False else "ℹ")
+            click.echo(f"  {mark} {c['check']:14} {c['detail']}")
+    bad = [c for _, cs in sections for c in cs if c["ok"] is False]
     click.echo(f"\n{len(bad)} problem(s)." if bad else "\nAll good.")
     if bad:
         sys.exit(1)
+
+
+def _in_home(home, fn):
+    """Run fn with TOXI_HOME set to `home` (paths, config and the client read it each time)."""
+    old = os.environ.get("TOXI_HOME")
+    os.environ["TOXI_HOME"] = str(home)
+    try:
+        return fn()
+    finally:
+        if old is None:
+            os.environ.pop("TOXI_HOME", None)
+        else:
+            os.environ["TOXI_HOME"] = old
 
 
 @cli.command()
@@ -1217,12 +1404,125 @@ def _spawn_daemon(timeout: float = 10.0) -> int:
     raise click.ClickException(f"daemon failed to start; check {paths.log_path()}")
 
 
+def _require_identity() -> None:
+    """A daemon in a dir without a key makes a new identity, so a mistyped
+    TOXI_HOME would silently give this machine a second Tox ID."""
+    if not paths.tox_state_path().exists():
+        raise click.ClickException(
+            f"no identity in {paths.config_dir()}. If TOXI_HOME is right, run `toxi init` first "
+            "(or `toxi import` a backup); a daemon there would make a new Tox ID.")
+
+
+_EXPORT_FILES = ("tox_state.bin", "config.toml", "profile.json")
+_EXPORT_DBS = ("chat.db", "archive.db")
+_EXPORT_MANIFEST = "toxi-export.json"
+
+
+@cli.command(name="export")
+@click.argument("file", type=click.Path(dir_okay=False))
+def export_cmd(file):
+    """Back up this identity into one file: its key, history, config, card and
+    received media. `toxi import` restores it, here or on another machine."""
+    import sqlite3
+    import tarfile
+    import tempfile
+    home = paths.config_dir()
+    if not paths.tox_state_path().exists():
+        raise click.ClickException(f"no identity in {home}")
+    out = Path(file).expanduser()
+    if out.exists():
+        raise click.ClickException(f"{out} exists; give a new file name")
+    me = {}
+    if bootstrap.daemon_running():
+        try:
+            me = _call("get_me")
+        except click.ClickException:
+            pass
+    manifest = {"toxi_export": 1, "version": __version__, "created": int(time.time()),
+                "home": str(home), "name": me.get("name"), "tox_id": me.get("tox_id")}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in _EXPORT_DBS:  # SQLite's backup: a consistent copy while the daemon writes
+            if (home / name).exists():
+                src, dst = sqlite3.connect(home / name), sqlite3.connect(Path(tmp) / name)
+                try:
+                    src.backup(dst)
+                finally:
+                    src.close()
+                    dst.close()
+        (Path(tmp) / _EXPORT_MANIFEST).write_text(json.dumps(manifest))
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f, tarfile.open(fileobj=f, mode="w:gz") as tar:
+            tar.add(Path(tmp) / _EXPORT_MANIFEST, arcname=_EXPORT_MANIFEST)
+            for name in _EXPORT_FILES:
+                if (home / name).exists():
+                    tar.add((home / name).resolve(), arcname=name)  # a symlinked config: its content
+            for name in _EXPORT_DBS:
+                if (Path(tmp) / name).exists():
+                    tar.add(Path(tmp) / name, arcname=name)
+            media = paths.media_dir()
+            if media.is_dir():
+                for p in sorted(media.rglob("*")):
+                    if p.is_file() and not p.is_symlink() and not p.name.endswith(".part"):
+                        tar.add(p, arcname=str(Path("media") / p.relative_to(media)))
+    click.echo(f"✓ {out} ({out.stat().st_size // 1024} KB)")
+    click.echo("⚠ It holds the private key: whoever has the file can be this identity. "
+               "Keep it like a password.")
+
+
+@cli.command(name="import")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+def import_cmd(file):
+    """Restore an identity from `toxi export` into this TOXI_HOME, which must
+    not have one yet. Then stop that identity on the old machine."""
+    import tarfile
+    home = paths.config_dir()
+    if bootstrap.daemon_running() or bootstrap.daemon_locked():
+        raise click.ClickException(f"a daemon runs for {home}; stop it first")
+    if paths.tox_state_path().exists():
+        raise click.ClickException(f"{home} already has an identity; import into an empty TOXI_HOME")
+    try:
+        tar = tarfile.open(file, "r:gz")
+    except tarfile.TarError:
+        raise click.ClickException(f"{file} is not a `toxi export` file")
+    with tar:
+        members = tar.getmembers()
+        try:
+            manifest = json.load(tar.extractfile(_EXPORT_MANIFEST))
+        except (KeyError, TypeError, ValueError):
+            raise click.ClickException(f"{file} is not a `toxi export` file")
+        if manifest.get("toxi_export") != 1:
+            raise click.ClickException(f"{file} is not a `toxi export` file")
+        paths.ensure_config_dir()
+        for stale in ("chat.db-wal", "chat.db-shm", "archive.db-wal", "archive.db-shm"):
+            (home / stale).unlink(missing_ok=True)  # they belong to a database that is not there any more
+        root = home.resolve()
+        for m in members:
+            dest = (home / m.name).resolve()
+            # Only what export writes, as plain files below this dir: no links, no ../ names.
+            known = m.name in _EXPORT_FILES + _EXPORT_DBS or m.name.startswith("media/")
+            if not (m.isfile() and known and dest.is_relative_to(root) and dest != root):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(dest.parent, 0o700)
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                shutil.copyfileobj(tar.extractfile(m), f)
+    os.chmod(home, 0o700)
+    who = manifest.get("name") or "the identity"
+    click.echo(f"✓ {who} restored into {home}" + (f" (Tox ID {manifest['tox_id'][:16]}…)"
+                                                  if manifest.get("tox_id") else ""))
+    click.echo("Next: `toxi service install`. Stop this identity on the old machine first: "
+               "one key on two running daemons makes both drop in and out.")
+
+
 @daemon.command("start")
 def daemon_start():
     """Start the background daemon."""
     if bootstrap.daemon_running():
         click.echo("daemon already running")
         return
+    if not bootstrap.daemon_locked():  # else _spawn_daemon explains the lock
+        _require_identity()
     pid = _spawn_daemon()
     click.echo(f"daemon started (pid {pid})")
 
@@ -1271,7 +1571,7 @@ def _ensure_mcp_extra() -> str:
     except ImportError:
         pass
     try:
-        r = subprocess.run(["pipx", "inject", "toxi", "mcp"],
+        r = subprocess.run(["pipx", "inject", "toxi", "mcp>=1.2,<2"],  # the pin of the [mcp] extra
                            capture_output=True, text=True)
     except FileNotFoundError:
         return "failed"
@@ -1726,10 +2026,138 @@ def _pipx_lifecycle(pipx_args: list[str], label: str) -> None:
     click.echo("  /plugin install toxi")
 
 
+def _pypi_latest() -> str | None:
+    import urllib.request
+    try:
+        with urllib.request.urlopen("https://pypi.org/pypi/toxi/json", timeout=10) as r:
+            return json.load(r)["info"]["version"]
+    except Exception:  # offline, or PyPI down: the caller says so
+        return None
+
+
+def _editable() -> bool:
+    """Running from a source checkout (pipx --editable), not an installed wheel."""
+    return "site-packages" not in Path(__file__).resolve().as_posix()
+
+
+def _installed_version(toxi: str) -> str | None:
+    try:
+        out = subprocess.run([toxi, "--version"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"(\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else None
+
+
+def _pipx_toxi() -> str:
+    """The toxi that pipx manages (not just the first one on PATH)."""
+    try:
+        r = subprocess.run(["pipx", "environment", "--value", "PIPX_BIN_DIR"], capture_output=True,
+                           text=True, timeout=30)
+    except FileNotFoundError:
+        raise click.ClickException("pipx not found on PATH; upgrade toxi with the tool that installed it.")
+    bin_dir = r.stdout.strip() or str(Path.home() / ".local" / "bin")
+    listed = subprocess.run(["pipx", "list", "--short"], capture_output=True, text=True, timeout=30).stdout
+    if not re.search(r"^toxi\b", listed, re.M):
+        raise click.ClickException("toxi is not installed with pipx here; upgrade it with the tool that "
+                                   "installed it (uv tool, pip), then run `toxi upgrade --all`.")
+    return str(Path(bin_dir) / "toxi")
+
+
+def _upgrade_install(want: str) -> str:
+    """pipx install toxi[mcp]==want; returns the toxi it installed. Right after a
+    release the index can still serve the old version: then install once more.
+    A failing install is not tried again (an old pipx may remove the venv)."""
+    toxi = _pipx_toxi()
+    for attempt in range(3):
+        click.echo(f"→ pipx install toxi[mcp]=={want}" + (f" (try {attempt + 1})" if attempt else ""))
+        r = subprocess.run(["pipx", "install", "--force", f"toxi[mcp]=={want}",
+                            "--pip-args=--no-cache-dir"], capture_output=True, text=True)
+        if r.returncode != 0:
+            out = (r.stderr or r.stdout).strip()
+            hint = ("\nThe toxi venv uses an old Python: `pipx install --force --python python3.12 "
+                    f"'toxi[mcp]=={want}'`") if "Requires-Python" in out or "requires a different Python" in out else ""
+            raise click.ClickException(f"pipx install failed:\n{out[-800:]}{hint}")
+        if _installed_version(toxi) == want:
+            click.echo(f"✓ toxi {want} installed")
+            return toxi
+        time.sleep(20)
+    raise click.ClickException(f"pipx still installs another version than {want}; try again in a few minutes")
+
+
+def _upgrade_codex_plugin(version: str) -> None:
+    """A Codex plugin from a Git marketplace pinned to a tag: move it to this release."""
+    market, codex = _codex_marketplace(), _codex_bin()
+    if not market or market.get("source_type") == "local":
+        if market:
+            click.echo("✓ Codex plugin comes from a local checkout; restart Codex sessions to load it")
+        return
+    if market.get("ref") == f"v{version}":
+        click.echo(f"✓ Codex plugin already at v{version}")
+        return
+    if not codex:
+        click.echo(f"⚠ Codex plugin is at {market.get('ref')}, but the codex CLI is not found")
+        return
+    src = str(market.get("source", "https://github.com/JefferyLee/toxi.git"))
+    for args in (["plugin", "marketplace", "remove", "toxi"],
+                 ["plugin", "marketplace", "add", src, "--ref", f"v{version}"],
+                 ["plugin", "add", "toxi@toxi"]):
+        r = subprocess.run([codex, *args], capture_output=True, text=True)
+        if r.returncode != 0:
+            click.echo(f"⚠ codex {' '.join(args)}: {(r.stderr or r.stdout).strip()[-300:]}")
+            return
+    click.echo(f"✓ Codex plugin moved to v{version}")
+
+
 @cli.command()
-def upgrade():
-    """Upgrade the engine via pipx — only fires when pyproject.toml version bumped."""
-    _pipx_lifecycle(["upgrade", "toxi"], "upgrade")
+@click.option("--version", "want", default=None, help="Install this version (default: the newest on PyPI).")
+@click.option("--all", "all_homes", is_flag=True,
+              help="Restart every identity on this machine, not only this TOXI_HOME's.")
+@click.option("--installed", is_flag=True, hidden=True)  # second stage, run by the new code
+def upgrade(want, all_homes, installed):
+    """Upgrade toxi on this machine in one go: install the new version, restart
+    each daemon under its service, refresh the Claude Code and Codex plugins,
+    and list the agent sessions that still run the old code."""
+    if not installed:
+        if _editable():
+            click.echo(f"ℹ editable install from {Path(__file__).resolve().parents[2]}: "
+                       "update the checkout yourself; restarting on its code")
+        else:
+            want = want or _pypi_latest()
+            if not want:
+                raise click.ClickException("could not reach PyPI; give the version with --version")
+            if _version_key(want) < _version_key("0.7.0"):
+                raise click.ClickException(f"toxi {want} has no `upgrade --installed`; install it with pipx")
+            if _version_key(want) < _version_key(__version__):
+                raise click.ClickException(f"toxi {__version__} is newer than {want}; not going back")
+            if want != __version__:
+                toxi = _upgrade_install(want)
+                # The rest runs on the code just installed, not on this process's.
+                os.execv(toxi, [toxi, "upgrade", "--installed"] + (["--all"] if all_homes else []))
+            click.echo(f"✓ toxi {want} is installed")
+    for home in (service.homes() if all_homes else [paths.config_dir()]):
+        env = dict(os.environ, TOXI_HOME=str(home))
+        if _in_home(home, service.installed):
+            r = subprocess.run([sys.argv[0], "service", "install"], env=env, capture_output=True, text=True)
+            click.echo(f"{'✓' if r.returncode == 0 else '⚠'} {home}: "
+                       + ((r.stdout or r.stderr).strip().splitlines() or ["?"])[-1])
+        else:
+            click.echo(f"ℹ {home}: no service; restart its daemon with `toxi daemon stop && toxi daemon start`")
+    if bootstrap.toxi_plugin_cache_root().exists():
+        # The plugin of this release, not whatever GitHub HEAD is now.
+        ref = [] if _editable() else ["--ref", f"v{__version__}"]
+        r = subprocess.run([sys.argv[0], "reinstall-plugin", *ref], capture_output=True, text=True)
+        click.echo("✓ Claude Code plugin refreshed" if r.returncode == 0
+                   else f"⚠ reinstall-plugin: {(r.stderr or r.stdout).strip()[-300:]}")
+    _upgrade_codex_plugin(__version__)
+    stale = _stale_mcp()
+    if stale:
+        click.echo(f"\nRestart these agent sessions: their `toxi mcp serve` still runs the old code "
+                   f"(and Claude Code loads the new hooks on restart or /reload-plugins):")
+        for st in stale:
+            a = st["agent"]
+            click.echo(f"  {a['command']} pid {a['pid']}" if a else f"  toxi mcp serve pid {st['pid']}")
+    click.echo(f"\nDone: toxi {__version__}. `toxi doctor --all` checks the result.")
 
 
 @cli.command()
@@ -1743,8 +2171,9 @@ def _git(cwd, *args) -> subprocess.CompletedProcess:
 
 
 @cli.command(name="reinstall-plugin")
-def reinstall_plugin():
-    """Refresh the Claude Code plugin from GitHub HEAD (then /reload-plugins in Claude Code)."""
+@click.option("--ref", default=None, help="A tag such as v0.7.0 (default: GitHub HEAD).")
+def reinstall_plugin(ref):
+    """Refresh the Claude Code plugin from GitHub (then /reload-plugins in Claude Code)."""
     marketplace = bootstrap.toxi_marketplace_clone()
     if not marketplace.exists():
         raise click.ClickException(
@@ -1753,10 +2182,10 @@ def reinstall_plugin():
         )
 
     click.echo(f"→ Fetching latest plugin from GitHub into {marketplace}...")
-    r = _git(marketplace, "fetch", "origin")
+    r = _git(marketplace, "fetch", "--tags", "origin")
     if r.returncode != 0:
         raise click.ClickException(f"git fetch failed:\n{r.stderr.rstrip()}")
-    r = _git(marketplace, "reset", "--hard", "origin/HEAD")
+    r = _git(marketplace, "reset", "--hard", ref or "origin/HEAD")
     if r.returncode != 0:
         raise click.ClickException(f"git reset failed:\n{r.stderr.rstrip()}")
 

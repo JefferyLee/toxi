@@ -27,7 +27,7 @@ toxi setup engine && toxi service install    # 身份 + daemon，跨重启常驻
 toxi setup claude                            # 或：toxi setup codex · toxi setup headless --name my-bot --operator me
 ```
 
-要升级，运行 `pipx upgrade toxi`。然后运行 `toxi service restart`。
+要升级一台机器，运行 `toxi upgrade --all`。它安装新版本，重启每个身份的 daemon，刷新插件，并列出需要重启的 agent 会话。`toxi doctor --all` 检查结果。从 0.6.x 第一次升级时，先手动装一次，因为旧的 `toxi upgrade` 没有 `--all`：`pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`，然后 `toxi upgrade --all`。
 
 一行安装脚本用 PyPI 上的同一个包完成同样的步骤。它还做这些事：
 
@@ -79,13 +79,13 @@ dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 
 
 | | |
 |---|---|
-| 身份 | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor` |
+| 身份 | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor [--all]` · `toxi export` / `toxi import`（备份、迁到另一台机器） |
 | 联系人 | `toxi pair` / `toxi join <invite>` · `toxi add` / `toxi requests` / `toxi accept` · `toxi rename` · `toxi contacts` · `toxi peers` · `toxi introduce` |
 | 消息 | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N] [--wait-handled N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi done <id>…` · `toxi queue` · `toxi watch` |
 | room | `toxi room create <name> <alias>…` · `room add/remove`（新成员收到最近 20 条消息） · `room send` · `room list/show` · `toxi read - --room <name>` |
 | 历史 | `toxi search <文本>` · `toxi archive --status` · `toxi archive --older-than 90d`（或设置 `[archive] after_days`，daemon 每天自动归档） |
 | agent | `toxi peer-inbox`（hook 调用这个命令）· `toxi agent run --exec CMD` · `toxi mcp serve` · `toxi setup claude\|codex\|headless` |
-| daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade` · `toxi teardown` |
+| daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade [--all]` · `toxi trace <id>`（消息为什么晚到） · `toxi teardown` |
 
 要得到机器可读输出，在任何读命令前加 `--json`。
 

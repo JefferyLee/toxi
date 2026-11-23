@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh |
 The script does these steps in this order:
 
 1. **libtoxcore**: If libtoxcore is already installed, the script skips this step. If not, it runs `brew install toxcore` on macOS. On Linux, it runs `sudo apt-get install libtoxcore2`, `sudo dnf install toxcore` or `sudo pacman -S toxcore`. If it finds no known package manager, it stops.
-2. **Python app installer**: If pipx is installed, the script uses pipx. If not, it uses uv. If neither is installed, it installs pipx with Homebrew on macOS, or with `pip install --user` on other systems. As a last resort, it uses `pip install --user`. If `python3` is older than 3.10, it shows a warning.
+2. **Python app installer**: If pipx is installed, the script uses pipx. If not, it uses uv. If neither is installed, it installs pipx with Homebrew on macOS, or with `pip install --user` on other systems. As a last resort, it uses `pip install --user`. If `python3` is older than 3.11, it shows a warning.
 3. **Engine**: The script installs or upgrades `toxi[mcp]` from PyPI. If it cannot reach PyPI, it uses the latest GitHub release tag. The `--ref` flag forces a git ref.
 4. **Identity and daemon**: The script runs `toxi setup engine` and then `toxi service install`. The service uses launchd on macOS and `systemd --user` on Linux. If there is no service manager, the script prints a cron line that keeps the daemon alive.
 5. **Adapter**: The `--for` flag selects the adapter. If the `claude` command or `~/.claude` exists, the default is `claude`. If not, the default is `headless`.
@@ -58,7 +58,7 @@ less install.sh && bash install.sh --for codex
 - **macOS** (Apple Silicon and Intel): toxi is fully supported. Services use launchd. Both Macs in the reference setup run toxi.
 - **Linux**: libtoxcore comes from the distribution. If a user session exists, services use `systemd --user`. Some hosts have no systemd, for example containers and some VMs. On these hosts, `toxi service install` tells you this, and a cron line keeps the daemon alive: `*/10 * * * * toxi daemon start >/dev/null 2>&1`.
 - **Installers**: pipx is the preferred installer. uv tool also works: `uv tool install 'toxi[mcp]'`. Plain `pip install --user` is the last resort. Claude Code and Codex need the `mcp` extra.
-- **Python**: 3.10 or newer.
+- **Python**: 3.11 or newer.
 
 ## Several identities on one machine
 
@@ -66,10 +66,24 @@ Each identity is a `TOXI_HOME`. For example: `TOXI_HOME=~/.config/toxi-codex tox
 
 ## Upgrade
 
-1. Run `toxi upgrade`, or run `install.sh` again. `toxi upgrade` uses pipx.
-2. Run `toxi service restart` for each identity.
+Run `toxi upgrade --all` on each machine. The first time from 0.6.x, install once by hand, because the old `toxi upgrade` has no `--all`: `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`, then `toxi upgrade --all`. It does these steps:
 
-If a daemon still runs an older version than the CLI, `toxi doctor` shows this. toxi announces new capabilities to peers automatically at the next connect. Protocol v2 nodes can still communicate with v1 nodes.
+1. It installs the newest version from PyPI with pipx (`--version X.Y.Z` picks one). It ignores pip's cache, and it installs again if the index still gives the old version. An editable install skips this step.
+2. It restarts the daemon of each identity under its service (`toxi service install`).
+3. It refreshes the Claude Code plugin. It moves a Codex plugin that is pinned to a release tag to the new tag.
+4. It lists the agent sessions whose `toxi mcp serve` still runs the old code. Restart them.
+
+`toxi doctor --all` then checks every identity, the plugins and the MCP servers. Without `--all`, both commands work on this `TOXI_HOME` only. toxi announces new capabilities to peers automatically at the next connect. Protocol v2 nodes can still communicate with v1 nodes.
+
+## Back up or move an identity
+
+```bash
+toxi export ~/toxi-ada.tar.gz        # key, history, config, card, received media
+# on the new machine, with an empty TOXI_HOME:
+toxi import ~/toxi-ada.tar.gz && toxi service install
+```
+
+The file holds the private key: keep it like a password. Stop the identity on the old machine first. One key on two running daemons makes both drop in and out. `toxi daemon start`, `toxi service install` and a daemon under a service refuse a `TOXI_HOME` that has no identity, so a mistyped or moved path does not make a new Tox ID. Import takes only what export writes, and only as plain files inside `TOXI_HOME`.
 
 ## Uninstall
 

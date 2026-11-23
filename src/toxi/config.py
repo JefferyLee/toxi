@@ -78,13 +78,16 @@ def send_dirs() -> list[str]:
     return [str(x) for x in ([d] if isinstance(d, str) else d)]
 
 
+ARCHIVE_AFTER_DAYS = 90
+
+
 def archive_after_days() -> int:
     """`[archive] after_days = N`: the daemon moves messages older than N days to
-    archive.db once a day (0 / absent = never)."""
+    archive.db once a day (default 90; 0 = never). Undelivered ones stay."""
     try:
-        return max(0, int(_load().get("archive", {}).get("after_days", 0)))
+        return max(0, int(_load().get("archive", {}).get("after_days", ARCHIVE_AFTER_DAYS)))
     except (TypeError, ValueError):
-        return 0
+        return ARCHIVE_AFTER_DAYS
 
 
 def tox_config() -> dict:

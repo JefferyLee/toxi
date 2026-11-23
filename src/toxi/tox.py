@@ -54,9 +54,6 @@ def _load_libtoxcore() -> _C.CDLL:
     )
 
 
-_lib = _load_libtoxcore()
-
-
 def _setup_signatures(lib: _C.CDLL) -> None:
     lib.tox_options_new.restype = _C.c_void_p
     lib.tox_options_new.argtypes = [_C.c_void_p]
@@ -122,8 +119,6 @@ def _setup_signatures(lib: _C.CDLL) -> None:
     ]
 
 
-_setup_signatures(_lib)
-
 # --- callback prototypes ---
 _SELF_CONN_CB = _C.CFUNCTYPE(None, _C.c_void_p, _C.c_int, _C.c_void_p)
 _FRIEND_REQ_CB = _C.CFUNCTYPE(None, _C.c_void_p, _C.POINTER(_C.c_uint8), _C.c_char_p, _C.c_size_t, _C.c_void_p)
@@ -147,14 +142,39 @@ _FILE_RECV_CONTROL_CB = _C.CFUNCTYPE(
 _FILE_CHUNK_REQUEST_CB = _C.CFUNCTYPE(
     None, _C.c_void_p, _C.c_uint32, _C.c_uint32, _C.c_uint64, _C.c_size_t, _C.c_void_p,
 )
-_lib.tox_callback_self_connection_status.argtypes = [_C.c_void_p, _SELF_CONN_CB]
-_lib.tox_callback_friend_request.argtypes = [_C.c_void_p, _FRIEND_REQ_CB]
-_lib.tox_callback_friend_connection_status.argtypes = [_C.c_void_p, _FRIEND_CONN_CB]
-_lib.tox_callback_friend_message.argtypes = [_C.c_void_p, _FRIEND_MSG_CB]
-_lib.tox_callback_file_recv.argtypes = [_C.c_void_p, _FILE_RECV_CB]
-_lib.tox_callback_file_recv_chunk.argtypes = [_C.c_void_p, _FILE_RECV_CHUNK_CB]
-_lib.tox_callback_file_recv_control.argtypes = [_C.c_void_p, _FILE_RECV_CONTROL_CB]
-_lib.tox_callback_file_chunk_request.argtypes = [_C.c_void_p, _FILE_CHUNK_REQUEST_CB]
+
+
+def _setup_callbacks(lib: _C.CDLL) -> None:
+    lib.tox_callback_self_connection_status.argtypes = [_C.c_void_p, _SELF_CONN_CB]
+    lib.tox_callback_friend_request.argtypes = [_C.c_void_p, _FRIEND_REQ_CB]
+    lib.tox_callback_friend_connection_status.argtypes = [_C.c_void_p, _FRIEND_CONN_CB]
+    lib.tox_callback_friend_message.argtypes = [_C.c_void_p, _FRIEND_MSG_CB]
+    lib.tox_callback_file_recv.argtypes = [_C.c_void_p, _FILE_RECV_CB]
+    lib.tox_callback_file_recv_chunk.argtypes = [_C.c_void_p, _FILE_RECV_CHUNK_CB]
+    lib.tox_callback_file_recv_control.argtypes = [_C.c_void_p, _FILE_RECV_CONTROL_CB]
+    lib.tox_callback_file_chunk_request.argtypes = [_C.c_void_p, _FILE_CHUNK_REQUEST_CB]
+
+
+class _Lib:
+    """libtoxcore, loaded on first use. CLI commands that only talk to the
+    daemon run without it, and `toxi doctor` can report it missing."""
+    _real: _C.CDLL | None = None
+
+    def __getattr__(self, name):
+        if _Lib._real is None:
+            lib = _load_libtoxcore()
+            _setup_signatures(lib)
+            _setup_callbacks(lib)
+            _Lib._real = lib
+        return getattr(_Lib._real, name)
+
+
+def load() -> None:
+    """Load libtoxcore now; raises ToxError when it is missing."""
+    _lib.tox_version_major  # noqa: B018 — any attribute triggers the load
+
+
+_lib = _Lib()
 
 
 class Tox:

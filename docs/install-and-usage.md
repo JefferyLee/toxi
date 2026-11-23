@@ -14,7 +14,7 @@ toxi has **two parts**. You install each part separately:
 ## 1. Prerequisites
 
 - **macOS** or **Linux**. You get libtoxcore from Homebrew or from your distribution. launchd or `systemd --user` keeps the daemon running (§11).
-- **Python 3.10+**. To check the version, run `python3 --version`.
+- **Python 3.11+**. To check the version, run `python3 --version`.
 - **An always-on machine** for each person who must receive messages reliably. A laptop that sleeps is also satisfactory. Messages stay in the queue until the laptop wakes.
 - **Outbound UDP** to the public internet for the Tox DHT. Outbound TCP is the fallback.
 
@@ -248,7 +248,7 @@ A member that joins later receives the last 20 messages of the room from the cre
 
 **Files.** `toxi send <alias> --file path/to/shot.png [-t thread] [message]` sends a file over the encrypted Tox file transfer. The maximum size is 100 MB. The receiver stores the file under `~/.config/toxi/media/` with your thread and kind fields and the message id of the sender. The receiver also verifies the sha256 of the file. Read receipts work the same as for texts. toxi automatically sends a text body larger than 64 KB as a text file.
 
-**Search and prune.** `toxi search <text> [--alias a] [-t thread] [--archived]` finds messages by content. `toxi archive --status` shows the size of `chat.db`. `toxi archive --older-than 90d` moves delivered and received messages older than that age into `archive.db` in the same directory. It never moves undelivered messages. `--delete` deletes the messages instead, and `--dry-run` only counts them. If config.toml contains `[archive] after_days = 180`, the daemon does this every day.
+**Search and prune.** `toxi search <text> [--alias a] [-t thread] [--archived]` finds messages by content. `toxi archive --status` shows the size of `chat.db`. `toxi archive --older-than 90d` moves delivered and received messages older than that age into `archive.db` in the same directory. It never moves undelivered messages. `--delete` deletes the messages instead, and `--dry-run` only counts them. The daemon does this every day for messages older than 90 days. To change the age, set `[archive] after_days` in config.toml (`0` turns it off). `toxi search --archived` also searches the archive.
 
 **Live events.** `toxi watch` shows daemon events when they occur. The events are new messages, contacts that go online or offline, deliveries, read receipts, and refused sends. To filter by contact, add `--alias <a>`. For scripts, add `--json`. `--context N` attaches the last N messages with the sender to each new message. This option is useful for stateless bots.
 
@@ -303,7 +303,7 @@ on_message_secret = "..."   # optional: HMAC-sign that POST
 include_body = false        # true = the POST also carries bodies and thread fields
 
 [archive]
-after_days = 180            # daily, move delivered/received messages older than this to archive.db (0 = never)
+after_days = 90             # daily, move delivered/received messages older than this to archive.db (default 90; 0 = never)
 
 [tox]
 public_dht = true           # false = bootstrap only from the nodes below
@@ -558,33 +558,26 @@ There is one service for each identity. If `TOXI_HOME` is set, the service name 
 | A message stays at `queued`, but the contact is online | The "online" status can lag. Wait one ack-timeout cycle (`ack_timeout_minutes`, default 5). The retry sweep then sends the message again. |
 | The hook injects nothing in Claude Code | Nothing is unread, the daemon is stopped, or `toxi` is not on PATH in the Claude Code process. Set `TOXI_BIN` in the hook config (see `claude-code-plugin/hooks/unread_hook.py`). |
 | MCP tools do not show in `/mcp` | The plugin is not installed, the daemon is not running, or the `[mcp]` extra is not installed. Run `pipx install --force 'toxi[mcp]'`. |
-| You lost your keys, or `tox_state.bin` is gone | The file is your identity. Without a backup, you cannot recover it. Start again with `toxi init`, and ask your contacts to add you again. |
+| You lost your keys, or `tox_state.bin` is gone | The file is your identity. `toxi import` restores it from a `toxi export` backup. Without a backup, you cannot recover it: start again with `toxi init`, and ask your contacts to add you again. |
+| The status line shows `toxi stopped: …` | The daemon cannot start; the text is the last error in `service.log`, for example a library it cannot load. Fix that, then run `toxi service restart`. `toxi doctor --all` shows it too. |
+| A message arrived late, and you want to know why | `toxi trace <id>` shows each step with its time (written, sent, resent, delivered, read, handled) and the daemon's log lines about that message. |
 
 ---
 
 ## 13. Upgrade
 
 ```bash
-toxi upgrade        # stops daemon → pipx upgrade toxi → restarts daemon
+toxi upgrade --all      # install the newest toxi, restart every identity, refresh the plugins
+toxi doctor --all       # check every identity, the plugins and the MCP servers
 ```
 
-`upgrade` gets new code only if the version in `pyproject.toml` increased (for example, 0.1.0 → 0.1.1). If you must get an intermediate fix that has no version increase, force a new download:
+`toxi upgrade` installs the newest version from PyPI with pipx (`--version X.Y.Z` picks one). It ignores pip's cache, and it installs again if the index still gives the old version. Then it continues with the new code. It restarts the daemon of each identity under its service, refreshes the Claude Code plugin, and moves a Codex plugin that is pinned to a release tag to the new tag. At the end it lists the agent sessions whose `toxi mcp serve` still runs the old code. Restart them, or run `/reload-plugins` in Claude Code. Without `--all`, it restarts only this `TOXI_HOME`. An editable install skips the install step: update the checkout, then run `toxi upgrade`.
 
-```bash
-toxi reinstall      # stops daemon → pipx reinstall toxi → restarts daemon
-```
+The first time from 0.6.x, install once by hand: the old `toxi upgrade` has no `--all`. Run `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`, then `toxi upgrade --all`. `toxi upgrade` never installs an older version than the one that runs, and it needs toxi installed with pipx; for uv or pip, upgrade with that tool, then run `toxi upgrade --all`.
 
-`reinstall` ignores the version. It runs the original install spec again from the start.
+`toxi reinstall` (pipx reinstall) and `toxi reinstall-plugin [--ref vX.Y.Z]` (the Claude Code plugin only) still work for a single step.
 
-If the plugin also has changes, run this command in your terminal. Then run `/reload-plugins` in Claude Code:
-
-```bash
-toxi reinstall-plugin       # fetches GitHub HEAD, refreshes Claude Code's plugin cache + registry
-```
-
-Without this helper, you must run five slash commands: `/plugin uninstall toxi@toxi`, `/plugin marketplace remove toxi`, `/plugin marketplace add JefferyLee/toxi`, `/plugin install toxi@toxi` and `/reload-plugins`. With the helper, you run one shell command and one slash command.
-
-> **Maintainer note:** If you ship changes that users must get through `upgrade`, increase `version` in `pyproject.toml` before you push. The Python package, `toxi.__version__`, the Claude Code plugin manifest, and the Codex plugin manifest share that version on purpose. `tests/test_versions.py` enforces this. Without an increase, `pipx upgrade` finds no newer version and does nothing. Users then must run `reinstall`.
+> **Maintainer note:** the release steps are in `docs/release.md`. `scripts/bump_version.py X.Y.Z` sets the version everywhere.
 
 ---
 

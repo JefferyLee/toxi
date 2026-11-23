@@ -14,7 +14,7 @@ toxi 分**两部分**。每部分单独安装：
 ## 1. 前置条件
 
 - **macOS** 或 **Linux**。libtoxcore 来自 Homebrew 或你的发行版。launchd 或 `systemd --user` 让 daemon 保持运行（§11）。
-- **Python 3.10+**。运行 `python3 --version` 检查版本。
+- **Python 3.11+**。运行 `python3 --version` 检查版本。
 - **一台常开的机器**。每个要稳定收消息的人都需要一台。会休眠的笔记本也可以。消息会留在队列里，直到笔记本醒来。
 - 能通往公网 Tox DHT 的**出站 UDP**。出站 TCP 是兜底。
 
@@ -246,7 +246,7 @@ toxi room list / toxi room show ops
 
 **文件。** `toxi send <别名> --file 路径/截图.png [-t 线程] [正文]` 通过加密的 Tox 文件传输发送文件。上限是 100 MB。接收方把文件存到 `~/.config/toxi/media/`，并带上你的线程和类型字段以及发送方的消息 id。接收方还会校验文件的 sha256。已读回执与文本一样。超过 64 KB 的文本正文，toxi 会自动作为文本文件发送。
 
-**检索与清理。** `toxi search <文本> [--alias 别名] [-t 线程] [--archived]` 按内容查找消息。`toxi archive --status` 显示 `chat.db` 的大小。`toxi archive --older-than 90d` 把早于该时间的已送达和已接收消息移到同目录的 `archive.db`。它从不移动未送达的消息。`--delete` 改为直接删除，`--dry-run` 只统计。如果 config.toml 里有 `[archive] after_days = 180`，daemon 每天自动做这件事。
+**检索与清理。** `toxi search <文本> [--alias 别名] [-t 线程] [--archived]` 按内容查找消息。`toxi archive --status` 显示 `chat.db` 的大小。`toxi archive --older-than 90d` 把早于该时间的已送达和已接收消息移到同目录的 `archive.db`。它从不移动未送达的消息。`--delete` 改为直接删除，`--dry-run` 只统计。daemon 每天对超过 90 天的消息自动做这件事。要改天数，在 config.toml 里设 `[archive] after_days`（`0` 表示关闭）。`toxi search --archived` 也会搜索归档。
 
 **实时事件。** `toxi watch` 在事件发生时显示 daemon 事件。事件包括新消息、联系人上线或下线、送达、已读回执和被拒绝的发送。要按联系人过滤，加 `--alias <别名>`。给脚本用，加 `--json`。`--context N` 给每条新消息附上与发送者的最近 N 条消息。这个选项对无记忆的 bot 有用。
 
@@ -301,7 +301,7 @@ on_message_secret = "..."   # 可选：给这个 POST 加 HMAC 签名
 include_body = false        # true = POST 里也带正文和线程字段
 
 [archive]
-after_days = 180            # 每天把早于这么多天的已送达/已接收消息移进 archive.db（0 = 从不）
+after_days = 90             # 每天把早于这么多天的已送达/已接收消息移进 archive.db（默认 90；0 = 从不）
 
 [tox]
 public_dht = true           # false = 只从下面的节点 bootstrap
@@ -555,33 +555,26 @@ tail -f ~/.config/toxi/daemon.log
 | 消息停在 `queued`，但联系人在线 | "在线"状态可能滞后。等一个 ack-timeout 周期（`ack_timeout_minutes`，默认 5）。然后重试扫描会重发消息。 |
 | Claude Code 里 hook 没注入任何东西 | 没有未读、daemon 停了，或 `toxi` 不在 Claude Code 进程的 PATH 上。在 hook 配置里设置 `TOXI_BIN`（见 `claude-code-plugin/hooks/unread_hook.py`）。 |
 | `/mcp` 里看不到 MCP 工具 | 插件没装、daemon 没运行，或没装 `[mcp]` extra。运行 `pipx install --force 'toxi[mcp]'`。 |
-| 你弄丢了密钥，或 `tox_state.bin` 不见了 | 这个文件就是你的身份。没有备份就无法恢复。用 `toxi init` 从头开始，并请联系人重新加你。 |
+| 你弄丢了密钥，或 `tox_state.bin` 不见了 | 这个文件就是你的身份。`toxi import` 可以从 `toxi export` 的备份里恢复它。没有备份就无法恢复：用 `toxi init` 从头开始，并请联系人重新加你。 |
+| 状态栏显示 `toxi stopped: …` | daemon 起不来；后面的文字是 `service.log` 里最后一条错误，例如某个库加载不了。修好之后运行 `toxi service restart`。`toxi doctor --all` 也会显示它。 |
+| 一条消息晚到了，想知道原因 | `toxi trace <id>` 列出每一步的时间（写出、发出、重发、送达、已读、已处理），以及 daemon 日志里关于这条消息的行。 |
 
 ---
 
 ## 13. 升级
 
 ```bash
-toxi upgrade        # 停 daemon → pipx upgrade toxi → 重启 daemon
+toxi upgrade --all      # 安装最新的 toxi，重启每个身份，刷新插件
+toxi doctor --all       # 检查每个身份、插件和 MCP server
 ```
 
-只有 `pyproject.toml` 里的版本号增加了（例如 0.1.0 → 0.1.1），`upgrade` 才会获取新代码。如果你必须拿到一个没有增加版本号的中间修复，强制重新下载：
+`toxi upgrade` 用 pipx 从 PyPI 安装最新版本（`--version X.Y.Z` 指定版本）。它不用 pip 的缓存；索引还给出旧版本时，它会再装一次。之后它改用新代码继续：在服务下重启每个身份的 daemon，刷新 Claude Code 插件，把固定在某个发布 tag 的 Codex 插件改到新的 tag。最后它列出 `toxi mcp serve` 仍在跑旧代码的 agent 会话。重启这些会话，或在 Claude Code 里运行 `/reload-plugins`。不带 `--all` 时，它只重启当前的 `TOXI_HOME`。编辑式安装跳过安装这一步：先更新代码目录，再运行 `toxi upgrade`。
 
-```bash
-toxi reinstall      # 停 daemon → pipx reinstall toxi → 重启 daemon
-```
+从 0.6.x 第一次升级时，先手动装一次：旧的 `toxi upgrade` 没有 `--all`。运行 `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`，然后 `toxi upgrade --all`。`toxi upgrade` 从不安装比当前运行的更旧的版本，并且要求 toxi 是用 pipx 装的；用 uv 或 pip 装的，先用那个工具升级，再运行 `toxi upgrade --all`。
 
-`reinstall` 不看版本号。它从头重新执行原始的 install spec。
+`toxi reinstall`（pipx reinstall）和 `toxi reinstall-plugin [--ref vX.Y.Z]`（只刷新 Claude Code 插件）仍可用于单独的一步。
 
-如果插件本身也有改动，在终端运行这条命令。然后在 Claude Code 里运行 `/reload-plugins`：
-
-```bash
-toxi reinstall-plugin       # 拉 GitHub HEAD，刷 Claude Code 的 plugin 缓存 + 注册表
-```
-
-没有这个 helper 时，你必须运行 5 条 slash 命令：`/plugin uninstall toxi@toxi`、`/plugin marketplace remove toxi`、`/plugin marketplace add JefferyLee/toxi`、`/plugin install toxi@toxi` 和 `/reload-plugins`。有了这个 helper，你只运行 1 条 shell 命令和 1 条 slash 命令。
-
-> **维护者备注**：如果你发布的改动要让用户通过 `upgrade` 拿到，push 前要增加 `pyproject.toml` 里的 `version`。Python 包、`toxi.__version__`、Claude Code 插件 manifest 和 Codex 插件 manifest 有意共用这个版本。`tests/test_versions.py` 会强制检查。如果不增加版本，`pipx upgrade` 找不到更新的版本，什么也不做。用户就必须改用 `reinstall`。
+> **维护者备注**：发布步骤见 `docs/release.zh-CN.md`。`scripts/bump_version.py X.Y.Z` 一次改好所有地方的版本号。
 
 ---
 

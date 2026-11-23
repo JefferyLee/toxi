@@ -145,16 +145,19 @@ def test_archive_moves_old_delivered_rows_and_search_covers_both(tmp_path, monke
 def test_daily_auto_archive_uses_config(tmp_path, monkeypatch):
     d = _daemon(tmp_path, monkeypatch)
     _seed(d)
-    d._archive_tick()
-    assert d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 5  # off by default
-    (tmp_path / "config.toml").write_text("[archive]\nafter_days = 30\n")
-    d._last_archive = 0.0
-    d._archive_tick()
+    d._archive_tick()  # on by default: 90 days
     assert d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 2
     d._last_archive = time.time()
     _seed(d, "c")
     d._archive_tick()  # not due yet
     assert d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 7
+    (tmp_path / "config.toml").write_text("[archive]\nafter_days = 0\n")
+    d._last_archive = 0.0
+    d._archive_tick()  # turned off
+    assert d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 7
+    (tmp_path / "config.toml").write_text("[archive]\nafter_days = 30\n")
+    d._archive_tick()
+    assert d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 4
 
 
 def test_cli_archive_and_search(monkeypatch):

@@ -44,3 +44,6 @@ def _own_sessions_dir(tmp_path_factory, monkeypatch):
     d = tmp_path_factory.mktemp("sessions")
     monkeypatch.setattr(sessions, "_dir", lambda: d)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path_factory.mktemp("claude")))
+    # Never a real identity: a shell that exports TOXI_HOME (as agent sessions on
+    # the developer's machine do) must not make a test pass, or touch that home.
+    monkeypatch.setenv("TOXI_HOME", str(tmp_path_factory.mktemp("toxi-home")))

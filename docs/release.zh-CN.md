@@ -2,110 +2,84 @@
 
 > 🌐 Languages: [English](release.md) | **中文**
 
-切 `toxi` 引擎 release 的维护者参考。引擎版本锁在 4 个 surface 上
-（见 PRD §4.13）；GitHub Action 在它们不一致时会拒绝发布。
+`toxi` 发版的维护者参考。版本号只写在一处：`src/toxi/__init__.py`。`pyproject.toml` 从那里读取，一个脚本把它复制到其他显示版本号的文件。GitHub Action 先跑测试再发布；tag 和版本号不一致时，它拒绝发布。
 
 ## 0. 前置条件
 
-- PyPI **trusted publisher** 已经为 `toxi` 项目配置完成，scope 为
-  本 repo + `pypi` GitHub Environment。**仓库里没有 API token**——
-  只走 OIDC。
-- 在 GitHub remote 上对 `main` 和 tag 有 push 权限。
-- 工作树干净（`git status` 空）。
+- PyPI 的 **trusted publisher** 已为 `toxi` 项目配置好，范围是本仓库和 `pypi` GitHub Environment。仓库里没有 API token，只走 OIDC。
+- 你可以推送到 `master`，也可以推送 tag。
+- 工作区是干净的（`git status` 没有输出）。
 
-## 1. Bump 4 个版本 surface
-
-锁定的 surface（PRD §4.13）：
-
-```
-pyproject.toml                                       [project] version = "X.Y.Z"
-src/toxi/__init__.py                                 __version__ = "X.Y.Z"
-claude-code-plugin/.claude-plugin/plugin.json        "version": "X.Y.Z"
-plugins/toxi/.codex-plugin/plugin.json               "version": "X.Y.Z"
-```
-
-验证锁：
+## 1. 设定版本号
 
 ```bash
-.venv/bin/python -m pytest tests/test_versions.py -v
+scripts/bump_version.py X.Y.Z
 ```
 
-继续前修掉任何不一致——`test_versions.py` 跑的就是 release
-workflow 里那同一份校验。
+脚本把版本号写进这些文件：
 
-## 2. Commit bump
+```
+src/toxi/__init__.py                              __version__（唯一来源；pyproject.toml 读取它）
+claude-code-plugin/.claude-plugin/plugin.json     "version"
+plugins/toxi/.codex-plugin/plugin.json            "version"
+README.md、README.zh-CN.md                        状态行
+docs/install.md、docs/install.zh-CN.md            --ref 示例
+```
+
+然后把发布说明写进 `docs/agent-comm-design.md` §11 及其中文镜像，放在 §12 之前。运行测试：
 
 ```bash
-git add pyproject.toml src/toxi/__init__.py \
-        claude-code-plugin/.claude-plugin/plugin.json \
-        plugins/toxi/.codex-plugin/plugin.json
-git commit -m "chore(release): bump version to X.Y.Z"
+.venv/bin/python -m pytest -q          # tests/test_versions.py 检查每一处副本
 ```
 
-每次 bump 一个 commit——不要和 feature 工作捆在一起。
-
-## 3. 打 annotated tag
+## 2. 提交、打 tag、推送
 
 ```bash
-git tag -a vX.Y.Z -m "vX.Y.Z —— <一行摘要>
-
-<简短 release notes：
-- key change 1
-- key change 2
-- ...>"
+git add -A
+git commit -m "chore(release): X.Y.Z"
+git tag vX.Y.Z
+git push origin master vX.Y.Z
 ```
 
-Tag 名 **必须** 和 `pyproject.toml` 版本一致，前缀 `v`。
+tag 必须是版本号前面加 `v`。推送 tag 会启动 `.github/workflows/publish.yml`。
 
-## 4. Push
+## 3. 工作流做什么
+
+1. **测试**：运行 `tests.yml`（Linux 和 macOS 上的 pytest）。有测试失败，就什么都不发布。
+2. **核对**：把去掉 `v` 的 tag 与 `src/toxi/__init__.py` 里的 `__version__` 比较。不一致就停止。
+3. **构建**：`python -m build` 生成 sdist 和 wheel。
+4. **发布**：`pypa/gh-action-pypi-publish` 经 `pypi` environment 和 OIDC 上传。
+
+用 `gh run watch` 观察。某一步失败时，先修好原因，删掉 tag（`git tag -d vX.Y.Z && git push --delete origin vX.Y.Z`），再从第 2 步重来。
+
+## 4. GitHub release 与核实
 
 ```bash
-git push origin main
-git push origin vX.Y.Z
+gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."
+pipx install --force "toxi[mcp]==X.Y.Z" --pip-args="--no-cache-dir"
+toxi --version
 ```
 
-`vX.Y.Z` 的 push 会触发 `.github/workflows/publish.yml`。
+刚上传之后，包索引可能还给出旧版本。如果 `toxi --version` 显示旧版本，等一分钟再装一次。`--no-cache-dir` 让 pip 不用缓存里的旧索引。
 
-## 5. Workflow 行为
+## 5. 部署
 
-`publish.yml` 在 `push` 一个匹配 `v*` 的 tag 时运行：
-
-1. **校验 tag 与 pyproject 一致**——去掉前缀 `v` 后比对
-   `pyproject.toml` 的 `[project] version`。不一致直接报错退出。
-2. **Build**——`python -m build` 生成 sdist + wheel 到 `dist/`。
-3. **上传 artifact**——把 `dist/` 存给 publish job。
-4. **发到 PyPI**——用 `pypa/gh-action-pypi-publish@release/v1`，
-   走 `pypi` GitHub Environment + OIDC trusted publisher。
-
-如果第 1 步失败，workflow 会在构建之前就停下。重新 bump + retag
-（用 `git tag -d vX.Y.Z && git push --delete origin vX.Y.Z` 删掉错的
-tag，然后从第 3 步重做）。
-
-## 6. PyPI 上验证
+在每台机器上：
 
 ```bash
-pip index versions toxi
-pipx install "toxi[mcp]==X.Y.Z"   # 确认新版本可安装
+pipx install --force "toxi[mcp]==X.Y.Z" --pip-args="--no-cache-dir"   # 编辑式安装跳过这一步
+TOXI_HOME=<每个身份目录> toxi service install                         # 让每个 daemon 用新代码重启
+toxi reinstall-plugin                                                # Claude Code 插件
 ```
 
-Claude Code plugin 和 Codex plugin 各自的 manifest 都钉死了同一个
-版本号；不需要单独的 plugin 发布步骤。
+Codex 插件如果来自固定在某个 tag 的 Git marketplace，登记新的 tag 并重新添加插件。然后重启 agent 会话，因为正在运行的 `toxi mcp serve` 一直用它启动时的代码。
 
-## 7. 发布后
+## 6. 发布之后
 
-- 如果这次发布对应一个 milestone（比如 v0.3 标记 cc-chat 吸收 +
-  Codex plugin 集成），更新项目 README 顶部的 status 行。
-- 在 PRD §5.1 step log 加一条 bullet。
-- 如果这次发布包含 wire-format / envelope 变化，follow up 一个
-  ToxiOS 工作项配套（见 `docs/WORKFLOWS.md` 跨 repo 表）。
+- 如果这次发布改了线路格式，给 ToxiOS 开一个工作项（见 `docs/WORKFLOWS.md`）。
 
-## 反例
+## 不要做
 
-- **不要 `--amend` 一个已发布 tag 的 commit。** 已发布的 wheel 在
-  metadata 里引用那个 commit SHA；重写它会让 wheel 失去引用。
-- **不要 bump 部分 surface 然后 "晚点再发"。** `test_versions.py`
-  强制的就是 4-surface lock；部分 bump 在下次 push 时同样会 fail
-  CI。
-- **不要手工上传 wheel。** GitHub Action 的 OIDC trusted publisher
-  是唯一被授权的发布路径；手工 `twine upload` 会被 PyPI 拒（没有
-  注册 API token）。
+- **修改已发布 tag 的提交。** wheel 记着那个提交，改写会让它对不上。
+- **手改版本号的某一处副本。** 用 `scripts/bump_version.py`；任何不一致都会让 `tests/test_versions.py` 失败。
+- **手动上传 wheel。** 只有 OIDC trusted publisher 这一条路；PyPI 会拒绝 `twine upload`（没有登记 token）。

@@ -826,3 +826,22 @@ Setup: Claude Code 2.1.311 on Ada, model haiku, sessions in tmux, two scratch to
 **Found for toxi itself.** The guides say "reply with send_message". The model first used Claude Code's own `SendMessage` tool, failed two times, and was offered a real local session (`CoB`). The guides must name the toxi tool: `mcp__plugin_toxi_toxi__send_message`.
 
 **Recommendation.** Use `asyncRewake` for the idle path of Claude Code (0.6.13): it is documented, and its framing does not change the trust level. SessionStart and Stop arm one waiter for each session; UserPromptSubmit disarms it; the timeout is 86400 s; the waiter prints the routed messages to stderr, marks them read, and exits 2. Fix the tool name in the guides. Look at the socket again if Claude Code documents the format or lets the poster set the framing. Implementation note (0.6.13): a session wakes at most 20 times between two prompts of the user, because two agents that answer each other could otherwise wake each other without end; and the hook sets both `async` and `asyncRewake`, so a Claude Code version without `asyncRewake` still runs it in the background (tested: both flags together still wake). Codex still needs its own path (app-server `turn/start`).
+
+### 13.10 More agent runtimes: OpenCode, Pi, Cursor (2026-11-22)
+
+Jeff asked to cover OpenCode, the Pi coding agent and Cursor. Facts were checked on 2026-11-22 against their docs and sources (OpenCode v2.3.0, Pi `@earendil-works/pi-coding-agent` v1.6.0, Cursor 2.x and its CLI).
+
+| | mid-turn | end of turn | idle wake | MCP | sessions |
+|---|---|---|---|---|---|
+| OpenCode (V2 plugin, TS) | `ctx.session.synthetic(..., delivery: "steer")` | no hook can hold a run (not confirmed) | `synthetic` / `prompt` start an idle session | stdio; each tool call carries the OpenCode session id | one background server per user holds every session |
+| Pi (extension, TS) | `pi.sendMessage(..., {deliverAs: "steer"})` | `agent_before_settle` returns `continue: true` | `pi.sendMessage(..., {triggerTurn: true})` | built in since 0.99 (`exposure: "direct"` lists the tools) | one `pi` process per session |
+| Cursor (hooks.json) | `postToolUse` returns `additional_context` | `stop` returns `followup_message` (sent as a user message) | none for a local chat (only the cloud agents API) | `~/.cursor/mcp.json`, shared with the CLI | many chats per process; hooks get `conversation_id` |
+
+Plan for 0.8, by value for effort:
+
+1. **Pi**: a Pi package with an extension that keeps a subscription to the toxi daemon and injects routed messages (`steer` while busy, `triggerTurn` while idle). Peer messages go through `sendMessage` with a custom type, never `sendUserMessage`, which reads as the user's own words. MCP for sending.
+2. **OpenCode**: a V2 plugin with the same subscription and `synthetic`. The session registry needs a key below the process: an OpenCode server (and a Cursor window) holds several sessions, so the key becomes process + session id.
+3. **Codex idle wake** through the app-server.
+4. **Cursor**: MCP, plus `postToolUse` and `stop` hooks. No idle wake. Mark the sender in the text, because `followup_message` arrives as a user message. Subagents cannot be told apart in `postToolUse`; deliver at `stop` only, or exclude the ids that `subagentStart` reports. The CLI runs only part of the hooks (Cursor staff, 2026-11-11).
+
+0.7 only learns their names: `doctor --all`, `upgrade --all` and the stale-process check will look for them once the adapters exist.

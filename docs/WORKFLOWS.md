@@ -27,20 +27,21 @@ in `ToxiOS/`).
 
 Authoritative docs the "docs vs code" agent should cross-check:
 
-- `toxi/docs/prd.md` (English canonical) + `toxi/docs/prd.zh-CN.md`
-  (must stay in sync — bilingual is a hard rule from PRD §3.4)
+- `toxi/docs/protocol.md`, `toxi/docs/architecture.md`, `toxi/docs/security.md`
+  and `toxi/docs/agent-comm-design.md` (§11 release log, §13 current plan),
+  each with its zh-CN mirror (bilingual is a hard rule)
 - `toxi/docs/install-and-usage.md`
+- `toxi/docs/prd.md` is the product history from before v2; where it differs
+  from the docs above, they win
 - `toxi/README.md` + `toxi/README.zh-CN.md`
 - `ToxiOS/docs/ToxiOS-PRD.md`, `ToxiOS/docs/ToxiOS-PDD.md`
 - `ToxiOS/docs/M0-tech-selection.md`,
   `ToxiOS/docs/gpl-app-store.md`
 
-The "tag spec" agent: toxi engine versioning is **locked across
-surfaces** — `pyproject.toml`, `src/toxi/__init__.py`,
-`claude-code-plugin/.claude-plugin/plugin.json`, and
-`plugins/toxi/.codex-plugin/plugin.json` must match. PRD §4.13 and
-`tests/test_versions.py` enforce this. Any tag proposal in `toxi/`
-must check this invariant before bumping.
+The "tag spec" agent: the toxi version lives in `src/toxi/__init__.py`
+(`pyproject.toml` reads it). `scripts/bump_version.py` copies it to the
+plugin manifests, the READMEs and the install docs, and
+`tests/test_versions.py` fails on any mismatch. See `docs/release.md`.
 
 ToxiOS uses milestone tags (`m0`, `m1` = V0.1 MVP, etc. — see PRD §8)
 that are independent of toxi engine versions. Don't conflate them.

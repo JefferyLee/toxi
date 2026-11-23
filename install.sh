@@ -57,8 +57,8 @@ else
 fi
 
 # 2. a Python app installer: pipx, else uv, else pip --user --------------------
-PY_MIN_OK=$(python3 -c 'import sys; print(int(sys.version_info >= (3,10)))' 2>/dev/null || echo 0)
-[ "$PY_MIN_OK" = 1 ] || warn "python3 is older than 3.10; pipx/uv will pick a newer one if available"
+PY_MIN_OK=$(python3 -c 'import sys; print(int(sys.version_info >= (3,11)))' 2>/dev/null || echo 0)
+[ "$PY_MIN_OK" = 1 ] || warn "python3 is older than 3.11; pipx/uv will pick a newer one if available"
 if have pipx; then INSTALLER=pipx
 elif have uv; then INSTALLER=uv
 elif [ "$OS" = "Darwin" ] && have brew; then info "Installing pipx…"; brew install pipx; pipx ensurepath >/dev/null 2>&1 || true; INSTALLER=pipx
@@ -123,17 +123,21 @@ if want claude; then
     DEST="${CACHE_ROOT}/${VERSION}"; rm -rf "${DEST}"; mkdir -p "${DEST}"; cp -R "${PLUGIN_SRC}/." "${DEST}/"
     # Older version dirs stay: running sessions call their hooks from them until /reload-plugins.
     python3 - "${VERSION}" "${SHA}" "${DEST}" "${MARKETPLACE_DIR}" "${REPO}" <<'PY'
-import json, os, sys, time
+import json, os, shutil, sys, time
 version, sha, install_path, marketplace, repo = sys.argv[1:6]
 home = os.path.expanduser("~"); plugins = os.path.join(home, ".claude", "plugins")
 now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 def load(p):
     try:
         with open(p) as f: return json.load(f)
-    except (FileNotFoundError, ValueError): return {}
+    except FileNotFoundError: return {}
+    except ValueError:  # never replace a file we cannot read: it holds the user's settings
+        sys.exit(f"{p} is not valid JSON; it is left as it is. Fix it, then run install.sh again.")
 def dump(p, d):
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w") as f: json.dump(d, f, indent=2)
+    if os.path.exists(p): shutil.copy2(p, p + ".bak-toxi")
+    with open(p + ".tmp-toxi", "w") as f: json.dump(d, f, indent=2)
+    os.replace(p + ".tmp-toxi", p)
 ip = os.path.join(plugins, "installed_plugins.json")
 inst = load(ip) or {"version": 2, "plugins": {}}; inst.setdefault("plugins", {})
 entries = inst["plugins"].get("toxi@toxi") or []

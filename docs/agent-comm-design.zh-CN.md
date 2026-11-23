@@ -825,3 +825,22 @@ Claude Code 原生消息覆盖"同一厂商、同一账号"的会话，A2A 覆�
 **顺带发现的 toxi 自身问题。** 指引里写的是"用 send_message 回复"。模型先用了 Claude Code 自带的 `SendMessage` 工具，失败两次，还被推荐了一个真实的本地会话（`CoB`）。指引必须写明 toxi 的工具名：`mcp__plugin_toxi_toxi__send_message`。
 
 **建议。** Claude Code 的空闲唤醒用 `asyncRewake`（0.6.13）：它有文档，外框也不改变信任级别。SessionStart 和 Stop 为每个会话挂一个等待进程，UserPromptSubmit 撤掉它，超时设为 86400 秒；等待进程把路由给本会话的消息写到 stderr，标为已读，然后以退出码 2 结束。同时修正指引里的工具名。等 Claude Code 给出 socket 的消息格式文档，或者允许发送方指定外框，再重新考虑 socket 方案。实现说明（0.6.13）：在用户两次输入之间，一个会话最多被唤醒 20 次，否则两个互相回复的 agent 可能无休止地互相唤醒；hook 同时设置 `async` 和 `asyncRewake`，这样不支持 `asyncRewake` 的 Claude Code 版本仍会在后台运行它（已测试：两个标志同时设置时仍能唤醒）。Codex 仍需要它自己的路径（app-server 的 `turn/start`）。
+
+### 13.10 更多 agent 运行时：OpenCode、Pi、Cursor（2026-11-22）
+
+Jeff 要求把 OpenCode、Pi coding agent 和 Cursor 纳入。以下事实于 2026-11-22 对照它们的文档和源码核实（OpenCode v2.3.0、Pi `@earendil-works/pi-coding-agent` v1.6.0、Cursor 2.x 及其命令行）。
+
+| | 工作中途 | 回合结束 | 空闲唤醒 | MCP | 会话 |
+|---|---|---|---|---|---|
+| OpenCode（V2 插件，TS） | `ctx.session.synthetic(..., delivery: "steer")` | 没有能拦住回合结束的 hook（未确认） | `synthetic` / `prompt` 会启动空闲会话 | 支持 stdio；每次工具调用都带 OpenCode 会话 id | 每个用户一个后台 server，管着所有会话 |
+| Pi（扩展，TS） | `pi.sendMessage(..., {deliverAs: "steer"})` | `agent_before_settle` 返回 `continue: true` | `pi.sendMessage(..., {triggerTurn: true})` | 0.99 起内置（`exposure: "direct"` 才把工具列给模型） | 一个会话一个 `pi` 进程 |
+| Cursor（hooks.json） | `postToolUse` 返回 `additional_context` | `stop` 返回 `followup_message`（作为用户消息提交） | 本地对话没有（只有云端 agent API） | `~/.cursor/mcp.json`，命令行共用 | 一个进程多个对话；hook 拿到 `conversation_id` |
+
+0.8 的计划，按"价值 ÷ 成本"排序：
+
+1. **Pi**：一个 Pi package，里面的扩展常驻订阅 toxi daemon，把路由给本会话的消息注入（忙时 `steer`，空闲时 `triggerTurn`）。peer 消息用自定义类型的 `sendMessage` 注入，绝不用 `sendUserMessage`，后者会被当成用户亲手输入。发消息用 MCP。
+2. **OpenCode**：一个 V2 插件，同样订阅，用 `synthetic` 注入。会话登记需要比进程更细的键：一个 OpenCode server（以及一个 Cursor 窗口）里有多个会话，所以键改为"进程 + 会话 id"。
+3. **Codex 空闲唤醒**：通过 app-server。
+4. **Cursor**：MCP，加上 `postToolUse` 和 `stop` hook。不支持空闲唤醒。`followup_message` 会作为用户消息到达，所以要在文字里标明发送方。`postToolUse` 分辨不出子 agent：只在 `stop` 时送达，或排除 `subagentStart` 报告的 id。命令行版只运行部分 hook（Cursor 工作人员，2026-11-11）。
+
+0.7 只做一件事：等适配器做好后，`doctor --all`、`upgrade --all` 和"跑旧代码的进程"检查会认得它们。

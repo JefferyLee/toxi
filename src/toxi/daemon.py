@@ -16,6 +16,7 @@ import selectors
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -506,6 +507,7 @@ class Daemon:
         ).fetchone()
         if row is None:
             return
+        log.info("%s is %s", row["alias"], "online" if online else "offline")
         self._emit("contact.online" if online else "contact.offline",
                    {"alias": row["alias"]}, row["alias"])
         if not online:
@@ -537,6 +539,8 @@ class Daemon:
                 "UPDATE messages SET status='sent', last_attempt_at=?, sent_at=? WHERE msg_uuid=?",
                 (now, now, row["msg_uuid"]),
             )
+            log.info("sent %s to friend %d from the queue", (row["part_id"] or row["msg_uuid"])[:8],
+                     friend_number)
         self.db.commit()
         if rows:
             log.info("flushed up to %d queued message(s) to friend %d", len(rows), friend_number)
@@ -576,6 +580,8 @@ class Daemon:
                 )
                 failed.append(r)
             elif r["is_online"] and now - (r["last_attempt_at"] or r["created_at"]) > self.ack_timeout:
+                log.info("resent %s to %s: no ACK for %d s", (r["part_id"] or r["msg_uuid"])[:8],
+                         r["alias"], now - (r["last_attempt_at"] or r["created_at"]))
                 if self.tox.friend_send_message(r["friend_number"], _row_payload(r)):
                     self.db.execute(
                         "UPDATE messages SET last_attempt_at=? WHERE msg_uuid=?",
@@ -610,6 +616,8 @@ class Daemon:
                 self.db.commit()
                 if cur.rowcount:
                     alias = self._alias_of(friend_number)
+                    part = self.db.execute("SELECT part_id FROM messages WHERE msg_uuid=?", (ref,)).fetchone()
+                    log.info("ACK for %s from %s", ((part and part["part_id"]) or ref)[:8], alias)
                     self._emit("delivery", {"msg_uuid": ref, "alias": alias}, alias)
             return
 
@@ -663,6 +671,7 @@ class Daemon:
              session, *_meta_values(meta), int(time.time()) if meta.get("relayed") else None),
         )
         self.db.commit()
+        log.info("received %s from %s%s", env["uuid"][:8], row["alias"], "" if cur.rowcount else " again")
         if cur.rowcount and body.strip() == "@?" and self._is_owner(row["alias"]):
             self._list_sessions(row["alias"], env["uuid"])
         elif cur.rowcount:
@@ -761,6 +770,8 @@ class Daemon:
         self.db.commit()
         for a in buf["acks"].values():
             self.tox.friend_send_message(buf["friend"], a)
+        log.info("received %s from %s (%d parts)%s", key[1][:8], buf["alias"], buf["n"],
+                 "" if cur.rowcount else " again")
         if cur.rowcount:
             self._stored(key[1], buf["alias"], buf["meta"])
 
@@ -807,6 +818,7 @@ class Daemon:
                         (now, now, msg_uuid))
         self.db.commit()
         name = peers.target(m)
+        log.info("bounced %s from %s: %s", msg_uuid[:8], alias, f"no session {name!r}" if name else "no @name")
         why = (f"no session named {name!r} is running here." if name else
                "it has no @name, and toxi cannot tell which session it is for.")
         body = f"Not delivered: {why} Start the text with the exact @name of one session and send it again."
@@ -856,6 +868,7 @@ class Daemon:
         self.db.commit()
         if cur.rowcount:
             alias = self._alias_of(friend_number)
+            log.info("%s receipt for %s from %s", kind, ref[:8], alias)
             self._emit("receipt", {"msg_uuid": ref, "alias": alias, "kind": kind}, alias)
 
     def _send_receipts(self, uuids: list, kind: str = "read") -> None:
@@ -2103,6 +2116,8 @@ class Daemon:
         res = {"msg_uuid": part_id or uuids[0], "status": "sent" if online else "queued"}
         if len(uuids) > 1:
             res.update(parts=len(uuids), msg_uuids=uuids)
+        log.info("%s %s to %s%s", res["status"], res["msg_uuid"][:8], alias,
+                 f" ({len(uuids)} parts)" if len(uuids) > 1 else "")
         return res
 
     def _get_messages(self, params: dict) -> dict:
@@ -2156,7 +2171,7 @@ class Daemon:
 
     def _get_message(self, params: dict) -> dict:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                "m.received_at, m.delivered_at, m.read_receipt_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
+                "m.received_at, m.sent_at, m.last_attempt_at, m.delivered_at, m.read_receipt_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                 "FROM messages m "
@@ -2185,6 +2200,8 @@ class Daemon:
                                 "AND status='failed' AND notified_at IS NULL "
                                 "AND (msg_uuid=? OR part_id=?)", (now, u, u))
         self.db.commit()
+        if marked:
+            log.info("read here: %s", " ".join(u[:8] for u in marked))
         self._send_receipts(marked)
         return {"marked": len(marked)}
 
@@ -2485,6 +2502,12 @@ def hold_instance_lock(attempts: int = 30):
 
 
 def main() -> None:
+    if not paths.tox_state_path().exists() and (os.environ.get("TOXI_SERVICE")
+                                                or paths.db_path().exists()):
+        # A service for a home that lost its key (moved, deleted, mistyped), or
+        # a history without its key: a new Tox ID here would replace the identity.
+        sys.exit(f"toxi-daemon: no identity (tox_state.bin) in {paths.config_dir()}; "
+                 "not making a new one. `toxi import` a backup, or `toxi init` for a new identity.")
     lock = hold_instance_lock()  # noqa: F841 — held until the process exits
     d = Daemon()
     # The service manager stops us with SIGTERM: leave the loop, so that the

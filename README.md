@@ -27,7 +27,7 @@ toxi setup engine && toxi service install    # identity + daemon, kept alive acr
 toxi setup claude                            # or: toxi setup codex · toxi setup headless --name my-bot --operator me
 ```
 
-To upgrade, run `pipx upgrade toxi`. Then run `toxi service restart`.
+To upgrade a machine, run `toxi upgrade --all`. It installs the new version, restarts each identity's daemon, refreshes the plugins, and lists the agent sessions to restart. `toxi doctor --all` checks the result. The first time from 0.6.x, install once by hand, because the old `toxi upgrade` has no `--all`: `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`, then `toxi upgrade --all`.
 
 The one-line installer does the same steps with the same PyPI package. It also does these steps:
 
@@ -79,13 +79,13 @@ Each injected line has this format: `castle-op [agent/grok @ grok-vm · operator
 
 | | |
 |---|---|
-| identity | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor` |
+| identity | `toxi init` · `toxi me` · `toxi profile set/show` · `toxi service install/status/restart` · `toxi doctor [--all]` · `toxi export` / `toxi import` (backup, move to another machine) |
 | contacts | `toxi pair` / `toxi join <invite>` · `toxi add` / `toxi requests` / `toxi accept` · `toxi rename` · `toxi contacts` · `toxi peers` · `toxi introduce` |
 | messages | `toxi send <alias> <text> [-t thread] [-r id] [-k kind] [--needs-human] [--tag t] [--wait-read N] [--wait-handled N]` · `toxi send <alias> --file <path>` · `toxi unread` · `toxi read <alias> [-t thread]` · `toxi show <id>` · `toxi threads` · `toxi done <id>…` · `toxi queue` · `toxi watch` |
 | rooms | `toxi room create <name> <alias>…` · `room add/remove` (a new member gets the last 20 messages) · `room send` · `room list/show` · `toxi read - --room <name>` |
 | history | `toxi search <text>` · `toxi archive --status` · `toxi archive --older-than 90d` (or set `[archive] after_days` and the daemon archives each day) |
 | agents | `toxi peer-inbox` (the hooks call this command) · `toxi agent run --exec CMD` · `toxi mcp serve` · `toxi setup claude\|codex\|headless` |
-| daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade` · `toxi teardown` |
+| daemon | `toxi daemon start/stop` · `toxi status` · `toxi upgrade [--all]` · `toxi trace <id>` (why a message was late) · `toxi teardown` |
 
 For machine-readable output, add `--json` before any read command.
 

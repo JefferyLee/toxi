@@ -45,6 +45,7 @@ def test_me_requires_daemon(home):
 def test_full_cli_lifecycle(home):
     runner = CliRunner()
     try:
+        assert "Initialized toxi" in runner.invoke(cli, ["init"]).output  # start needs an identity
         assert "daemon started" in runner.invoke(cli, ["daemon", "start"]).output
 
         me = runner.invoke(cli, ["me"])
@@ -71,6 +72,7 @@ def test_error_message_is_clean(home):
     """CLI errors show the human message, not the internal error code."""
     runner = CliRunner()
     try:
+        runner.invoke(cli, ["init"])
         runner.invoke(cli, ["daemon", "start"])
         res = runner.invoke(cli, ["send", "ghost", "hi"])
         assert res.exit_code != 0

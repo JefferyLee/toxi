@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/JefferyLee/toxi/master/install.sh |
 脚本按这个顺序执行以下步骤：
 
 1. **libtoxcore**：已经装了 libtoxcore 时，脚本跳过这一步。否则，在 macOS 上运行 `brew install toxcore`。在 Linux 上运行 `sudo apt-get install libtoxcore2`、`sudo dnf install toxcore` 或 `sudo pacman -S toxcore`。找不到已知的包管理器时，脚本停止。
-2. **Python 应用安装器**：有 pipx 时，脚本用 pipx。没有时用 uv。两者都没有时，脚本安装 pipx：macOS 上用 Homebrew，其他系统用 `pip install --user`。最后的手段是 `pip install --user`。`python3` 低于 3.10 时，脚本给出警告。
+2. **Python 应用安装器**：有 pipx 时，脚本用 pipx。没有时用 uv。两者都没有时，脚本安装 pipx：macOS 上用 Homebrew，其他系统用 `pip install --user`。最后的手段是 `pip install --user`。`python3` 低于 3.11 时，脚本给出警告。
 3. **引擎**：脚本从 PyPI 安装或升级 `toxi[mcp]`。连不上 PyPI 时，用 GitHub 上最新的 release tag。`--ref` 参数强制使用指定的 git ref。
 4. **身份和 daemon**：脚本运行 `toxi setup engine`，然后运行 `toxi service install`。服务在 macOS 上用 launchd，在 Linux 上用 `systemd --user`。没有服务管理器时，脚本打印一行让 daemon 常驻的 cron 配置。
 5. **适配器**：`--for` 参数选择适配器。有 `claude` 命令或 `~/.claude` 时，默认为 `claude`。否则默认为 `headless`。
@@ -58,7 +58,7 @@ less install.sh && bash install.sh --for codex
 - **macOS**（Apple Silicon 与 Intel）：完全支持。服务用 launchd。参考环境里的两台 Mac 都在运行 toxi。
 - **Linux**：libtoxcore 来自发行版。有用户会话时，服务用 `systemd --user`。有些主机没有 systemd，例如容器和部分 VM。在这些主机上，`toxi service install` 会告知这一点，并由一条 cron 让 daemon 常驻：`*/10 * * * * toxi daemon start >/dev/null 2>&1`。
 - **安装器**：首选 pipx。uv tool 也可以：`uv tool install 'toxi[mcp]'`。裸 `pip install --user` 是最后的手段。Claude Code 和 Codex 需要 `mcp` extra。
-- **Python**：3.10 或更新。
+- **Python**：3.11 或更新。
 
 ## 一台机器上多个身份
 
@@ -66,10 +66,24 @@ less install.sh && bash install.sh --for codex
 
 ## 升级
 
-1. 运行 `toxi upgrade`，或重新运行 `install.sh`。`toxi upgrade` 使用 pipx。
-2. 对每个身份运行 `toxi service restart`。
+在每台机器上运行 `toxi upgrade --all`。从 0.6.x 第一次升级时，先手动装一次，因为旧的 `toxi upgrade` 没有 `--all`：`pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`，然后 `toxi upgrade --all`。它做这几步：
 
-如果 daemon 仍在运行比 CLI 旧的版本，`toxi doctor` 会指出来。toxi 在下次连接时自动向 peer 通告新能力。协议 v2 节点仍能与 v1 节点通信。
+1. 用 pipx 从 PyPI 安装最新版本（`--version X.Y.Z` 指定版本）。它不用 pip 的缓存；索引还给出旧版本时，它会再装一次。编辑式安装跳过这一步。
+2. 在服务下重启每个身份的 daemon（`toxi service install`）。
+3. 刷新 Claude Code 插件。固定在某个发布 tag 的 Codex 插件，改到新的 tag。
+4. 列出 `toxi mcp serve` 仍在跑旧代码的 agent 会话。重启它们。
+
+然后 `toxi doctor --all` 检查每个身份、插件和 MCP server。不带 `--all` 时，两个命令都只处理当前的 `TOXI_HOME`。toxi 在下次连接时自动向 peer 通告新能力。协议 v2 节点仍能与 v1 节点通信。
+
+## 备份或迁移身份
+
+```bash
+toxi export ~/toxi-ada.tar.gz        # 密钥、历史、配置、卡片、收到的媒体
+# 在新机器上，用一个空的 TOXI_HOME：
+toxi import ~/toxi-ada.tar.gz && toxi service install
+```
+
+这个文件里有私钥，要像密码一样保管。先停掉旧机器上的这个身份。同一把密钥在两个 daemon 上同时运行，两边都会时断时续。`toxi daemon start`、`toxi service install` 以及服务管理的 daemon，都拒绝在没有身份的 `TOXI_HOME` 里启动，所以路径写错或目录被移走都不会生成一个新的 Tox ID。导入只接受导出时写入的那些文件，并且只作为普通文件写进 `TOXI_HOME`。
 
 ## 卸载
 

@@ -75,8 +75,10 @@ def _program() -> list[str]:
 
 
 def _env() -> dict:
-    return {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-            "TOXI_HOME": str(paths.config_dir())}
+    # ~/.local/bin first: that is where pipx puts `toxi`, which hooks run.
+    return {"PATH": f"{Path.home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            "TOXI_HOME": str(paths.config_dir()),
+            "TOXI_SERVICE": "1"}  # the daemon then never makes a new identity
 
 
 def render_plist() -> bytes:
@@ -185,6 +187,67 @@ def restart() -> None:
         _check(_run(["launchctl", "kickstart", "-k", f"{_domain()}/{label()}"]), "launchctl kickstart")
     else:
         _check(_run(["systemctl", "--user", "restart", unit_name()]), "systemctl restart")
+
+
+def homes() -> list[Path]:
+    """Every identity dir on this machine: the default one, each one with a
+    service, and $TOXI_HOME. For `toxi doctor --all` and `toxi upgrade --all`."""
+    found = [Path.home() / ".config" / "toxi"] if (Path.home() / ".config" / "toxi" / "tox_state.bin").exists() else []
+    if is_macos():
+        for p in sorted((Path.home() / "Library" / "LaunchAgents").glob(f"{LABEL_BASE}*.plist")):
+            try:
+                home = plistlib.loads(p.read_bytes()).get("EnvironmentVariables", {}).get("TOXI_HOME")
+            except Exception:  # someone else's broken file: skip it
+                continue
+            if home:
+                found.append(Path(home))
+    else:
+        for p in sorted((Path.home() / ".config" / "systemd" / "user").glob("toxi-daemon*.service")):
+            m = re.search(r'TOXI_HOME=([^"\s]+)', p.read_text(errors="replace"))
+            if m:
+                found.append(Path(m.group(1)))
+    if os.environ.get("TOXI_HOME"):
+        found.append(Path(os.environ["TOXI_HOME"]))
+    out = []
+    for h in found:
+        if h.resolve() not in {o.resolve() for o in out}:
+            out.append(h)
+    return out
+
+
+def current() -> bool:
+    """Is the installed service file the one this build would write? An old
+    file keeps old settings (0.6.9: priority; 0.7: PATH) until `service install`."""
+    try:
+        if is_macos():
+            return plistlib.loads(plist_path().read_bytes()) == plistlib.loads(render_plist())
+        return unit_path().read_text() == render_unit()
+    except (OSError, ValueError):
+        return False
+
+
+_ERROR_LINE = re.compile(r"^[\w.]*(Error|Exception)\b.*", re.M)
+
+
+def last_error() -> str | None:
+    """The last error line in service.log (the daemon's stderr under launchd or
+    systemd): why it would not start, such as a library it cannot import.
+    The daemon's own log does not have it, because it fails before logging."""
+    p = paths.config_dir() / "service.log"
+    try:
+        # A running daemon writes daemon.log; an error older than that is not why it stopped.
+        if p.stat().st_mtime < paths.log_path().stat().st_mtime:
+            return None
+    except FileNotFoundError:
+        pass
+    try:
+        with open(p, "rb") as f:
+            f.seek(max(0, p.stat().st_size - 8192))
+            tail = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    errors = [m.group(0) for m in _ERROR_LINE.finditer(tail)]
+    return errors[-1].strip()[:300] if errors else None
 
 
 def status() -> dict:

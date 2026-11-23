@@ -72,6 +72,8 @@ def test_read_oldest_first_applies_to_json(monkeypatch):
 
 
 def test_service_commands(monkeypatch, tmp_path):
+    monkeypatch.setenv("TOXI_HOME", str(tmp_path))
+    (tmp_path / "tox_state.bin").write_bytes(b"key")  # service install needs an identity
     state = {"installed": False, "running": False}
     monkeypatch.setattr("toxi.bootstrap.daemon_running", lambda: state["running"])
 

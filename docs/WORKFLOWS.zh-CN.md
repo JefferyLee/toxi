@@ -25,20 +25,21 @@ agent 应跨三个 repo 并行 fan-out——一个 repo 的 drift 常常隐藏�
 
 "docs vs code" agent 需要交叉校验的权威文档：
 
-- `toxi/docs/prd.md`（英文 canonical）+ `toxi/docs/prd.zh-CN.md`
-  （必须同步——双语是 PRD §3.4 的硬规则）
+- `toxi/docs/protocol.md`、`toxi/docs/architecture.md`、`toxi/docs/security.md`
+  和 `toxi/docs/agent-comm-design.md`（§11 发布记录，§13 当前计划），
+  各自连同中文镜像（双语是硬规则）
 - `toxi/docs/install-and-usage.md`
+- `toxi/docs/prd.md` 是 v2 之前的产品历史；与上面这些文档不一致时，
+  以上面为准
 - `toxi/README.md` + `toxi/README.zh-CN.md`
 - `ToxiOS/docs/ToxiOS-PRD.md`、`ToxiOS/docs/ToxiOS-PDD.md`
 - `ToxiOS/docs/M0-tech-selection.md`、
   `ToxiOS/docs/gpl-app-store.md`
 
-"tag spec" agent：toxi 引擎版本在 **多个 surface 之间锁住**——
-`pyproject.toml`、`src/toxi/__init__.py`、
-`claude-code-plugin/.claude-plugin/plugin.json`、
-`plugins/toxi/.codex-plugin/plugin.json` 必须一致。PRD §4.13 和
-`tests/test_versions.py` 强制校验。任何 `toxi/` 的 tag 提案 bump
-前必须先验证这个 invariant。
+"tag spec" agent：toxi 的版本号写在 `src/toxi/__init__.py`
+（`pyproject.toml` 读取它）。`scripts/bump_version.py` 把它复制到插件清单、
+README 和安装文档，任何不一致都会让 `tests/test_versions.py` 失败。见
+`docs/release.zh-CN.md`。
 
 ToxiOS 用 milestone tag（`m0`、`m1` = V0.1 MVP 等——见 PRD §8），
 独立于 toxi 引擎版本。不要混淆。
