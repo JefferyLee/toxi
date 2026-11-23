@@ -523,6 +523,19 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - C9：删除 Codex 插件里没被调用的 `unread_hook.py`。`codex-usage.md` §7 与信任级别一致。
 - 升级：对每个 `TOXI_HOME` 运行 `toxi service install`；重启各个 Claude Code 会话（或运行 `/reload-plugins`）。
 
+### 0.7.0 运维（2026-11-22，v0.7.0）
+
+§13.6 的第 2 批（E1–E9）。
+
+- `toxi upgrade [--version X] [--all]` 升级一台机器：用 pipx 安装该版本，在服务下重启每个身份的 daemon，安装该发布 tag 的插件，并列出需要重启的会话。它从不安装更旧的版本。从 0.6.x 第一次升级时，先用 pipx 手动装 0.7.0，因为旧的 `toxi upgrade` 没有 `--all`。
+- `toxi doctor --all` 检查每个身份，以及 CLI、daemon、服务文件、插件缓存、Codex marketplace 和正在运行的 `toxi mcp serve` 之间的版本漂移。
+- daemon 起不来时，状态栏（`toxi stopped: …`）和 doctor 会显示原因。
+- `toxi trace <id>` 列出一条消息每一步的时间，以及 daemon 日志里关于它的行。daemon 现在记录发送、接收、重发、ACK、回执、上下线和已读，从不记正文。
+- `toxi export` 和 `toxi import` 用于备份和迁移身份。在没有身份的 `TOXI_HOME` 里，任何 daemon 都不会启动并生成新身份。
+- 发布有测试门槛：CI 先在 Linux 和 macOS 上跑测试，再发布。版本号只写在 `src/toxi/__init__.py`；`scripts/bump_version.py` 负责复制。
+- 需要 Python 3.11 或更新。默认开启归档（90 天）；未读消息和待决定的消息不归档。install.sh 不会覆盖它读不懂的 `settings.json`。
+- 升级：从 0.6.x 先 `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`，再 `toxi upgrade --all`，然后重启 agent 会话。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 > 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。

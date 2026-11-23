@@ -524,6 +524,19 @@ Batch 1 of §13. The IDs are those of §13.4.
 - C9: the unused `unread_hook.py` of the Codex plugin is gone. `codex-usage.md` §7 matches the trust levels.
 - Upgrade: `toxi service install` for each `TOXI_HOME`; restart each Claude Code session (or `/reload-plugins`).
 
+### 0.7.0 Operations (2026-11-22, v0.7.0)
+
+Batch 2 of §13.6 (E1–E9).
+
+- `toxi upgrade [--version X] [--all]` upgrades a machine: it installs the release with pipx, restarts the daemon of each identity under its service, installs the plugins of the release tag, and lists the sessions to restart. It never installs an older version. The first time from 0.6.x, install 0.7.0 by hand with pipx, because the old `toxi upgrade` has no `--all`.
+- `toxi doctor --all` checks every identity and the drift between the CLI, the daemons, the service files, the plugin caches, the Codex marketplace and the running `toxi mcp serve` processes.
+- A daemon that cannot start shows the reason in the status line (`toxi stopped: …`) and in doctor.
+- `toxi trace <id>` shows each step of one message with its time, and the daemon log lines about it. The daemon now logs sends, receives, resends, ACKs, receipts, presence and reads, never bodies.
+- `toxi export` and `toxi import` back up and move an identity. No daemon starts a new identity in a `TOXI_HOME` that has none.
+- The release has a test gate: CI runs the tests on Linux and macOS before the publish. The version is written only in `src/toxi/__init__.py`; `scripts/bump_version.py` copies it.
+- Python 3.11 or newer. Archiving is on by default (90 days); unread messages and open decisions stay. install.sh never overwrites a `settings.json` that it cannot read.
+- Upgrade: from 0.6.x, `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`, then `toxi upgrade --all`, then restart the agent sessions.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 > The newer plan is in §13 (2026-11-22). This list stays as the record of 2026-10-16.
