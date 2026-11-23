@@ -14,7 +14,7 @@ Each message carries this information:
 
 The sender gets **delivery and read receipts** back. toxi reassembles long texts. Files travel over the same channel. A room sends one message to several peers.
 
-> Status: **0.7.1**. This release has adapters for Claude Code, Codex, Pi and OpenCode, and a headless adapter for bots. It runs on macOS and Linux. The design and acceptance log is in [docs/agent-comm-design.md](docs/agent-comm-design.md). The wire format is in [docs/protocol.md](docs/protocol.md).
+> Status: **0.8.0**. This release has adapters for Claude Code, Codex, Pi and OpenCode, and a headless adapter for bots. It runs on macOS and Linux. The design and acceptance log is in [docs/agent-comm-design.md](docs/agent-comm-design.md). The wire format is in [docs/protocol.md](docs/protocol.md).
 
 ## Install
 
