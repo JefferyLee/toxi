@@ -491,6 +491,20 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - peer 的 text 如果 `@name` 对不上任何在运行的会话，或没写 `@name` 而 toxi 判断不出该给哪个会话，以前留在公共收件箱。没有会话读公共收件箱，所以这些消息一等就是几天（`@scout-daily`、`@Power-Up-Chess`、Belinda 没写会话名的消息）。现在 daemon 在每条 peer text 到达时检查：没有在运行的会话接收它，就把它标为已处理，并给发送方发 `bounce`（`reply_to` 指向这条 text）；`collaborator` 和 `owner` 对端还会收到在运行的会话名单。检查是严格的：不按目录名或名字结尾去匹配。
 - 不退信的情况：`ack`、`bounce`（所以两个节点不会互相退信成环）、转发的历史、房间消息，以及一个会话都没在运行时（无头身份；消息留给下一个会话）。不是 peer 的联系人发来的 text 仍进公共收件箱。
 
+### 0.6.12 0.6.11 评估后的加固（2026-11-22，v0.6.12）
+
+§13 的第 1 批。编号同 §13.4。
+
+- 注入（A1、A2）：toxi 把发送方选的每个字段放在一行内，并把正文的每一行缩进。每个信任级别的消息放在两行带随机标记的分隔行之间。因此 peer 写不出看起来像 toxi 标题行或别的信任级别的行。toxi 以安全形式保存发送方的 id（不以 `-` 开头，不含 shell 字符），回 ack 时仍用发送方的 id。`/toxi:read` 不经确认只能运行 `toxi unread` 和 `toxi show`。保存的文件名不含 shell 字符。
+- 文件（A3）：daemon 只从这些地方发送文件：media 目录、临时目录、正在运行的会话的项目目录（不包括主目录及其上级目录）、`[files] send_dirs` 里的目录，或 agent 会话之外运行的脚本的工作目录。它从不从 `~/.ssh`、`~/.config` 等存放机密的位置发送文件。
+- 信任（A4）：通过邀请或引荐加入的联系人，绝不会拿到 `[peers]` 表的别名，除非表里的 `key` 就是这个联系人的公钥。`toxi remove` 和 `toxi doctor` 会报告没有对应联系人的表。
+- 文本（B1、B2）：连接断开时，没有 ack 的 text 回到 `queued`，重连后立即重发。只有在线的联系人 24 小时都不 ack，text 才算失败。迟到的 ack 仍然算数。失败会进入事件流，并告诉发出这条 text 的会话一次（RPC `list_failed`）。
+- 分片与事件（B3、B4）：接收方只在存下整条长消息之后，才对它的分片回 ack。60 秒内没有到齐的分片被丢弃，不回 ack，所以发送方会重发。比 socket 缓冲区大的事件不再导致订阅者被断开。
+- hook（C1–C4）：子 agent 不取 peer 消息。每个会话有自己的 PostToolUse 标记。hook 先输出消息，再把它们标为已读（`toxi peer-inbox --peek`、`toxi mark-read`），所以 hook 过早停止也不丢消息。Stop hook 不会两次用同一批消息阻止停止。带别名的 `wait_for_message` 和 Codex 的 Stop hook 只取本会话的消息。Codex 的 hook 能在 python 3.9 上加载。
+- 任务状态（D1–D3、D5）：`needs_human` 一直保持未决，直到消息被处理。收到的 `bounce` 把原 text 标为 `bounced`，等待会因此结束。`ack` 类回复不再发 `done`。发送方写在将来的 `ts` 改为到达时间。回复路由从到达时起算。超过 10 分钟的消息显示它的年龄。
+- 开发中发现的问题：Ada 上是编辑式安装，新 CLI 立即生效，而 daemon 仍在跑 0.6.11。大约 14:10 到 14:45，Stop hook 显示了假的"未送达"提示，原因是旧 daemon 忽略了不认识的过滤条件，返回了别的记录。修法是单独的 RPC `list_failed`：旧 daemon 回 `METHOD_NOT_FOUND`，CLI 就什么也不报。
+- 升级：对每个 `TOXI_HOME` 运行 `toxi service install`，在 Claude Code 里运行 `/reload-plugins`，并重启 Codex 会话。从其他目录发文件的 headless bot，要把这些目录写进 `[files] send_dirs`。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 > 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。
