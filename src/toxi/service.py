@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import paths
@@ -152,8 +153,19 @@ def install() -> Path:
         if is_macos():
             if existed:
                 _run(["launchctl", "bootout", f"{_domain()}/{label()}"])
+                # bootout returns before the job is gone; a bootstrap then fails with
+                # "5: Input/output error" and leaves the daemon down (0.7.0 on Ada).
+                for _ in range(50):
+                    if _run(["launchctl", "print", f"{_domain()}/{label()}"]).returncode:
+                        break
+                    time.sleep(0.2)
             p.write_bytes(render_plist())
-            _check(_run(["launchctl", "bootstrap", _domain(), str(p)]), "launchctl bootstrap")
+            for attempt in range(5):
+                r = _run(["launchctl", "bootstrap", _domain(), str(p)])
+                if r.returncode == 0:
+                    break
+                time.sleep(1 + attempt)
+            _check(r, "launchctl bootstrap")
         else:
             p.write_text(render_unit())
             _check(_run(["systemctl", "--user", "daemon-reload"]), "systemctl daemon-reload")

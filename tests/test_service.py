@@ -91,3 +91,28 @@ def test_no_service_manager_means_not_installable_and_not_installed(tmp_path, mo
 def test_run_reports_a_missing_manager_binary():
     r = service._run(["definitely-not-a-command-xyz", "--user"])
     assert r.returncode == 127 and "command not found" in r.stderr
+
+
+def test_install_waits_for_the_old_job_and_retries_bootstrap(tmp_path, monkeypatch):
+    import subprocess
+    from toxi import service
+    monkeypatch.setattr(service, "is_macos", lambda: True)
+    monkeypatch.setattr(service, "manager", lambda: "launchd")
+    monkeypatch.setattr(service, "plist_path", lambda: tmp_path / "x.plist")
+    monkeypatch.setattr(service, "render_plist", lambda: b"<plist/>")
+    monkeypatch.setattr(service.time, "sleep", lambda s: None)
+    (tmp_path / "x.plist").write_bytes(b"old")
+    calls, state = [], {"printed": 0, "boots": 0}
+
+    def run(cmd):
+        calls.append(cmd[1])
+        if cmd[1] == "print":
+            state["printed"] += 1
+            return subprocess.CompletedProcess(cmd, 0 if state["printed"] < 3 else 113, "", "")
+        if cmd[1] == "bootstrap":
+            state["boots"] += 1
+            return subprocess.CompletedProcess(cmd, 5 if state["boots"] < 3 else 0, "", "Input/output error")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(service, "_run", run)
+    service.install()
+    assert calls == ["bootout", "print", "print", "print", "bootstrap", "bootstrap", "bootstrap"]
