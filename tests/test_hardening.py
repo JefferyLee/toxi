@@ -290,6 +290,7 @@ def test_a_bounced_request_is_not_open(tmp_path, monkeypatch):
     assert opened() == 1
     _incoming(d, "Not delivered: no session named 'nobody'", kind="bounce", reply_to=uid, thread="t2")
     assert _status(d, uid) == "bounced" and opened() == 0
+    assert d._list_threads({})["threads"][0]["failed_requests"] == 1
 
 
 # --- D5: the sender's clock and the age of a text --------------------------------
@@ -476,3 +477,88 @@ def test_a_send_to_a_sender_label_reaches_the_contact(tmp_path, monkeypatch):
     uid = d._send_message({"alias": "main@codex", "body": "hi"})["msg_uuid"]
     assert d.db.execute("SELECT c.alias FROM messages m JOIN contacts c ON c.id=m.contact_id "
                         "WHERE m.msg_uuid=?", (uid,)).fetchone()[0] == "codex"
+
+
+# --- 0.6.14: what wakes an idle session ---------------------------------------
+
+def test_what_wakes_an_idle_session():
+    kinds = ("msg", "request", "relay")
+    assert peers.wakes({"kind": "request"}, kinds) and peers.wakes({}, kinds)
+    assert not peers.wakes({"kind": "report"}, kinds)  # an FYI waits for the next turn
+    assert not peers.wakes({"kind": "ack", "trust": "owner"}, kinds)
+    assert peers.wakes({"kind": "report", "trust": "owner"}, kinds)  # the user's own device
+    assert peers.wakes({"kind": "report", "needs_human": True}, kinds)
+    assert peers.wakes({"kind": "report", "route_dir": "/w/a"}, kinds)  # an answer to this session
+    assert peers.wakes({"kind": "report"}, ("report",))
+
+
+def test_peek_says_whether_to_wake_and_kinds_come_from_config(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, '[peers.codex]\ntrust = "collaborator"\n')
+    d = _daemon(tmp_path, monkeypatch)
+    _wire(d, monkeypatch)
+    sessions.register("/w/a", pid=101)
+    monkeypatch.setattr(sessions, "agent_pid", lambda: 101)
+    peek = lambda: json.loads(CliRunner().invoke(cli, ["peer-inbox", "--peek", "--cwd", "/w/a"]).output)  # noqa: E731
+    r = _incoming(d, "nightly build green", kind="report")
+    assert peek()["wake"] is False
+    (tmp_path / "config.toml").write_text('[peers.codex]\ntrust = "collaborator"\n[wake]\nkinds = ["report"]\n')
+    assert peek()["wake"] is True
+    (tmp_path / "config.toml").write_text('[peers.codex]\ntrust = "collaborator"\n')
+    d._mark_read({"msg_uuids": [r]})
+    _incoming(d, "can you rerun it?", kind="request")
+    assert peek()["wake"] is True
+
+
+def test_get_message_status_follows_a_send(tmp_path, monkeypatch):
+    from toxi import mcp_server
+    d = _daemon(tmp_path, monkeypatch)
+    _wire(d, monkeypatch)
+    uid = d._send_message({"alias": "codex", "body": "run it", "kind": "request"})["msg_uuid"]
+    st = mcp_server.get_message_status(uid)
+    assert st["found"] and st["status"] == "sent" and "delivered_at" not in st
+    d._on_friend_message(5, json.dumps({"v": 2, "type": "ack", "uuid": "a9", "ts": 1,
+                                        "data": {"ref_uuid": uid}}).encode(), 0)
+    st = mcp_server.get_message_status(uid)
+    assert st["status"] == "delivered" and st["delivered_at"] and st["kind"] == "request"
+    assert mcp_server.get_message_status("nope") == {"found": False, "msg_uuid": "nope"}
+
+
+# --- 0.6.14: limits on what a contact can make us store -----------------------
+
+def test_cards_receipts_and_metas_are_rate_limited(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    monkeypatch.setattr(daemon_mod, "OTHER_RATE_LIMIT", 2)
+    for name in ("one", "two", "three"):
+        d._on_friend_message(5, json.dumps({"v": 2, "type": "profile", "uuid": name, "ts": 1,
+                                            "data": {"name": name, "kind": "agent"}}).encode(), 0)
+    card = d.db.execute("SELECT profile_json FROM contacts WHERE alias='codex'").fetchone()[0]
+    assert json.loads(card)["name"] == "two"  # the third card came over the limit
+
+
+def test_files_stop_at_the_rate_limit_and_the_media_quota(tmp_path, monkeypatch):
+    from test_files import FileTox
+    d = _daemon(tmp_path, monkeypatch)
+    d.tox = FileTox()
+    monkeypatch.setattr(daemon_mod, "FILE_RATE_LIMIT", 1)
+    d._on_file_recv(5, 0, daemon_mod.FILE_KIND_DATA, 10, b"a.txt")
+    d._on_file_recv(5, 1, daemon_mod.FILE_KIND_DATA, 10, b"b.txt")
+    assert [c[2] for c in d.tox.controls] == [daemon_mod.FILE_CONTROL_RESUME, daemon_mod.FILE_CONTROL_CANCEL]
+    monkeypatch.setattr(daemon_mod, "FILE_RATE_LIMIT", 100)
+    monkeypatch.setattr(daemon_mod, "MEDIA_QUOTA", 15)
+    d._on_file_recv(5, 2, daemon_mod.FILE_KIND_DATA, 10, b"c.txt")  # fits: media/ is empty
+    (tmp_path / "media" / "big.bin").write_bytes(b"x" * 10)
+    d._on_file_recv(5, 3, daemon_mod.FILE_KIND_DATA, 10, b"d.txt")  # 10 + 10 > 15
+    assert [c[2] for c in d.tox.controls][2:] == [daemon_mod.FILE_CONTROL_RESUME, daemon_mod.FILE_CONTROL_CANCEL]
+
+
+def test_the_webhook_says_how_far_to_trust_each_message(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    (tmp_path / "config.toml").write_text(
+        '[peers.codex]\ntrust = "observer"\n[hooks]\non_message_url = "http://x.test/h"\n')
+    posted = []
+    monkeypatch.setattr(daemon_mod.threading, "Thread",
+                        lambda target, args, daemon: type("T", (), {"start": lambda self: posted.append(args)})())
+    d._post_webhook([{"alias": "codex", "msg_uuid": "u1", "msg_type": "text"},
+                     {"alias": "stranger", "msg_uuid": "u2", "msg_type": "text"}])
+    items = json.loads(posted[0][1])["messages"]
+    assert [m["trust"] for m in items] == ["observer", None]

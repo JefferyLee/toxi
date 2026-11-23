@@ -575,7 +575,9 @@ def peer_inbox(ctx, alias, cwd, peek):
         failed = peers.failed_sends(cwd) if cwd else []
         shown = [m for m in msgs if m.get("kind", "msg") != "ack"]
         text = peers.as_prompt(shown, failed) if shown or failed else ""
-        click.echo(json.dumps({"text": text, "msg_uuids": [m["msg_uuid"] for m in msgs + failed]},
+        kinds = config.wake_kinds()
+        click.echo(json.dumps({"text": text, "msg_uuids": [m["msg_uuid"] for m in msgs + failed],
+                               "wake": any(peers.wakes(m, kinds) for m in shown)},
                               ensure_ascii=False))
         return
     msgs = peers.take(alias, cwd)

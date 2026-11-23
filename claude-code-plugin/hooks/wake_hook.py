@@ -113,9 +113,9 @@ def main() -> int:
         now = _mtime(flag)
         if now != seen or (first and time.time() >= first):
             seen, first = now, 0
-            text, uuids = _inbox.peek(toxi, cwd)
+            text, uuids, wake = _inbox.peek_full(toxi, cwd)
             batch = " ".join(sorted(uuids))
-            if text and batch != _read(woke):
+            if text and wake and batch != _read(woke):
                 with open(woke, "w") as f:
                     f.write(batch)
                 with open(wakes, "w") as f:
@@ -124,7 +124,9 @@ def main() -> int:
                 sys.stderr.flush()
                 _inbox.mark_read(toxi, uuids)
                 return 2  # asyncRewake: Claude Code starts a turn with stderr
-            _inbox.mark_read(toxi, uuids)  # acks, or the batch woken for before
+            if not text or batch == _read(woke):
+                _inbox.mark_read(toxi, uuids)  # acks, or the batch woken for before
+            # Else mail that does not wake ([wake] kinds): it waits for the next turn.
         time.sleep(POLL)
     return 0
 

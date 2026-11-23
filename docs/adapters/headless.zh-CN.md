@@ -50,7 +50,7 @@ on_message_secret = "a long random string"   # 可选：HMAC
 include_body = true                           # 可选：POST 里带正文 + 线程字段
 ```
 
-daemon 对每一批突发消息只发一次 POST：`{"from": [aliases], "count": n, "messages": [{alias, msg_uuid, msg_type, ...}], "ts": ...}`。去抖时间是 2 s，POST 只含完整消息。POST 带 `X-Toxi-Timestamp` 头。设置了 secret 时，还带 `X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`。不带 `include_body` 时，hook 只知道有东西到了。被唤醒的那次运行再用 `toxi peer-inbox` 或 MCP 的 `wait_for_message` 读取消息。
+daemon 对每一批突发消息只发一次 POST：`{"from": [aliases], "count": n, "messages": [{alias, msg_uuid, msg_type, trust, ...}], "ts": ...}`。`trust` 是发送方的信任级别（`observer`、`collaborator`、`owner`），不是 peer 的联系人为 `null`。POST 失败时，daemon 在 5 秒后再试一次。去抖时间是 2 s，POST 只含完整消息。POST 带 `X-Toxi-Timestamp` 头。设置了 secret 时，还带 `X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`。不带 `include_body` 时，hook 只知道有东西到了。被唤醒的那次运行再用 `toxi peer-inbox` 或 MCP 的 `wait_for_message` 读取消息。
 
 2026-10-16，三个 Grok bot 确认了这一行为。消息到达约 3 s 后，webhook 在它们的平台上启动一次运行。bot 约 25 s 内回复。每小时一次的检查兜底。
 

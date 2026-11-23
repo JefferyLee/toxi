@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -402,3 +403,26 @@ def test_unknown_method_errors(home):
         assert ei.value.code == "METHOD_NOT_FOUND"
     finally:
         _stop_daemon(t)
+
+
+def test_sigterm_saves_state_and_removes_the_socket(tmp_path):
+    """The service manager stops the daemon with SIGTERM: a clean shutdown."""
+    import signal
+    import subprocess
+    import sys
+    home = tempfile.mkdtemp(prefix="toxi-term-", dir="/tmp")  # a short socket path
+    try:
+        p = subprocess.Popen([sys.executable, "-m", "toxi.daemon"], env=dict(os.environ, TOXI_HOME=home),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        sock = Path(home) / "daemon.sock"
+        for _ in range(200):
+            if sock.exists():
+                break
+            time.sleep(0.05)
+        assert sock.exists()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=10) == 0
+        assert not sock.exists() and (Path(home) / "tox_state.bin").exists()
+        assert "shutting down" in (Path(home) / "daemon.log").read_text()
+    finally:
+        shutil.rmtree(home, ignore_errors=True)

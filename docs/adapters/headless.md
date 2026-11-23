@@ -50,7 +50,7 @@ on_message_secret = "a long random string"   # optional: HMAC
 include_body = true                           # optional: bodies + thread fields in the POST
 ```
 
-The daemon sends one POST for each burst of messages: `{"from": [aliases], "count": n, "messages": [{alias, msg_uuid, msg_type, ...}], "ts": ...}`. The debounce time is 2 s, and the POST contains only complete messages. The POST has the `X-Toxi-Timestamp` header. If a secret is set, it also has `X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`. Without `include_body`, the hook learns only that something arrived. The woken run then reads the messages with `toxi peer-inbox` or the MCP `wait_for_message`.
+The daemon sends one POST for each burst of messages: `{"from": [aliases], "count": n, "messages": [{alias, msg_uuid, msg_type, trust, ...}], "ts": ...}`. `trust` is the trust level of the sender (`observer`, `collaborator`, `owner`), or `null` for a contact that is not a peer. If a POST fails, the daemon tries it one more time after 5 s. The debounce time is 2 s, and the POST contains only complete messages. The POST has the `X-Toxi-Timestamp` header. If a secret is set, it also has `X-Toxi-Signature: sha256=HMAC(secret, "<ts>.<body>")`. Without `include_body`, the hook learns only that something arrived. The woken run then reads the messages with `toxi peer-inbox` or the MCP `wait_for_message`.
 
 On 2026-10-16, the three Grok bots confirmed this behaviour. The webhook starts a run on their platform about 3 s after a message arrives. The bots answer in about 25 s. An hourly check is the fallback.
 

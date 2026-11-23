@@ -134,6 +134,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # subqueries in get_messages from scanning the whole table once per row.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_part ON messages(part_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(contact_id, thread, created_at)")
+    # Incoming rows only: the unread view (status line, every hook) and the 24 h
+    # "received" stat scanned the whole table.
+    if "received_at" in {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_received ON messages(received_at) "
+                     "WHERE direction='in'")
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

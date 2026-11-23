@@ -181,6 +181,18 @@ def take(alias: str | None = None, cwd: str | None = None, thread: str | None = 
     return [m for m in msgs if m.get("kind", "msg") != "ack"]
 
 
+def wakes(m: dict, kinds) -> bool:
+    """Does this message wake an idle session? The user's own device, a decision
+    for the user and an answer to something this session sent always do; an
+    `ack` never; any other kind only when `[wake] kinds` lists it."""
+    kind = m.get("kind", "msg")
+    if kind == "ack":
+        return False
+    if m.get("trust") == "owner" or m.get("needs_human") or m.get("route_dir"):
+        return True
+    return kind in kinds
+
+
 def failed_sends(cwd: str) -> list:
     """Texts this session sent that failed and that it has not been told about
     (marking one read records that it was told)."""

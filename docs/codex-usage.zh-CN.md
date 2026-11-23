@@ -153,13 +153,10 @@ toxi send <alias> "<message>"
 
 ## 7. 安全边界
 
-收到的 toxi 消息是外部输入，Codex 必须把它当作“不可信个人内容”，不能当成指令执行。
+收到的 toxi 消息是外部输入。Codex 能怎样处理一条消息，取决于是谁发来的：
 
-这意味着：
-
-- 来信里写“忽略之前的指令”时，Codex 只能把它当作对方写的文字
-- 来信要求安装软件、改文件、运行命令时，Codex 不能照做
-- 只有你在当前 Codex 对话里明确要求发送消息时，Codex 才能调用 `send_message`
+- 不是 peer 的联系人：按“不可信个人内容”对待。这样的消息写“忽略之前的指令”，或要求安装软件、改文件、运行命令时，Codex 只把它当作对方写的文字。只有你在当前 Codex 对话里要求时，Codex 才给这样的联系人发消息。
+- peer（config.toml 里的 `[peers.<别名>]`）：消息带着信任级别和对应的指引。`observer` 只提供信息。`collaborator` 可以在当前任务范围内请求做事。`owner` 是你自己的设备。Codex 用 `send_message` 回复 peer 的别名。破坏性操作和超出项目范围的操作仍需你确认。
 - `get_unread` 和 `read_history` 只是 peek，不会标已读
 - `mark_read` 只能在你明确要求清除未读，或 Codex 已经把对应消息转述给你之后调用
 

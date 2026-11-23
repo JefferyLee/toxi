@@ -11,7 +11,7 @@
 | Claude 正在工作 | **PostToolUse** hook：`hooks/peer_check.sh` stat 一下 `inbox.flag`。它在 `$TMPDIR` 里为每个会话保留一个标记（hook 输入里没有会话 id 时，为每个项目保留一个）。只有 flag 变动了，才运行 `post_tool_hook.py` → `toxi peer-inbox --peek --cwd $CLAUDE_PROJECT_DIR` → `additionalContext` → `toxi mark-read`。对子 agent 的工具调用，它什么也不做。 | 一次工具调用 |
 | 一个回合结束 | **Stop** hook：`stop_hook.py` 运行 `peer-inbox --peek`。有消息时，它以消息为理由阻止停止，让 Claude 继续。没有消息时，它打印一行未读摘要。 | 回合结束 |
 | 会话开始 / 恢复 / 压缩之后 | **SessionStart** hook：`unread_hook.py` 先投递路由过来的 peer 消息。然后给出好友的未读摘要，并按不可信内容加措辞。 | 立即 |
-| Claude 空闲 | **唤醒 hook**：SessionStart 和 Stop 在后台启动 `wake_hook.py`（`async` + `asyncRewake`）。它盯着 `inbox.flag`。有本会话的消息到达时，它输出消息、标为已读并以退出码 2 结束，Claude Code 随即带着这些消息开始一个回合。UserPromptSubmit 会结束它，因为忙着的会话由上面几个 hook 收消息。每个空闲会话只跑一个等待进程。24 小时没有消息它就结束，下一回合会再起一个。在你两次输入之间，一个会话最多被唤醒 20 次，所以两个 agent 不会在你不在时互相唤醒个没完；超过之后，消息留到你下一次输入时再送达。`wait_for_message`（MCP）和 channel 模式（`TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi`）仍然可用。 | 1–2 秒 |
+| Claude 空闲 | **唤醒 hook**：SessionStart 和 Stop 在后台启动 `wake_hook.py`（`async` + `asyncRewake`）。它盯着 `inbox.flag`。有本会话的消息到达时，它输出消息、标为已读并以退出码 2 结束，Claude Code 随即带着这些消息开始一个回合。UserPromptSubmit 会结束它，因为忙着的会话由上面几个 hook 收消息。每个空闲会话只跑一个等待进程。24 小时没有消息它就结束，下一回合会再起一个。在你两次输入之间，一个会话最多被唤醒 20 次，所以两个 agent 不会在你不在时互相唤醒个没完；超过之后，消息留到你下一次输入时再送达。`[wake] kinds` 决定哪些消息会唤醒它（默认：`msg`、`request`、`relay`；`owner` 的消息、需要用户决定的消息、对本会话的回复总会唤醒）。`wait_for_message`（MCP）和 channel 模式（`TOXI_CHANNEL=1 claude --dangerously-load-development-channels plugin:toxi@toxi`）仍然可用。 | 1–2 秒 |
 
 每个 hook 先输出消息，然后才把它们标为已读。如果 hook 在这两步之间停止，这些消息会在下一个 hook 再次送达。
 
@@ -45,7 +45,7 @@
 - `/toxi:read`：读取本会话的消息并标为已读，显示图片，播放语音消息。`/toxi:read --all` 同时读取公共收件箱。
 - `/toxi:send-terminal`。
 - 底部栏里的 `toxi statusline`。
-- MCP 工具 `get_unread`、`read_history`、`get_threads`、`search_messages`、`get_peers`、`list_contacts`、`list_rooms`、`read_room`、`view_media`、`mark_read`、`mark_handled` 和 `get_status`。
+- MCP 工具 `get_unread`、`read_history`、`get_threads`、`get_message_status`、`search_messages`、`get_peers`、`list_contacts`、`list_rooms`、`read_room`、`view_media`、`mark_read`、`mark_handled` 和 `get_status`。
 
 ## 安装 / 更新
 

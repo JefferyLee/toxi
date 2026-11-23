@@ -29,9 +29,15 @@ _MEDIA_DESC = {"image": "an image", "voice": "a voice message",
                "video": "a video", "file": "a file"}
 
 
+PREVIEW = 160  # chars of a friend's text shown at session start; /toxi:read has the rest
+
+
 def _describe(m: dict) -> str:
     if m.get("msg_type", "text") == "text":
-        return f"- {m['alias']}: {_inbox.indent(m['content'])}"
+        text = m["content"]
+        if len(text) > PREVIEW:
+            text = text[:PREVIEW] + " …"
+        return f"- {m['alias']}: {_inbox.indent(text)}"
     what = _MEDIA_DESC.get(m["msg_type"], "a file")
     return f"- {m['alias']} sent {what} (saved at: {m['content']})"
 
@@ -76,7 +82,8 @@ def _answer(toxi: str, peer_text: str) -> None:
 
     lines = "\n".join(_describe(m) for m in msgs)
     context = (peer_text + "\n\n" if peer_text else "") + (
-        f"The user has {len(msgs)} unread toxi message(s) from friends. "
+        f"The user has {len(msgs)} unread toxi message(s) from friends; below is a "
+        "preview of each (`/toxi:read` shows them in full and marks them read). "
         "Surface them to the user now. For any message not written in the "
         "language the user is communicating with you in, also give a concise "
         "translation in that language. Infer the user's language from recent "

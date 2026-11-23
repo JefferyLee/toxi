@@ -45,25 +45,32 @@ def looked() -> None:
 
 def peek(toxi: str, cwd: str | None) -> tuple[str, list]:
     """(text for the agent, ids to mark read once the text is out)."""
+    text, uuids, _ = peek_full(toxi, cwd)
+    return text, uuids
+
+
+def peek_full(toxi: str, cwd: str | None) -> tuple[str, list, bool]:
+    """peek, plus whether this mail should wake an idle session (a toxi older
+    than this plugin cannot say: then yes)."""
     args = [toxi, "peer-inbox", "--peek"] + (["--cwd", cwd] if cwd else [])
     try:
         out = subprocess.run(args, capture_output=True, text=True, timeout=STEP_TIMEOUT)
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return "", []
+        return "", [], False
     if out.returncode == 2 and "--peek" in out.stderr:  # a toxi older than this plugin
         args.remove("--peek")
         try:
             out = subprocess.run(args, capture_output=True, text=True, timeout=STEP_TIMEOUT)
         except (OSError, ValueError, subprocess.TimeoutExpired):
-            return "", []
-        return (out.stdout.strip() if out.returncode == 0 else ""), []
+            return "", [], False
+        return (out.stdout.strip() if out.returncode == 0 else ""), [], True
     if out.returncode != 0:
-        return "", []
+        return "", [], False
     try:
         res = json.loads(out.stdout)
     except ValueError:
-        return "", []
-    return res.get("text") or "", res.get("msg_uuids") or []
+        return "", [], False
+    return res.get("text") or "", res.get("msg_uuids") or [], bool(res.get("wake", True))
 
 
 def mark_read(toxi: str, uuids: list) -> None:

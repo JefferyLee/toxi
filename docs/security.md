@@ -41,7 +41,7 @@ If `on_message_secret` is set, the webhook has an HMAC signature. The signature 
 
 **A stranger adds me.** A friend request waits for `toxi accept`. There is one exception: if a request answers a live `toxi pair` invite, the daemon accepts it automatically. An invite has a random 32-hex nonce. It is valid for 10 minutes, and it works one time only. An invite is as sensitive as your Tox ID. Share invites over a channel that you trust.
 
-**My IP is visible.** Yes, the people that you chat with can see it. This is a property of Tox. If this is important to you, route the traffic through Tor. Use the `[tox] proxy_*` keys in the config. The PRD gives the details.
+**My IP is visible.** Yes, the people that you chat with can see it. This is a property of Tox. toxi has no proxy or Tor setting yet (backlog item 14). If this is important to you, do not pair with contacts that must not know your address.
 
 **A machine with the daemon is shared.** Do not share it. `tox_state.bin` has no at-rest encryption yet. Refer to PRD §4.9.3.
 

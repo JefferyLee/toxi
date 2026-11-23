@@ -117,20 +117,3 @@ def test_codex_stop_hook_emits_statusline_context(tmp_path):
         "systemMessage": "toxi: 1/1 online",
     }
     assert res.stderr == ""
-
-
-def test_codex_unread_hook_emits_untrusted_context(tmp_path):
-    msgs = json.dumps([{"alias": "bob", "content": "hello"}])
-    res = _run_hook(
-        "unread_hook.py",
-        {"TOXI_BIN": _fake_toxi(tmp_path, msgs, "toxi: 📬 1 from bob · 1/1 online")},
-    )
-
-    assert res.returncode == 0
-    out = _hook_output(res)
-    ctx = out["additionalContext"]
-    assert out["hookEventName"] == "SessionStart"
-    assert "toxi: 📬 1 from bob · 1/1 online" in ctx
-    assert "1 unread" in ctx
-    assert "bob: hello" in ctx
-    assert "untrusted personal content" in ctx

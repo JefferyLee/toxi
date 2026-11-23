@@ -60,6 +60,17 @@ def peer_config() -> dict[str, dict]:
     return out
 
 
+WAKE_KINDS = ("msg", "request", "relay")
+
+
+def wake_kinds() -> tuple:
+    """`[wake] kinds = [...]`: the kinds of peer text that wake an idle session
+    (design §13.9). Messages from an `owner`, decisions for the user and answers
+    to this session always wake; an `ack` never does."""
+    kinds = _load().get("wake", {}).get("kinds")
+    return tuple(str(k) for k in kinds) if isinstance(kinds, list) else WAKE_KINDS
+
+
 def send_dirs() -> list[str]:
     """`[files] send_dirs = [...]`: more dirs whose files may be sent, besides a
     running session's project dir, the temp dir and toxi's media dir."""

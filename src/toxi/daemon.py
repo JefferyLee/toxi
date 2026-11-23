@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import selectors
+import signal
 import socket
 import subprocess
 import tempfile
@@ -45,6 +46,9 @@ INVITE_TTL = 600  # seconds a `toxi pair` invite stays valid
 PART_TIMEOUT = 60  # seconds to wait for the rest of a multi-part text before dropping the parts
 MAX_BODY_BYTES = 64 * 1024  # largest text body (after reassembly); bigger bodies go as a file
 SUB_BACKLOG = 4 * 1024 * 1024  # bytes of events a subscriber may fall behind before it is dropped
+FILE_RATE_LIMIT = 30  # incoming file offers accepted per contact per hour
+MEDIA_QUOTA = 2 * 1024 * 1024 * 1024  # media/ stops taking files above this many bytes
+OTHER_RATE_LIMIT = 300  # incoming non-text envelopes (cards, receipts, metas...) per contact per minute
 FILE_META_TTL = 300  # seconds a `file` meta waits for its transfer (or the other way round)
 
 # Map a filename extension to one of our media msg_types (PRD: image/voice/video).
@@ -64,15 +68,20 @@ def _classify_media(filename: str) -> str:
     return "file"
 
 
-def _post_json(url: str, body: bytes, headers: dict) -> None:
-    """Fire-and-forget HTTP POST for the on_message webhook (runs in a thread)."""
-    try:
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status >= 300:
+def _post_json(url: str, body: bytes, headers: dict, tries: int = 2) -> None:
+    """HTTP POST for the on_message webhook (runs in a thread). A failed POST is
+    tried once more after 5 s, so a bot does not miss a wake for one blip."""
+    for attempt in range(tries):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status < 300:
+                    return
                 log.warning("on_message webhook answered %s", resp.status)
-    except Exception as e:  # network errors must never reach the event loop
-        log.warning("on_message webhook failed: %s", e)
+        except Exception as e:  # network errors must never reach the event loop
+            log.warning("on_message webhook failed: %s", e)
+        if attempt + 1 < tries:
+            time.sleep(5)
 
 
 def _sha256(path) -> str:
@@ -155,6 +164,17 @@ def _sender_ts(env: dict) -> int:
     except (TypeError, ValueError):
         return now
     return ts if 0 < ts <= now + 300 else now
+
+
+def _media_bytes() -> int:
+    total = 0
+    try:
+        for e in os.scandir(paths.media_dir()):
+            if e.is_file(follow_symlinks=False):
+                total += e.stat(follow_symlinks=False).st_size
+    except OSError:
+        pass
+    return total
 
 
 def _within_rate(times: deque, limit: int, now: float, window: float = 60.0) -> bool:
@@ -573,6 +593,9 @@ class Daemon:
     def _on_friend_message(self, friend_number: int, message: bytes, msg_type: int) -> None:
         env = envelope.parse(message)
         etype = env.get("type")
+        if etype not in ("text", "ack") and not self._rate_ok("other", friend_number, OTHER_RATE_LIMIT):
+            log.warning("rate limit: dropped a %s envelope from friend %d", etype, friend_number)
+            return
 
         if etype == "ack":
             ref = env.get("data", {}).get("ref_uuid")
@@ -664,6 +687,11 @@ class Daemon:
             self._send_message({"alias": alias, "body": body, "reply_to": msg_uuid})
         except RpcError as e:
             log.warning("could not answer @?: %s", e)
+
+    def _rate_ok(self, kind: str, friend_number: int, limit: int, window: float = 60.0) -> bool:
+        """Sliding-window limit per friend for one kind of incoming traffic."""
+        per = self.__dict__.setdefault(f"_{kind}_times", {})
+        return _within_rate(per.setdefault(friend_number, deque()), limit, time.time(), window)
 
     def _alias_of(self, friend_number: int):
         row = self.db.execute(
@@ -1354,6 +1382,15 @@ class Daemon:
         if contact is None or kind != FILE_KIND_DATA or (file_size and file_size > MAX_FILE_BYTES):
             self.tox.file_control(friend_number, file_number, FILE_CONTROL_CANCEL)
             return
+        if not self._rate_ok("file", friend_number, FILE_RATE_LIMIT, 3600):
+            log.warning("rate limit: declined a file from friend %d", friend_number)
+            self.tox.file_control(friend_number, file_number, FILE_CONTROL_CANCEL)
+            return
+        if _media_bytes() + (file_size or 0) > MEDIA_QUOTA:
+            log.warning("media/ is over %d MB: declined a file from friend %d",
+                        MEDIA_QUOTA // (1024 * 1024), friend_number)
+            self.tox.file_control(friend_number, file_number, FILE_CONTROL_CANCEL)
+            return
         name = _safe_filename(filename)
         uid = str(_uuid.uuid4())
         final_path = paths.ensure_media_dir() / f"{uid}__{name}"
@@ -1683,8 +1720,11 @@ class Daemon:
         if not cfg:
             return
         items = []
+        peer_cfg = config.peer_config()
         for m in msgs:
             item = dict(m)
+            # The receiver of the POST decides how far to trust each one: a non-peer is null.
+            item["trust"] = (peer_cfg.get(m["alias"]) or {}).get("trust")
             if cfg["include_body"]:
                 full = self._get_message({"msg_uuid": m["msg_uuid"]}).get("message") or {}
                 item.update({k: full.get(k) for k in (
@@ -2116,7 +2156,7 @@ class Daemon:
 
     def _get_message(self, params: dict) -> dict:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                "m.received_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
+                "m.received_at, m.delivered_at, m.read_receipt_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                 "FROM messages m "
@@ -2247,7 +2287,9 @@ class Daemon:
             "SUM(CASE WHEN m.needs_human=1 AND m.direction='in' AND m.handled_at IS NULL "
             "THEN 1 ELSE 0 END) AS needs_human, "
             "SUM(CASE WHEN m.direction='out' AND m.kind='request' AND m.status NOT IN "
-            "('handled','failed','bounced') THEN 1 ELSE 0 END) AS open_requests "
+            "('handled','failed','bounced') THEN 1 ELSE 0 END) AS open_requests, "
+            "SUM(CASE WHEN m.direction='out' AND m.kind='request' AND m.status IN "
+            "('failed','bounced') THEN 1 ELSE 0 END) AS failed_requests "
             "FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE " + " AND ".join(conds) +
             " GROUP BY c.alias, m.thread ORDER BY last_at DESC LIMIT ?",
             (*args, int(params.get("limit", 50))),
@@ -2444,8 +2486,12 @@ def hold_instance_lock(attempts: int = 30):
 
 def main() -> None:
     lock = hold_instance_lock()  # noqa: F841 — held until the process exits
+    d = Daemon()
+    # The service manager stops us with SIGTERM: leave the loop, so that the
+    # Tox state is saved and the socket removed, as on a normal shutdown.
+    signal.signal(signal.SIGTERM, lambda *_: setattr(d, "running", False))
     try:
-        Daemon().run()
+        d.run()
     except KeyboardInterrupt:
         pass
 

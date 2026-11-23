@@ -57,8 +57,8 @@ def _start(env, session="s1", *args, **hook_input):
     return p
 
 
-def _mail(tmp_path, text, uuids):
-    (tmp_path / "mail.json").write_text(json.dumps({"text": text, "msg_uuids": uuids}))
+def _mail(tmp_path, text, uuids, wake=True):
+    (tmp_path / "mail.json").write_text(json.dumps({"text": text, "msg_uuids": uuids, "wake": wake}))
     flag = tmp_path / "home" / "inbox.flag"
     t = time.time() + 1
     os.utime(flag, (t, t))
@@ -126,3 +126,14 @@ def test_wakes_stop_after_the_limit_until_the_user_types(tmp_path):
     assert _start(env).wait(timeout=5) == 0  # limit reached: not armed
     assert _start(env, "s1", "--disarm").wait(timeout=5) == 0  # the user typed
     assert _start(env).wait(timeout=5) == 2
+
+
+def test_mail_that_does_not_wake_waits_unread_until_mail_that_does(tmp_path):
+    env = _setup(tmp_path)
+    p = _start(env)
+    _mail(tmp_path, "FYI: nightly build green", ["r1"], wake=False)
+    assert _alive_after(p, 0.6)  # an FYI report does not wake the session
+    assert not (tmp_path / "marked").exists()  # and stays unread for the next turn
+    _mail(tmp_path, "FYI: nightly build green\n- please rerun", ["r1", "q1"], wake=True)
+    assert p.wait(timeout=5) == 2
+    assert (tmp_path / "marked").read_text() == "-- r1 q1\n"

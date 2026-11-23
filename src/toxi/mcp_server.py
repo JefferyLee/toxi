@@ -105,9 +105,24 @@ def search_messages(q: str, alias: str | None = None, thread: str | None = None,
 
 def get_threads(alias: str | None = None) -> dict:
     """Threads (topics) in your conversations, most recent first, with message
-    count, unread count and how many unread messages need the user's decision."""
+    count, unread count, how many messages still need the user's decision, how
+    many of your requests are open, and how many failed or bounced."""
     rows = client.request("list_threads", {"alias": alias})["threads"]
     return {"count": len(rows), "threads": rows}
+
+
+def get_message_status(msg_uuid: str) -> dict:
+    """Where one message stands, by its msg_uuid (the id send_message returned).
+    Status of a message you sent: queued → sent → delivered → read → handled,
+    or failed (an online contact never acknowledged it) or bounced (no session
+    there took it). With the times of each step; for a room message, the
+    status of each recipient."""
+    m = client.request("get_message", {"msg_uuid": msg_uuid}).get("message")
+    if not m:
+        return {"found": False, "msg_uuid": msg_uuid}
+    keys = ("msg_uuid", "alias", "direction", "status", "kind", "thread", "reply_to",
+            "created_at", "delivered_at", "read_receipt_at", "read_at", "handled_at", "recipients")
+    return {"found": True, **{k: m[k] for k in keys if m.get(k) is not None}}
 
 
 def view_media(msg_uuid: str):
@@ -284,7 +299,7 @@ async def _poll_for_message(take, deadline: float) -> dict:
     return {"messages": [], "timed_out": True}
 
 
-TOOLS = [get_unread, read_history, get_threads, search_messages, view_media, mark_read,
+TOOLS = [get_unread, read_history, get_threads, get_message_status, search_messages, view_media, mark_read,
          mark_handled, send_message, send_file, list_contacts, get_peers, get_status,
          wait_for_message, list_rooms, read_room, send_room_message]
 
@@ -294,6 +309,7 @@ ANNOTATIONS = {
     "get_unread": {"readOnlyHint": True},
     "read_history": {"readOnlyHint": True},
     "get_threads": {"readOnlyHint": True},
+    "get_message_status": {"readOnlyHint": True},
     "search_messages": {"readOnlyHint": True},
     "list_rooms": {"readOnlyHint": True},
     "read_room": {"readOnlyHint": True},
