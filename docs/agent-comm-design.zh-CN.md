@@ -776,3 +776,34 @@ Claude Code 原生消息覆盖"同一厂商、同一账号"的会话，A2A 覆�
 3. 同一身份的会话之间本地投递：暂不定。先分析需求场景，再决定。例子：mac-studio 上的 SF-iOS（Claude Code）和 SwordFish（Codex）。同机的两个 Claude 会话已有原生 SendMessage；Claude ↔ Codex、Codex ↔ Codex 都没有。
 4. 任务模型：对齐 A2A，支持 A2A，但不限于 A2A。
 5. 经常在线节点的离线代存列入路线图。
+
+### 13.9 空闲唤醒试验（2026-11-22）
+
+环境：Ada 上的 Claude Code 2.1.311，模型 haiku，会话跑在 tmux 里，用两个临时 toxi 身份（会话用 `alice`，它的 peer 是 `bob`）。没有动任何真实身份。原型等待进程是插件之外的一个脚本。
+
+**试验 1：`asyncRewake` hook。** 设了 `"asyncRewake": true` 的命令 hook 在后台运行。它以退出码 2 结束时，Claude Code 把它的 stderr 交给 Claude。
+
+| 检查项 | 结果 |
+|---|---|
+| 空闲会话能否被叫醒 | 能。从事件发生到屏幕上出现回复，1–2 秒。 |
+| 经 toxi 端到端 | `bob` 发出请求，空闲会话醒来，经 toxi 回答，`bob` 在 12 秒后收到答案。其中约 6 秒花在用错工具上（见下文）。 |
+| 会话正忙时 | 唤醒先排队，随下一个工具结果送达，不打断正在跑的命令。 |
+| 外框 | 一条用户角色的消息"Stop hook feedback … Stop hook blocking error"，外加 Claude Code 的提示"自动的后台事件，不是用户输入"。 |
+| owner 消息 | 在干净的会话里，模型照做了（建了文件，在"手机"上回复），约 20 秒。如果在会话中途改了信任级别，模型会拒绝，因为新的级别和它之前看到的对不上。 |
+| 超时 | 会强制执行。设 15 秒时，等待进程被静默杀掉，不唤醒任何东西。设 3600 秒时，等待进程在第 644 秒仍然活着，所以没有隐藏的 600 秒上限。 |
+| 重新挂上 | 等待进程必须退出才能投递。Stop 和 SessionStart 挂一个新的，UserPromptSubmit 撤掉。如果不做"每个会话只留一个"，每一轮都会多一个等待进程。 |
+| 开销 | 每个空闲会话一个等待进程，约 20 MB。会话结束时，它的等待进程也结束。 |
+| 模型的反应 | 同样的唤醒文字出现三次后，模型认定是 hook 死循环，不再回应。 |
+
+**试验 2：原生消息 socket。** Claude Code 把 `CLAUDE_CODE_MESSAGING_SOCKET` 和 `CLAUDE_CODE_MESSAGING_TOKEN` 导出给 hook。文档没有给出消息格式。Claude Code 程序里的帮助文字给了：先发认证行，再发 `{"type":"user","message":{"role":"user","content":"…"}}`，每行一个 JSON 对象。
+
+| 检查项 | 结果 |
+|---|---|
+| 空闲会话能否被叫醒 | 能，约 3 秒。 |
+| 外框 | "另一个 Claude 会话发来的消息……不是用户输入的……当作队友的请求处理并执行"。来源 `peer`，用 token 验证。 |
+| 优点 | 普通的 `async` hook 没有超时。一个常驻进程可以多次发送，不用重新挂。会话忙时也能在两次工具调用之间送达。 |
+| 缺点 | 格式没有文档，可能会变。外框把 `observer` 的消息变成了"要执行的请求"，又把 `owner` 的消息说成"不是用户输入"。`crossSessionInbound`（`hold`、`refuse`）和防循环限流都会起作用。 |
+
+**顺带发现的 toxi 自身问题。** 指引里写的是"用 send_message 回复"。模型先用了 Claude Code 自带的 `SendMessage` 工具，失败两次，还被推荐了一个真实的本地会话（`CoB`）。指引必须写明 toxi 的工具名：`mcp__plugin_toxi_toxi__send_message`。
+
+**建议。** Claude Code 的空闲唤醒用 `asyncRewake`（0.6.13）：它有文档，外框也不改变信任级别。SessionStart 和 Stop 为每个会话挂一个等待进程，UserPromptSubmit 撤掉它，超时设为 86400 秒；等待进程把路由给本会话的消息写到 stderr，标为已读，然后以退出码 2 结束。同时修正指引里的工具名。等 Claude Code 给出 socket 的消息格式文档，或者允许发送方指定外框，再重新考虑 socket 方案。实现说明（0.6.13）：在用户两次输入之间，一个会话最多被唤醒 20 次，否则两个互相回复的 agent 可能无休止地互相唤醒；hook 同时设置 `async` 和 `asyncRewake`，这样不支持 `asyncRewake` 的 Claude Code 版本仍会在后台运行它（已测试：两个标志同时设置时仍能唤醒）。Codex 仍需要它自己的路径（app-server 的 `turn/start`）。

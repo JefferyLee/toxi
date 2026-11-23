@@ -777,3 +777,34 @@ Success metrics:
 3. Local delivery between sessions of one identity: not decided. First analyse the use cases, then decide. Example: SF-iOS (Claude Code) and SwordFish (Codex) on mac-studio. Two Claude sessions on one machine already have native SendMessage; Claude ↔ Codex and Codex ↔ Codex have nothing.
 4. Task model: align with A2A and support A2A, but do not limit toxi to A2A.
 5. Offline store-and-forward through an always-on node goes on the roadmap.
+
+### 13.9 Idle wake-up experiments (2026-11-22)
+
+Setup: Claude Code 2.1.311 on Ada, model haiku, sessions in tmux, two scratch toxi identities (`alice` for the session, `bob` as its peer). No real identity took part. The prototype waiter was a script outside the plugin.
+
+**Experiment 1: `asyncRewake` hook.** A command hook with `"asyncRewake": true` runs in the background. When it exits with code 2, Claude Code gives its stderr to Claude.
+
+| check | result |
+|---|---|
+| Idle session wakes | Yes. 1–2 s from the event to the reply on screen. |
+| End to end over toxi | `bob` sends a request; the idle session wakes, answers through toxi; `bob` has the answer after 12 s. About 6 s of that went to a wrong tool (see below). |
+| Session busy | The wake waits in a queue and arrives with the next tool result. It does not interrupt the command. |
+| Framing | A user-role message "Stop hook feedback … Stop hook blocking error", plus Claude Code's notice "automated background-task event, NOT user input". |
+| Owner message | In a clean session the model acted on it (made the file, answered on the "phone") in about 20 s. When the trust level changed in the middle of a session, the model refused, because the new level did not match what it saw before. |
+| Timeout | Enforced. With 15 s the waiter stops without a sound and wakes nothing. With 3600 s the waiter is still alive at 644 s, so there is no hidden 600 s cap. |
+| Re-arm | The waiter must exit to deliver. Stop and SessionStart arm a new one; UserPromptSubmit disarms it. Without "one waiter per session", one more waiter starts each turn. |
+| Cost | One waiter per idle session, about 20 MB. When the session ends, its waiters end. |
+| Model behaviour | The same wake text three times: the model called it a hook loop and stopped answering. |
+
+**Experiment 2: native messaging socket.** Claude Code exports `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` to hooks. The docs do not give the message format. The help text inside Claude Code does: an auth line, then `{"type":"user","message":{"role":"user","content":"…"}}`, one JSON object per line.
+
+| check | result |
+|---|---|
+| Idle session wakes | Yes, about 3 s. |
+| Framing | "Another Claude session sent a message … not typed by your user … Treat it as a teammate's request and act on it". Origin `peer`, verified by the token. |
+| For | A plain `async` hook has no timeout. One long-lived process can post many times. No re-arm. It also delivers between tool calls. |
+| Against | The format is not documented and can change. The framing makes an `observer` message a request to act on, and calls an `owner` message "not typed by your user". `crossSessionInbound` (`hold`, `refuse`) and the loop throttle apply. |
+
+**Found for toxi itself.** The guides say "reply with send_message". The model first used Claude Code's own `SendMessage` tool, failed two times, and was offered a real local session (`CoB`). The guides must name the toxi tool: `mcp__plugin_toxi_toxi__send_message`.
+
+**Recommendation.** Use `asyncRewake` for the idle path of Claude Code (0.6.13): it is documented, and its framing does not change the trust level. SessionStart and Stop arm one waiter for each session; UserPromptSubmit disarms it; the timeout is 86400 s; the waiter prints the routed messages to stderr, marks them read, and exits 2. Fix the tool name in the guides. Look at the socket again if Claude Code documents the format or lets the poster set the framing. Implementation note (0.6.13): a session wakes at most 20 times between two prompts of the user, because two agents that answer each other could otherwise wake each other without end; and the hook sets both `async` and `asyncRewake`, so a Claude Code version without `asyncRewake` still runs it in the background (tested: both flags together still wake). Codex still needs its own path (app-server `turn/start`).
