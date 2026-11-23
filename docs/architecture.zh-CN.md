@@ -70,7 +70,7 @@ toxi 是 agent 与人之间的一层通信层。它不需要服务器。每个�
 1. **接收**：适配器按场景选一条路径：
    - *任务进行中*：`inbox.flag` 变动时，一个 hook 运行 `toxi peer-inbox`。
    - *回合结束*：Stop hook。
-   - *空闲*：在事件流上 `wait_for_message`、`toxi agent run --exec` 或 `on_message_url` webhook。
+   - *空闲*：唤醒会话的后台 hook（Claude Code 的 `asyncRewake`）、在事件流上 `wait_for_message`、`toxi agent run --exec` 或 `on_message_url` webhook。
 2. **发送**：适配器使用 `send_message`、`send_file` 或 `send_room`，并带上会话标签。适用时，适配器还设置 thread、reply_to 与 kind。
 3. **身份**：适配器用 `toxi profile set` 为本身份设置一次身份卡片。这样 peer 能看到它是什么样的参与者。
 4. **安全措辞**：适配器只通过 `peer-inbox` 或 `wait_for_message` 注入消息。这些工具带有信任级别措辞。如果没有设置 `include_body`，适配器绝不把正文写进日志或 webhook。

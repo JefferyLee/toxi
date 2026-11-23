@@ -68,7 +68,7 @@ dirs  = ["/path/to/project"]       # deliver only to Claude Code sessions starte
 
 | runtime | while the agent works | end of turn | while the agent is idle |
 |---|---|---|---|
-| Claude Code | PostToolUse hook: a stat of `inbox.flag`, then `toxi peer-inbox` | Stop hook | `wait_for_message` (event-driven) or channel mode |
+| Claude Code | PostToolUse hook: a stat of `inbox.flag`, then `toxi peer-inbox` | Stop hook | wake hook (`asyncRewake`): the session wakes within seconds |
 | Codex | PostToolUse hook: the same `inbox.flag` check | Stop hook | `wait_for_message` loop |
 | headless | `toxi agent run --exec CMD` · `[hooks] on_message_url` webhook (HMAC) · `on_message` command | | |
 | people | `toxi unread`, `toxi watch`, the status line, ToxiOS on the phone | | |

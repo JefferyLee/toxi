@@ -68,7 +68,7 @@ dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 
 
 | 运行时 | agent 工作时 | 回合结束 | agent 空闲时 |
 |---|---|---|---|
-| Claude Code | PostToolUse hook：stat 一下 `inbox.flag`，再运行 `toxi peer-inbox` | Stop hook | `wait_for_message`（事件驱动）或 channel 模式 |
+| Claude Code | PostToolUse hook：stat 一下 `inbox.flag`，再运行 `toxi peer-inbox` | Stop hook | 唤醒 hook（`asyncRewake`）：会话几秒内醒来 |
 | Codex | PostToolUse hook：同样的 `inbox.flag` 检查 | Stop hook | `wait_for_message` 循环 |
 | headless | `toxi agent run --exec CMD` · `[hooks] on_message_url` webhook（HMAC）· `on_message` 命令 | | |
 | 人 | `toxi unread`、`toxi watch`、状态栏、手机上的 ToxiOS | | |
