@@ -493,6 +493,8 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
+> 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。
+
 **马上要收的尾**
 
 1. vibe-op 升级并重启自己的 daemon（castle-op 和 grok 已报 0.6.0；vibe-op 尚未报告升级）。
@@ -523,3 +525,240 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 15. 真正的 Tox 群组（NGC）替代应用层 room（成员多时）。
 16. PRD 与 v2 对齐、Homebrew tap 跟进 0.6.x、Linux 发行版（Debian）实测、Windows 不在计划内。
 17. 指挥链（授权传递）。现在的信任由接收方判断，且不传递：某个 agent 转述"Jeff 同意了"不算数。要支持授权传递，需要签名授权（owner 的设备签发写明被授权者、范围和期限的凭证，接收方验证），也就是 daemon 和 ToxiOS 在 Tox 密钥之外新增签名密钥、授权协议、授权与撤销界面，而且一个 agent 被带偏的影响面更大。等到真的需要某个 agent 长期代 owner 行事时再做；一次批准多个 agent 现在用 room 就能做到，因为 room 消息由发送者直接发给每个成员。
+
+## 13. 0.6.11 评估与路线（2026-11-22）
+
+依据：
+
+- 全部源码，分四个方向审查：投递核心、agent 接入层、安全、运维。影响最大的 12 条结论又对照代码逐条核对过。
+- 2026-11-22 在 Ada 上的只读测量：消息库和 daemon 日志。
+- 865 份 Claude Code 会话记录，只做计数，没有读任何消息正文。
+- 外部调研：Tox、agent 协议标准、其他 P2P 传输、Claude Code 的新能力。
+
+提交记录引用 §13.4 里的编号（A1 … E9）。
+
+### 13.1 结论
+
+- 网络传输没有问题。发出到送达对方机器的中位时间是 0–1 秒。
+- 问题都出在消息到达之后：
+  - agent 空闲时收不到；
+  - 消息会被别的会话或子 agent 拿走；
+  - 任务状态不准；
+  - 失败时不通知任何人。
+- 运维全靠手工，出了故障没有告警。
+- 有 4 个高危安全问题，要在加新功能之前修掉。
+
+### 13.2 数据（Ada，近 30 天；2026-11-22 只读测量）
+
+| 环节 | Claude Code / Codex 会话 | Grok bot（webhook 唤醒） |
+|---|---|---|
+| 发出 → 送达对方机器 | 中位 0–1 秒 | 中位 1 秒 |
+| 送达 → 对方 agent 读到 | 中位 1.5–17 分钟，90% 分位 32–77 分钟；31–65% 的消息超过 10 分钟 | 中位 10–19 秒，没有超过 10 分钟的 |
+| 本机收到 → 本机会话读到 | 中位 6 分钟，90% 分位 2 小时；发给 OnesVibe 会话的中位 2.1 小时 | — |
+| 请求收到 `done` 回执的比例 | Ada → codex 40%，codex@Ada → ada 9%，Ada → belinda 79% | 50–66% |
+
+其他事实：
+
+- `ada` 身份的 `daemon.log` 里有 1,572 次 `BrokenPipe`，即客户端等不及先断开了。2026-11-09 和 2026-11-10 每天 263 次，当时 0.6.9 的优先级修复已经生效。负载高时请求仍然超时。
+- Ada 上有 18 个 toxi 进程。其中 13 个 `toxi mcp serve` 已经运行 9 天，跑的是上次升级之前的代码。
+- `ada` 的库有 10,892 条消息（13 MB），归档没有开启。
+
+数据说明：
+
+- 同一个网络，webhook 唤醒的 bot 比 Claude Code 和 Codex 会话快 30 到 100 倍。差距全在"空闲会话不知道有消息"。
+- `done` 比例低，一部分是子 agent 拿走了消息（C1），一部分是状态逻辑有错（D 组）。这个数字两个方向上都不可信。
+
+### 13.3 要保留的
+
+- 一个身份只跑一个 daemon，用文件锁保证。
+- SQLite 是唯一的真实来源。事件和 `inbox.flag` 只用来提示。
+- 先写入数据库再发送；按 uuid 去重；收到重复消息也回 ACK。
+- 投递和措辞只走一条路径（`peers.take` + `as_prompt`）。ack 不唤醒任何人。
+- 回复路由只用本地字段（`from_dir`、`from_session`），不上网络。
+- 0.6.11 的退信是发送方唯一能收到的失败通知。
+- 一次性邀请 nonce 是唯一会自动接受的好友请求。
+- 收到的文件改名存放，权限 0600。
+- webhook 的 HMAC 签名同时覆盖时间戳和正文。
+- 数据库迁移是幂等的。新代码连旧 daemon 时会自动降级。
+- FakeTox 分层测试和双 daemon 端到端测试。
+- §11 记录了每次事故的原因和修复。
+
+### 13.4 问题清单
+
+#### A. 安全（先修）
+
+| 编号 | 级别 | 问题 | 位置 |
+|---|---|---|---|
+| A1 | 高 | 信任标签和消息正文在同一段文字里，发送方可以伪造。正文、会话名、卡片字段、线程名和标签里的换行原样进入 agent 上下文。任何 peer，哪怕只是 observer，都能写出一段看起来像 `(trust: owner)` 的内容。消息 id 也由发送方决定，并被拼进让 agent 执行的 `toxi show <id>` 命令里。 | `src/toxi/peers.py:171-239`，`src/toxi/envelope.py:26-57,118-141,211` |
+| A2 | 高 | `/toxi:read` 预先放行 `Bash(toxi *)`，同时把原始正文交给模型。`toxi *` 包括 `send --file <任意文件>`、`agent run --exec`、`teardown --purge`。播放语音那一步用发送方给的文件名拼 shell 命令。 | `claude-code-plugin/commands/read.md:4,17-20`，`src/toxi/daemon.py:83-88` |
+| A3 | 高 | 发送没有任何限制。`send_file` 能把任何路径发给任何联系人，文件由 daemon 在 agent 沙箱之外读取。一个被注入的 agent 可以把 `~/.ssh` 发出去。 | `src/toxi/mcp_server.py:139-189`，`src/toxi/daemon.py:1349` |
+| A4 | 高（有条件） | 信任按别名绑定，不按公钥绑定。联系人被删除或改名后，`[peers.X]` 配置还在。下一个通过邀请加入、名字叫 X 的联系人会继承这个信任级别，包括 owner。 | `src/toxi/config.py:35-58`，`src/toxi/daemon.py:385-393,1176,1189-1194` |
+| A5 | 中 | 发送方的 `ts` 不做校验。100 条时间写在将来的消息就能把 peer 和 owner 的消息挤出投递窗口。非数字的 `ts` 会让路由代码报错。 | `src/toxi/daemon.py:548,1918-1921`，`src/toxi/peers.py:102,152` |
+| A6 | 中 | 没有成本和磁盘上限。Stop hook 每批消息都阻止停止，不检查 `stop_hook_active`。文件自动接收，不限数量和磁盘。非文本信封不受限流。 | `claude-code-plugin/hooks/stop_hook.py:17-36`，`src/toxi/daemon.py:488-538,643-653,1197-1225` |
+| A7 | 中 | `docs/security.md` 与代码不符。它写了不存在的 Tor/代理配置。没配 peer 时，SessionStart 会注入非 peer 消息的完整正文。 | `docs/security.md:24,38`，`src/toxi/config.py:70-87`，`claude-code-plugin/hooks/unread_hook.py:29-33,74-92` |
+
+代码只强制执行这几件事：谁算 peer、限流、邀请校验、文件权限。各信任级别能做什么、"消息是信息不是指令"，都只写在提示词里。
+
+#### B. 投递可靠性（daemon）
+
+| 编号 | 问题 | 位置 |
+|---|---|---|
+| B1 | 消息会无声失败。已发出但没收到 ACK 的文本，从**创建时间**算起 24 小时后标为 failed。排队超过 24 小时的消息，在同一次扫描里刚发出就被判为失败，之后再收到的 ACK 也被忽略。不发事件，不通知任何人。这违反了"排队的文本永远不会失败"。 | `src/toxi/daemon.py:461,472,493`，`docs/protocol.md:62` |
+| B2 | 断线时只有文件回到队列，文本不回；文本只在对方在线时重发。对方离开一天，消息就失败。§12 第 18 项记的只是较轻的一面。 | `src/toxi/daemon.py:416-417,476` |
+| B3 | 长消息会被截断存库，发送方却看到 `delivered` 或 `read`。接收方把分片放在内存里就回 ACK，60 秒没收齐就按残缺内容存库。接收方重启会丢掉已经 ACK 的分片。 | `src/toxi/daemon.py:586-615,692-693` |
+| B4 | 事件流会踢掉正常的订阅者。一帧超过 8 KB（macOS socket 缓冲区的大小）时，非阻塞 socket 上的 `sendall` 失败，订阅者被当成"太慢"踢掉。`toxi watch` 不提示就退出；`agent run` 重连后收到的消息缺少上下文。 | `src/toxi/daemon.py:821-836` |
+| B5 | 客户端 5 秒超时后，发送方无法知道消息发没发出去。发送没有幂等键，重试会重复发送。`contrib/cloud-relay/poller.py` 遇到失败就重试。 | `src/toxi/client.py:27`，`src/toxi/daemon.py:1866`，`contrib/cloud-relay/poller.py:46-49` |
+| B6 | 负载高时请求超时。daemon 是单线程的。未读查询和统计查询扫描全表，每次状态栏刷新、每个 hook 都要跑。归档默认关闭。§13.2 里的 1,572 次 `BrokenPipe` 就是这个原因。 | `src/toxi/daemon.py:1710-1715,1909`，`src/toxi/db.py:42-45`，`src/toxi/config.py:61-67` |
+| B7 | 唤醒和关机都会丢东西。待触发的唤醒只存在内存里；webhook 发送失败不重试；daemon 不处理 SIGTERM，服务重启时跳过状态保存。 | `src/toxi/daemon.py:64-72,1465-1468,1653-1667` |
+| B8 | "对方离线"和"本机断网"都返回 `queued`，分不清。bootstrap 只在启动时做一次，也不加 TCP 中继。 | `src/toxi/daemon.py:310,353-355,1562-1567`，`src/toxi/cli.py:315` |
+| B9 | 下次改表结构后，自动归档会静默停止。归档用 `INSERT … m.*` 复制行，消息表一加列，这条语句就失败。 | `src/toxi/daemon.py:2091-2095` |
+
+#### C. 消息送到 agent 手里（体验问题最大的一组）
+
+| 编号 | 问题 | 位置 |
+|---|---|---|
+| C1 | 子 agent 拿走 peer 消息，主会话永远看不到。PostToolUse hook 在子 agent 里也会触发，而 hook 不检查 `agent_id`。会话记录里，44 个子 agent 拿走了 106 条 peer 消息，回复了 0 条。发送方看到的是 `read`。 | `claude-code-plugin/hooks/peer_check.sh`，`claude-code-plugin/hooks/post_tool_hook.py:17-33`，`src/toxi/peers.py:166` |
+| C2 | 有几条路径绕过了会话路由，0.6.4 修过的"消息被别的会话先读走"又回来了。`wait_for_message` 带 alias 时拿走这个 alias 的全部未读消息（345 次真实调用里 339 次带了 alias）。Codex 的 Stop hook 调 `peer-inbox` 时不带 `--cwd`。 | `src/toxi/mcp_server.py:233`，`src/toxi/peers.py:156`，`plugins/toxi/hooks/stop_hook.py:45` |
+| C3 | 同一目录的两个会话互相挡住工作中的投递。PostToolUse 的"已看过"标记按目录记，不按会话记。 | `claude-code-plugin/hooks/peer_check.sh:8-13` |
+| C4 | 先标已读，后交给 agent。hook 8 秒超时后输出被丢弃，但消息已经标为已读、回执已发出，以后不会再投递。 | `src/toxi/peers.py:166-168`，`claude-code-plugin/hooks/post_tool_hook.py:26-29`，`src/toxi/daemon.py:1623-1637` |
+| C5 | 空闲的 Claude Code 和 Codex 会话收不到消息。§13.2 里的大部分延迟来自这里。 | §12 第 5 项 |
+| C6 | `wait_for_message` 和 Claude Code 的工具超时不匹配。345 次调用里，173 次被转到后台；38 次要求等待超过 600 秒，被静默截断。Codex 能用，只因为插件设了 `tool_timeout_sec = 660`。 | `plugins/toxi/.mcp.json` |
+| C7 | token 浪费严重。每次注入都附带 360–595 字的指引，占全部注入文字的 39%；一半的注入里指引比消息还长。MCP 返回完整的数据库行，每行都带对方卡片（`read_history` 平均 7.2k 字符，正文只占 20–40%）。16 个工具定义约 2.1k token，会话为加载它们调了 398 次 ToolSearch。长消息被截成 `toxi show` 指针，agent 又多执行了 103 次 `toxi show`；在 Codex 里这个命令读的是另一个身份。 | `src/toxi/peers.py:220,226-239`，`src/toxi/bootstrap.py:52-54` |
+| C8 | 同一身份下的会话之间不能互发消息（mac-studio 上的 SF-iOS 和 SwordFish）。对方只能用 `@?`（仅限 owner 设备）或被退信才知道有哪些会话。3,263 次发送里，1,369 次以猜测的 `@名字` 开头。 | `src/toxi/daemon.py:552,1735` |
+| C9 | Codex 插件和 Claude Code 插件行为不一致。`plugins/toxi/hooks/unread_hook.py` 是没被调用的死代码。Stop 摘要只显示给用户，模型看不到。`docs/codex-usage.md` §7 与 peer 指引互相矛盾。 | `plugins/toxi/hooks/hooks.json`，`docs/codex-usage.md` §7 |
+
+#### D. 任务语义（"请求完成了没有"不可信）
+
+| 编号 | 问题 | 位置 |
+|---|---|---|
+| D1 | 待决定事项会消失。`needs_human` 只统计未读消息，而 hook 投递时就把消息标成已读。 | `src/toxi/daemon.py:2054` |
+| D2 | 被退信的请求永远算未完成。退信方直接把消息标为已处理，不发回执。发送方那条停在 `delivered`，一直算作未完成的请求。没有 `bounced` 状态。 | `src/toxi/daemon.py:674,2056` |
+| D3 | "收到"也算已处理。任何带 `reply_to` 的回复，包括 `kind=ack`，都会发出 `done` 回执。 | `src/toxi/daemon.py:787-795,1891` |
+| D4 | 没有工具能查某个 `msg_uuid` 的状态。`open_requests` 排除了失败的请求，失败的请求看起来像已经答完。 | `src/toxi/mcp_server.py:282-284`，`src/toxi/daemon.py:2056-2057` |
+| D5 | 旧指令看起来像新的。注入不显示消息时间。30 分钟回复路由按发送方的 `ts` 算，晚到的消息到达时路由已经过期。 | `src/toxi/daemon.py:548,607`，`src/toxi/peers.py:102,226-239` |
+| D6 | 退信的文档和代码不符。文档说给没在运行的会话的 `@名字` 消息会等它启动，代码是退信。新会话还没登记时收到的消息也会被退回。 | `docs/install-and-usage.md:324`，`src/toxi/peers.py:90`，`src/toxi/daemon.py:664-688` |
+
+#### E. 运维与发布
+
+| 编号 | 问题 | 位置 |
+|---|---|---|
+| E1 | daemon 挂了没人知道（mac-studio 缺 sqlite 那次就是这样）。sqlite3 和 libtoxcore 在日志初始化之前导入，导入错误只进 `service.log`，`toxi doctor` 不读它。hook 出错不显示任何东西。唯一的信号是状态栏里的 `toxi: offline`。 | `src/toxi/daemon.py:25-26,284`，`src/toxi/cli.py:1033-1037,1167-1178`，`src/toxi/service.py:93-94` |
+| E2 | 升级是手工矩阵：28 天发了 12 个版本，Ada 上每次要重启 4 个 daemon、刷新 2 个插件、重启全部 agent 会话。`toxi upgrade` 只管 pipx 和一个身份，还和 launchd 抢着重启。没有东西会重启 `toxi mcp serve`。Codex 插件没有更新方法。三份文档写了三种升级步骤。 | `src/toxi/cli.py:894-903,1161-1166,1292-1294,1661-1687`，`README.md:30`，`docs/install.md:67-70`，`docs/install-and-usage.md:554-576` |
+| E3 | 6 处版本只查了 1 处。`toxi doctor` 只比较 daemon 和 CLI。Claude 插件版本按字符串排序（0.6.9 排在 0.6.11 后面），0.6.0 也算通过。不检查 Codex marketplace 路径是否存在。`toxi mcp serve` 不报告自己的版本。 | `src/toxi/cli.py:1043-1046,1065-1071,1074-1077,1368`，`pyproject.toml:36` |
+| E4 | 发布没有测试门槛。CI 只在打 tag 时运行，不跑 pytest。`docs/release.md` 写的是 `main` 分支（实际是 `master`）和 4 个版本号文件（实际 8 个）。 | `.github/workflows/publish.yml:3-31`，`docs/release.md:5-7,14,64,90` |
+| E5 | 环境假设有错。`requires-python >=3.10`，但 `config.py` 用了 3.11 才有的 `tomllib`。自动补装的 `mcp` 不锁版本。服务的 PATH 没有 `~/.local/bin`。Ada 的 venv 绑定 Homebrew 的 python@3.14：brew 删掉 3.14 时，所有身份同时停止。 | `pyproject.toml:10,29`，`src/toxi/config.py:4`，`src/toxi/cli.py:1235`，`src/toxi/service.py:78` |
+| E6 | "消息晚到 10 分钟"查不到原因。发送、接收、重发、好友上下线都不写日志，`get_message` 也不返回这些时间戳。 | `src/toxi/daemon.py:402-422,447-557,1826-1895,1935-1938` |
+| E7 | 没有备份和迁移流程。`TOXI_HOME` 写错时会静默生成一个新身份。 | `docs/install-and-usage.md:550`，`src/toxi/daemon.py:351` |
+| E8 | `install.sh` 可能清掉 Claude Code 设置。`settings.json` 解析失败时被直接覆盖，不做备份。 | `install.sh:130-146` |
+| E9 | 现场出过事的路径都没有测试：`install.sh`、升级、`reinstall-plugin`、hook、`toxi doctor` 的插件检查。`docs/prd.md` 已经过时，但 `docs/WORKFLOWS.md` 仍称它为权威。 | `docs/prd.md:767-768`，`docs/WORKFLOWS.md:28-31` |
+
+### 13.5 外部事实（2026-11-22 核实）
+
+**Tox**：仍在维护，但核心限制不会消失。
+
+- c-toxcore 最新版 v0.2.25（2026-11-15），两年发了 6 个版本。2026 年 187 个提交里 162 个出自两个人。https://github.com/TokTok/c-toxcore/releases，https://github.com/TokTok/c-toxcore/commits/master
+- 修复密钥冒充（KCI，issue #426）的 Noise 握手没有合并。PR #3028 还开着，里程碑 v0.2.26。https://github.com/TokTok/c-toxcore/pull/3028
+- 离线消息和多设备（issue #1259）从 2018 年开着至今。给离线好友发消息直接失败。https://github.com/TokTok/c-toxcore/issues/1259
+- 好友之间可以看到彼此的 IP 地址。https://tox.chat/faq.html
+- NGC 群组从 v0.2.19 起进入核心；v0.2.23 修了群组代码里一个高危溢出。https://github.com/TokTok/c-toxcore/security/advisories/GHSA-42vg-9mg3-399f
+- 结论：离线投递只能由 toxi 自己做。不换传输层（见"传输"）。
+
+**Claude Code**（唤醒空闲会话的新路径）：
+
+- `asyncRewake` hook：命令 hook 以退出码 2 结束时，唤醒空闲会话。默认超时 600 秒，所以每次运行后要重新启动。https://code.claude.com/docs/en/hooks.md
+- 原生跨会话消息：hook 和脚本可以通过 `CLAUDE_CODE_MESSAGING_SOCKET`（带 `CLAUDE_CODE_MESSAGING_TOKEN`）向自己所在的会话投递消息，空闲会话会被这样的消息唤醒。消息格式文档没写，需要试验。https://code.claude.com/docs/en/cross-session-messaging.md
+- Channels：研究预览。第三方插件需要开发者 flag 或组织白名单（`allowedChannelPlugins`）。https://code.claude.com/docs/en/channels.md
+- 插件 monitors：实验功能。文档没说它能不能唤醒空闲会话。https://code.claude.com/docs/en/plugins/components.md
+- 插件可以要求 Claude Code 的版本（`engines.claude-code`），不能要求外部程序的版本。第三方 marketplace 不自动更新。https://code.claude.com/docs/en/plugins/manifest-reference.md，https://code.claude.com/docs/en/plugins/loading.md
+- 同一台机器上的两个 Claude 会话已经能用原生 SendMessage 互发。toxi 不在这里竞争，专注跨机器和跨厂商。
+
+**agent 协议标准**：都不支持 P2P。
+
+- A2A v1.0：Agent Card（`/.well-known/agent-card.json`）、任务生命周期、JSON-RPC / gRPC / REST 绑定、webhook 推送。agent 要提供 HTTP 端点，允许自定义绑定。现归 Agentic AI Foundation（Linux Foundation）。https://a2a-protocol.org/latest/specification/，https://aaif.io/blog/a2a-joins-aaif
+- MCP 2026-07-28：无状态；Tasks 和 Events 扩展是 beta。https://modelcontextprotocol.io/specification/2026-07-28/changelog
+- AGNTCY SLIM 还是 Internet-Draft；ANP 的身份需要 TLS 域名；IETF agentproto 工作组 2026-10-08 成立。https://www.ietf.org/archive/id/draft-mpsb-agntcy-slim-02.html，https://datatracker.ietf.org/doc/charter-ietf-agentproto/
+- 结论：toxi 借用 A2A 的数据模型（任务状态 submitted / working / input-required / completed / failed / canceled），不自己发明。
+
+**传输**：
+
+| 传输 | 离线投递 | 手机推送 | 主要缺点 |
+|---|---|---|---|
+| iroh 1.0 | 文档没写 | 文档没写 | Python 绑定缺 gossip、blobs、docs |
+| py-libp2p 0.8 | 无 | 无 | 还不能用于生产 |
+| Nostr NIP-17 | 有（中继） | 无对应 NIP | NIP-17 仍是草案；`nostr-sdk` 是 alpha |
+| Matrix | 有（homeserver） | 有 | 需要 homeserver |
+| XMTP | 有 | 有 | 没有 Python SDK；托管网络 2027-02-01 关闭 |
+| SimpleX | 有（中继） | 有 | AGPL-3.0；库 2026-05 才出现 |
+| Veilid 0.5 | 未确认 | 未确认 | 1.0 之前；需要本地服务 |
+
+有离线投递的传输都依赖中继服务器。iroh 穿透 NAT 的能力好，但没有离线投递。保留 Tox。
+
+### 13.6 计划
+
+**第 1 批 — 0.6.12：安全和丢消息（进行中）**
+
+1. 注入时转义（A1）：正文和元数据去掉控制字符，正文每行缩进。消息放在带随机值的标记之间，信任头由 toxi 写在标记之外。校验 `msg_uuid` 的格式。
+2. `/toxi:read` 收窄权限（A2）：只放行 `toxi unread` 和 `toxi show`。语音文件名只允许安全字符。
+3. `send_file` 路径白名单（A3）：默认只允许会话的项目目录、临时目录和 media 目录，其他目录要在配置里加。
+4. 信任绑定公钥（A4）：peer 配置里可以写公钥。`toxi doctor` 报告没有对应联系人的条目。通过邀请加入的联系人不继承同名条目的信任级别。
+5. 子 agent 不取消息（C1）：hook 输入里有 `agent_id` 时直接退出。
+6. 所有取消息的路径都按会话路由（C2）：`wait_for_message` 带 alias 时也一样；Codex 的 Stop hook 加 `--cwd`。
+7. 至少投递一次（C4）：hook 先输出消息，再标已读。宁可重复，不可丢失。
+8. 不再无声失败（B1、B2）：失败时间从真正发出时算起；断线时文本也回到队列；失败时发事件，并在下一次注入时告诉发送会话。
+9. 长消息入库后再回 ACK（B3）。
+10. 每个订阅者一个写缓冲（B4），大帧不再导致订阅者被踢掉。
+11. 修正任务状态（D1–D3）：`needs_human` 以"已处理"为准，不以"已读"为准；新增 `bounced` 状态；`ack` 回复不发 `done`。
+12. 注入时显示消息年龄（"3 小时前"）；30 分钟路由从本机收到的时间算起（D5）。
+
+**第 2 批 — 0.7：运维**
+
+- `toxi doctor --all`：一次检查全部身份和 6 处版本——plist 与生成的版本是否一致、插件缓存（按版本号排序）、Codex marketplace 路径、每个 `toxi mcp serve` 进程的版本（列出跑旧代码的会话）、`service.log` 里的错误。
+- 故障可见：daemon 起不来时，状态栏和 hook 显示"toxi 已停止：原因"。
+- `toxi upgrade --all`：用 `--no-cache-dir` 安装指定版本，重启全部身份的服务，刷新插件，列出需要重启的会话。
+- CI：每次 push 跑 pytest，测试通过才能发布。修正 `docs/release.md`。版本号只写在 `pyproject.toml`，其他副本自动生成。
+- 改正环境假设（E5）：`requires-python >=3.11`，锁定 `mcp`，服务 PATH 加 `~/.local/bin`。
+- 可追查（E6）：发送、接收、重发、好友上下线写日志（不写正文）；`toxi trace <id>` 列出每一步的时间。
+- `toxi export` / `toxi import`：备份和迁移（ToxiOS 的 `toxid` 已有同样的功能）。
+- 归档默认开启（90 天），并修 B9。
+
+**第 3 批 — 0.8：agent 体验**
+
+- 空闲唤醒（C5），试验一个一个做（§13.8 决定 2）。Codex 用 app-server 的 `turn/start`。目标：空闲会话读到消息的中位时间小于 30 秒，和 Grok bot 一样。
+- 减少 token（C7）：指引全文只在 SessionStart 给一次，之后只引用一行。MCP 只返回必要字段，不格式化缩进。16 个工具合并成大约 8 个。
+- 会话目录（C8）：daemon 把正在运行的会话名单和每个会话的一句话用途发给 collaborator 和 owner。对方不再猜 `@名字`。
+- 同一身份的会话之间本地投递（C8）：分析需求场景之后再定（决定 3）。
+- 任务模型对齐 A2A（决定 4），新增 `get_request(id)` 工具。这会改协议，ToxiOS 要跟进。
+
+**远期**
+
+- 离线代存（决定 5）：由常在线节点（mac-studio 或 VPS）为离线的接收方代存端到端加密的消息。Tox 自己不会提供。
+- 签名授权（§12 第 17 项），从最小形式开始：由手机签发对某个 `needs_human` 请求的批准。
+- NGC 群组暂时不需要：13 个联系人、1 个 room，应用层 room 够用。
+
+### 13.7 发展方向
+
+Claude Code 原生消息覆盖"同一厂商、同一账号"的会话，A2A 覆盖"有 HTTP 端点的服务"。两者都覆盖不到的是：**跨厂商、跨机器、没有公网端点、没有中心服务器、人用手机参与的私有 agent 团队。** toxi 把这块做可靠，不做通用聊天软件。
+
+三件事：
+
+1. 从消息管道变成协作总线：会话目录、任务状态、手机上审批，构成闭环。
+2. 一台常在线节点作为中心：代存离线消息、运行 headless agent、给手机推送。ToxiOS 的 `toxid` 已经在承担这个角色。
+3. 安全从靠提示词约束变成靠代码约束：每个 peer 能触发哪些文件和哪些联系人的发送，由 daemon 强制执行。
+
+衡量标准：
+
+| 指标 | 目标 |
+|---|---|
+| 空闲会话读到消息 | 中位 < 30 秒，90% 分位 < 5 分钟 |
+| 无声失败 | 0 |
+| `done` 状态 | 准确（ack 不产生 `done`，退信的请求不算未完成） |
+| 升级一台机器 | 一条命令 |
+| 漂移检测 | `toxi doctor` 能发现全部 6 类 |
+
+### 13.8 决策（Jeff，2026-11-22）
+
+1. 第 1 批马上做，在分支 `batch1-hardening` 上进行。
+2. 空闲唤醒：试验一个一个做。先做 `asyncRewake` hook，再做 Claude Code 原生消息 socket（`CLAUDE_CODE_MESSAGING_SOCKET`）的试验。
+3. 同一身份的会话之间本地投递：暂不定。先分析需求场景，再决定。例子：mac-studio 上的 SF-iOS（Claude Code）和 SwordFish（Codex）。同机的两个 Claude 会话已有原生 SendMessage；Claude ↔ Codex、Codex ↔ Codex 都没有。
+4. 任务模型：对齐 A2A，支持 A2A，但不限于 A2A。
+5. 经常在线节点的离线代存列入路线图。

@@ -494,6 +494,8 @@ Acceptance: ToxiOS on Jeff's phone is configured as an owner peer on Ada and was
 
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
+> The newer plan is in §13 (2026-11-22). This list stays as the record of 2026-10-16.
+
 **Loose ends**
 
 1. vibe-op upgrades and restarts its own daemon (castle-op and grok report 0.6.0; vibe-op has not reported an upgrade).
@@ -524,3 +526,240 @@ Found on 2026-10-16 after 0.6.2 (numbered after the long-term items so the numbe
 15. Real Tox groups (NGC) instead of app-layer rooms once rooms get large.
 16. Reconcile the PRD with v2; Homebrew tap for 0.6.x; a real Debian test; Windows is out of scope.
 17. Chain of command (delegated authority). Today trust is judged by the receiver and never passes on: an agent relaying "Jeff approved" counts for nothing. Delegation would need signed grants (the owner's device signs delegate, scope and expiry; receivers verify), which means a signing key beside the Tox key in the daemon and ToxiOS, a grant protocol, a grant/revoke UI, and a wider blast radius if one agent is misled. Deferred until an agent must act for the owner over time; one approval to many agents already works by posting it in a room, since room messages go from the sender to each member directly.
+
+## 13. Assessment of 0.6.11 and roadmap (2026-11-22)
+
+Sources:
+
+- All source code, in four reviews: delivery core, agent-facing layer, security, operations. The 12 findings with the highest impact were checked again against the code.
+- Read-only measurements on Ada on 2026-11-22: the message databases and the daemon log.
+- Counts from 865 Claude Code transcripts. No message body was read.
+- External research: Tox, agent standards, other P2P transports, Claude Code features.
+
+Commits refer to the IDs in §13.4 (A1 … E9).
+
+### 13.1 Conclusion
+
+- The transport works. The median time from send to delivery on the peer's machine is 0–1 s.
+- The problems start after a message arrives:
+  - An idle agent does not see it.
+  - Another session or a subagent can take it.
+  - The task state is wrong.
+  - A failure notifies nobody.
+- Operations are manual. An outage raises no alert.
+- Four high-severity security problems must be fixed before new features.
+
+### 13.2 Data (Ada, last 30 days; read-only measurements on 2026-11-22)
+
+| Step | Claude Code / Codex sessions | Grok bots (woken by webhook) |
+|---|---|---|
+| Send → delivered on the peer's machine | median 0–1 s | median 1 s |
+| Delivered → read by the peer agent | median 1.5–17 min, p90 32–77 min; 31–65 % take more than 10 min | median 10–19 s; none takes more than 10 min |
+| Received here → read by a local session | median 6 min, p90 2 h; to the OnesVibe session median 2.1 h | — |
+| Requests that get a `done` receipt | Ada → codex 40 %, codex@Ada → ada 9 %, Ada → belinda 79 % | 50–66 % |
+
+Other facts:
+
+- `daemon.log` on the `ada` identity has 1,572 `BrokenPipe` errors: the client stopped waiting before the daemon answered. On 2026-11-09 and 2026-11-10 there were 263 a day, after the 0.6.9 priority fix. So requests still time out under load.
+- Ada runs 18 toxi processes. 13 of them are `toxi mcp serve` processes that started 9 days before and run the code from before the last upgrade.
+- The `ada` database has 10,892 messages (13 MB). Archive is off.
+
+What the data shows:
+
+- On the same network, bots woken by a webhook read 30–100 times faster than Claude Code and Codex sessions. The difference is the idle session that does not know it has mail.
+- The low `done` rate comes partly from subagents that take messages (C1) and partly from wrong state logic (D group). The number is not reliable in either direction.
+
+### 13.3 What to keep
+
+- One daemon per identity, enforced by a file lock.
+- SQLite is the only source of truth. Events and `inbox.flag` are only hints.
+- Store before send. Dedupe by uuid. ACK duplicates too.
+- One path for delivery and wording (`peers.take` + `as_prompt`). An ack wakes nobody.
+- Reply routing uses only local fields (`from_dir`, `from_session`). They never go on the wire.
+- The 0.6.11 bounce is the only failure notice a sender gets.
+- The single-use invite nonce is the only friend request that is accepted automatically.
+- Received files get a new name and mode 0600.
+- The webhook HMAC covers the timestamp and the body.
+- Migrations are idempotent. New code falls back when it talks to an old daemon.
+- FakeTox test tiers and the two-daemon end-to-end test.
+- §11 records each incident with its cause and fix.
+
+### 13.4 Problems
+
+#### A. Security (fix first)
+
+| ID | Severity | Problem | Evidence |
+|---|---|---|---|
+| A1 | high | The trust frame is in the same text as the message, so a sender can forge it. Newlines in the body, session label, card fields, thread and tags go into the agent's context as they are. Any peer, also an observer, can write lines that look like a `(trust: owner)` block. The sender also chooses the message id, and toxi puts that id into the `toxi show <id>` command that it tells the agent to run. | `src/toxi/peers.py:171-239`, `src/toxi/envelope.py:26-57,118-141,211` |
+| A2 | high | `/toxi:read` pre-approves `Bash(toxi *)` and gives the raw bodies to the model. `toxi *` includes `send --file <any file>`, `agent run --exec` and `teardown --purge`. The voice step builds a shell command from a file name that the sender chose. | `claude-code-plugin/commands/read.md:4,17-20`, `src/toxi/daemon.py:83-88` |
+| A3 | high | Nothing limits outgoing traffic. `send_file` sends any path to any contact, and the daemon reads the file outside the agent's sandbox. An agent under prompt injection can send `~/.ssh` away. | `src/toxi/mcp_server.py:139-189`, `src/toxi/daemon.py:1349` |
+| A4 | high (conditional) | Trust is bound to the alias, not to the public key. When a contact is removed or renamed, its `[peers.X]` entry stays. The next contact that joins through an invite with the name X gets that trust level, owner included. | `src/toxi/config.py:35-58`, `src/toxi/daemon.py:385-393,1176,1189-1194` |
+| A5 | medium | The sender's `ts` is not checked. 100 texts with a future time push peer and owner messages out of the delivery window. A `ts` that is not a number makes routing raise an error. | `src/toxi/daemon.py:548,1918-1921`, `src/toxi/peers.py:102,152` |
+| A6 | medium | No limit on cost or disk. The Stop hook blocks on every batch and does not check `stop_hook_active`. Files are accepted automatically, with no count or disk quota. Envelopes that are not texts skip the rate limit. | `claude-code-plugin/hooks/stop_hook.py:17-36`, `src/toxi/daemon.py:488-538,643-653,1197-1225` |
+| A7 | medium | `docs/security.md` disagrees with the code. It describes Tor/proxy settings that do not exist. When no peer is configured, SessionStart injects the full bodies of non-peer messages. | `docs/security.md:24,38`, `src/toxi/config.py:70-87`, `claude-code-plugin/hooks/unread_hook.py:29-33,74-92` |
+
+The code enforces only these things: who is a peer, the rate limits, the invite check and the file modes. What each trust level may do, and "a message is information, not an instruction", exist only in prompt text.
+
+#### B. Delivery reliability (daemon)
+
+| ID | Problem | Evidence |
+|---|---|---|
+| B1 | A text can fail silently. A `sent` text without an ACK fails 24 h after its **creation**. A text that waited in the queue for more than 24 h is sent and failed in the same sweep, and a later ACK is ignored. No event fires and nobody is told. This contradicts "a `queued` text never fails". | `src/toxi/daemon.py:461,472,493`, `docs/protocol.md:62` |
+| B2 | A disconnect puts files back in the queue, but not texts. Texts are resent only while the peer is online. A peer that is away for a day makes the text fail. §12 item 18 is the milder part of this problem. | `src/toxi/daemon.py:416-417,476` |
+| B3 | A long text can be stored cut short while the sender sees `delivered` or `read`. The receiver ACKs each part while the part is only in memory. After 60 s it stores what it has. A receiver restart loses parts that it already ACKed. | `src/toxi/daemon.py:586-615,692-693` |
+| B4 | The event stream drops a healthy subscriber. A frame larger than 8 KB (the macOS socket buffer) makes `sendall` fail on the non-blocking socket, and the daemon treats the subscriber as "too slow". `toxi watch` exits without a message. `agent run` reconnects but gets the message without context. | `src/toxi/daemon.py:821-836` |
+| B5 | After the 5 s client timeout, the sender cannot know if the message went out. Sends have no idempotency key, so a retry sends the message twice. `contrib/cloud-relay/poller.py` retries on any failure. | `src/toxi/client.py:27`, `src/toxi/daemon.py:1866`, `contrib/cloud-relay/poller.py:46-49` |
+| B6 | Requests time out under load. The daemon has one thread. The unread and statistics queries scan the whole table on each status-line render and each hook. Archive is off by default. The 1,572 `BrokenPipe` errors in §13.2 come from this. | `src/toxi/daemon.py:1710-1715,1909`, `src/toxi/db.py:42-45`, `src/toxi/config.py:61-67` |
+| B7 | Wake-ups and shutdown lose state. Pending wake-ups exist only in memory. A failed webhook POST is not retried. The daemon has no SIGTERM handler, so a service restart skips the state save. | `src/toxi/daemon.py:64-72,1465-1468,1653-1667` |
+| B8 | "Peer offline" and "this node offline" look the same: both return `queued`. Bootstrap runs only at start, and no TCP relay is added. | `src/toxi/daemon.py:310,353-355,1562-1567`, `src/toxi/cli.py:315` |
+| B9 | Auto-archive stops silently after the next schema change. The archive copies rows with `INSERT … m.*`, which fails when the messages table gets a new column. | `src/toxi/daemon.py:2091-2095` |
+
+#### C. Delivery into agents (the largest user-facing problems)
+
+| ID | Problem | Evidence |
+|---|---|---|
+| C1 | Subagents take peer messages, and the main session never sees them. The PostToolUse hook also runs in subagents and does not check `agent_id`. In the transcripts, 44 subagents took 106 peer messages and answered none. The sender sees `read`. | `claude-code-plugin/hooks/peer_check.sh`, `claude-code-plugin/hooks/post_tool_hook.py:17-33`, `src/toxi/peers.py:166` |
+| C2 | Some paths skip session routing, so "another session read it first" (fixed in 0.6.4) is back. `wait_for_message` with an alias takes all unread messages from that alias (339 of 345 real calls passed an alias). The Codex Stop hook calls `peer-inbox` without `--cwd`. | `src/toxi/mcp_server.py:233`, `src/toxi/peers.py:156`, `plugins/toxi/hooks/stop_hook.py:45` |
+| C3 | Two sessions in one dir block each other's mid-turn delivery. The PostToolUse "already looked" marker is per dir, not per session. | `claude-code-plugin/hooks/peer_check.sh:8-13` |
+| C4 | toxi marks a message read before the agent gets it. When the hook stops at its 8 s timeout, the output is lost, but the message is already read and its receipt sent. It is never delivered again. | `src/toxi/peers.py:166-168`, `claude-code-plugin/hooks/post_tool_hook.py:26-29`, `src/toxi/daemon.py:1623-1637` |
+| C5 | An idle Claude Code or Codex session receives nothing. Most of the delay in §13.2 comes from this. | §12 item 5 |
+| C6 | `wait_for_message` does not fit Claude Code's tool timeout. Of 345 calls, Claude Code moved 173 to the background. 38 calls asked for more than 600 s and were capped without a notice. Codex works only because the plugin sets `tool_timeout_sec = 660`. | `plugins/toxi/.mcp.json` |
+| C7 | Tokens are wasted. Each injection repeats a 360–595-character guide: 39 % of all injected characters, and in half of the injections the guide is longer than the messages. MCP returns full rows with the sender's card in each row (`read_history` averages 7.2k characters; bodies are 20–40 % of that). The 16 tool schemas cost about 2.1k tokens, and sessions made 398 ToolSearch calls to load them. Long bodies are cut to a `toxi show` pointer, and agents then ran 103 extra `toxi show` calls; in Codex that command reads another identity. | `src/toxi/peers.py:220,226-239`, `src/toxi/bootstrap.py:52-54` |
+| C8 | Sessions that share one identity cannot message each other (SF-iOS and SwordFish on mac-studio). A peer learns session names only from `@?` (owner devices only) or from a bounce. 1,369 of 3,263 sends start with a guessed `@name`. | `src/toxi/daemon.py:552,1735` |
+| C9 | The Codex plugin behaves differently from the Claude Code plugin. `plugins/toxi/hooks/unread_hook.py` is dead code. The Stop summary goes only to the user, not to the model. `docs/codex-usage.md` §7 contradicts the peer guide. | `plugins/toxi/hooks/hooks.json`, `docs/codex-usage.md` §7 |
+
+#### D. Task semantics ("is the request done" is not reliable)
+
+| ID | Problem | Evidence |
+|---|---|---|
+| D1 | A pending decision disappears. `needs_human` counts only unread messages, and a hook marks a message read when it delivers it. | `src/toxi/daemon.py:2054` |
+| D2 | A bounced request stays open forever. The bouncing side marks the text handled directly and sends no receipt. The sender's copy stays `delivered` and counts as an open request. There is no `bounced` status. | `src/toxi/daemon.py:674,2056` |
+| D3 | "Got it" counts as done. Each reply with `reply_to`, also a `kind=ack`, sends a `done` receipt. | `src/toxi/daemon.py:787-795,1891` |
+| D4 | No tool returns the status of one `msg_uuid`. `open_requests` leaves out failed requests, so a failed request looks answered. | `src/toxi/mcp_server.py:282-284`, `src/toxi/daemon.py:2056-2057` |
+| D5 | An old instruction looks new. The injection shows no age. The 30-minute reply route counts from the sender's `ts`, so a late message arrives with its route already expired. | `src/toxi/daemon.py:548,607`, `src/toxi/peers.py:102,226-239` |
+| D6 | Docs and code disagree on bounces. The docs say that an `@name` for a session that is not running waits for it; the code bounces it. A text that arrives before a new session registers also bounces. | `docs/install-and-usage.md:324`, `src/toxi/peers.py:90`, `src/toxi/daemon.py:664-688` |
+
+#### E. Operations and release
+
+| ID | Problem | Evidence |
+|---|---|---|
+| E1 | A dead daemon alerts nobody (the cause of the missing-sqlite outage on mac-studio). sqlite3 and libtoxcore load before logging starts, so an import error goes only to `service.log`, which `toxi doctor` does not read. Hooks print nothing on errors. The only signal is `toxi: offline` in the status line. | `src/toxi/daemon.py:25-26,284`, `src/toxi/cli.py:1033-1037,1167-1178`, `src/toxi/service.py:93-94` |
+| E2 | An upgrade is a manual matrix: 12 releases in 28 days, and on Ada each one means 4 daemon restarts, 2 plugin refreshes and a restart of every agent session. `toxi upgrade` handles only pipx and one home, and races launchd for the restart. Nothing restarts `toxi mcp serve`. The Codex plugin has no update path. Three docs give three upgrade procedures. | `src/toxi/cli.py:894-903,1161-1166,1292-1294,1661-1687`, `README.md:30`, `docs/install.md:67-70`, `docs/install-and-usage.md:554-576` |
+| E3 | Version drift is checked in one place of six. `toxi doctor` compares only the daemon with the CLI. It sorts Claude plugin versions as strings (0.6.9 after 0.6.11) and passes 0.6.0. It does not check that the Codex marketplace path exists. `toxi mcp serve` reports no version. | `src/toxi/cli.py:1043-1046,1065-1071,1074-1077,1368`, `pyproject.toml:36` |
+| E4 | A release has no test gate. CI runs only on tags and does not run pytest. `docs/release.md` names the `main` branch (it is `master`) and 4 version files (there are 8). | `.github/workflows/publish.yml:3-31`, `docs/release.md:5-7,14,64,90` |
+| E5 | Environment assumptions are wrong. `requires-python >=3.10`, but `config.py` imports `tomllib` (3.11+). The automatic `mcp` install has no version pin. The service PATH does not include `~/.local/bin`. The venv on Ada depends on Homebrew python@3.14: if brew removes 3.14, all identities stop at the same time. | `pyproject.toml:10,29`, `src/toxi/config.py:4`, `src/toxi/cli.py:1235`, `src/toxi/service.py:78` |
+| E6 | "This message arrived 10 minutes late" cannot be explained. Send, receive, resend and friend up/down write no log line, and `get_message` returns no timestamps for them. | `src/toxi/daemon.py:402-422,447-557,1826-1895,1935-1938` |
+| E7 | No backup or migration procedure. A wrong `TOXI_HOME` silently creates a new identity. | `docs/install-and-usage.md:550`, `src/toxi/daemon.py:351` |
+| E8 | `install.sh` can erase Claude Code settings. If `settings.json` does not parse, it is replaced with no backup. | `install.sh:130-146` |
+| E9 | The paths that failed in the field have no tests: `install.sh`, upgrade, `reinstall-plugin`, hooks and the plugin checks in `toxi doctor`. `docs/prd.md` is out of date, but `docs/WORKFLOWS.md` calls it authoritative. | `docs/prd.md:767-768`, `docs/WORKFLOWS.md:28-31` |
+
+### 13.5 External facts (checked 2026-11-22)
+
+**Tox.** The project is maintained, but its core limits stay.
+
+- c-toxcore v0.2.25 (2026-11-15) is the latest release; 6 releases in two years. 162 of the 187 commits in 2026 come from two people. https://github.com/TokTok/c-toxcore/releases, https://github.com/TokTok/c-toxcore/commits/master
+- The Noise handshake, the fix for key-compromise impersonation (issue #426), is not merged. PR #3028 is open, milestone v0.2.26. https://github.com/TokTok/c-toxcore/pull/3028
+- Offline messages and multi-device (issue #1259) are open since 2018. A send to an offline friend fails. https://github.com/TokTok/c-toxcore/issues/1259
+- Friends see each other's IP address. https://tox.chat/faq.html
+- NGC groups are in core since v0.2.19. v0.2.23 fixed a high-severity overflow in the group code. https://github.com/TokTok/c-toxcore/security/advisories/GHSA-42vg-9mg3-399f
+- Result: toxi must do offline delivery itself. Do not change the transport (see "Transports").
+
+**Claude Code** (new ways to reach an idle session).
+
+- `asyncRewake` hook: a command hook that exits with code 2 wakes an idle session. The default timeout is 600 s, so the hook must start again after each run. https://code.claude.com/docs/en/hooks.md
+- Native cross-session messaging: hooks and scripts can post into their own session through `CLAUDE_CODE_MESSAGING_SOCKET` (with `CLAUDE_CODE_MESSAGING_TOKEN`). An idle session wakes on such a message. The payload format is not documented, so it needs an experiment. https://code.claude.com/docs/en/cross-session-messaging.md
+- Channels: research preview. A third-party plugin needs the development flag or an organisation allowlist (`allowedChannelPlugins`). https://code.claude.com/docs/en/channels.md
+- Plugin monitors: experimental. The docs do not say if a monitor wakes an idle session. https://code.claude.com/docs/en/plugins/components.md
+- Plugins can require a Claude Code version (`engines.claude-code`), but not a version of an external binary. Third-party marketplaces do not update automatically. https://code.claude.com/docs/en/plugins/manifest-reference.md, https://code.claude.com/docs/en/plugins/loading.md
+- Two Claude sessions on one machine can already message each other with the native SendMessage. toxi does not compete there. It covers other machines and other vendors.
+
+**Agent standards.** None of them is peer-to-peer.
+
+- A2A v1.0: Agent Card (`/.well-known/agent-card.json`), task lifecycle, JSON-RPC / gRPC / REST bindings, webhook push. Agents serve HTTP endpoints; custom bindings are allowed. Now part of the Agentic AI Foundation (Linux Foundation). https://a2a-protocol.org/latest/specification/, https://aaif.io/blog/a2a-joins-aaif
+- MCP 2026-07-28: stateless; the Tasks and Events extensions are beta. https://modelcontextprotocol.io/specification/2026-07-28/changelog
+- AGNTCY SLIM is an Internet-Draft. ANP needs a TLS domain for its identity. The IETF agentproto working group was chartered on 2026-10-08. https://www.ietf.org/archive/id/draft-mpsb-agntcy-slim-02.html, https://datatracker.ietf.org/doc/charter-ietf-agentproto/
+- Result: toxi borrows the A2A data model (task states submitted / working / input-required / completed / failed / canceled) instead of making its own.
+
+**Transports.**
+
+| Transport | Offline delivery | Mobile push | Main drawback |
+|---|---|---|---|
+| iroh 1.0 | not documented | not documented | Python bindings leave out gossip, blobs and docs |
+| py-libp2p 0.8 | no | no | not production-ready |
+| Nostr NIP-17 | yes (relays) | no NIP | NIP-17 is a draft; `nostr-sdk` is alpha |
+| Matrix | yes (homeserver) | yes | needs a homeserver |
+| XMTP | yes | yes | no Python SDK; the hosted network shuts down 2027-02-01 |
+| SimpleX | yes (relays) | yes | AGPL-3.0; the library exists since 2026-05 |
+| Veilid 0.5 | not confirmed | not confirmed | pre-1.0; needs a local server |
+
+Every transport with offline delivery depends on relay servers. iroh traverses NAT well but has no offline delivery. Keep Tox.
+
+### 13.6 Plan
+
+**Batch 1 — 0.6.12: security and lost messages (in progress)**
+
+1. Escape the injection (A1): remove control characters from bodies and metadata, and indent every line of a body. Put the messages between markers with a random value; toxi writes the trust header outside the markers. Check the format of `msg_uuid`.
+2. Narrow `/toxi:read` (A2): allow only `toxi unread` and `toxi show`. Limit voice file names to safe characters.
+3. Path allowlist for `send_file` (A3): by default only the session's project dir, the temp dir and the media dir. Other dirs must be added in the config.
+4. Bind trust to the public key (A4): an optional key in the peer entry. `toxi doctor` reports entries that have no contact. A contact that joins through an invite does not take a trust level from an entry with the same name.
+5. Subagents do not take messages (C1): the hook exits when its input has an `agent_id`.
+6. Every take path routes by session (C2): also `wait_for_message` with an alias, and the Codex Stop hook with `--cwd`.
+7. At-least-once delivery (C4): the hook prints the messages first and marks them read after. A duplicate is better than a loss.
+8. No silent failure (B1, B2): the failure time counts from the real send. A disconnect puts texts back in the queue. A failure fires an event, and the next injection tells the sending session.
+9. ACK a multi-part text after it is stored (B3).
+10. A write buffer for each subscriber (B4), so a large frame does not drop it.
+11. Correct the task state (D1–D3): `needs_human` follows "handled", not "read". A `bounced` status. An `ack` reply does not send `done`.
+12. Show the message age in the injection ("3 h ago"). The 30-minute route counts from the local receive time (D5).
+
+**Batch 2 — 0.7: operations**
+
+- `toxi doctor --all`: all identities and all six version places — plist versus the generated plist, plugin cache (sorted as versions), Codex marketplace path, the version of each `toxi mcp serve` process (it lists sessions on old code), errors in `service.log`.
+- Make failures visible: when the daemon cannot start, the status line and the hooks show "toxi stopped: <reason>".
+- `toxi upgrade --all`: install the given version with `--no-cache-dir`, restart the services of all identities, refresh the plugins, list the sessions to restart.
+- CI: run pytest on each push; publish only when the tests pass. Correct `docs/release.md`. Keep the version only in `pyproject.toml` and generate the other copies.
+- Correct the environment (E5): `requires-python >=3.11`, pin `mcp`, add `~/.local/bin` to the service PATH.
+- Traceability (E6): log send, receive, resend and friend up/down without bodies. `toxi trace <id>` shows the time of each step.
+- `toxi export` / `toxi import` for backup and migration (ToxiOS's `toxid` has the same feature).
+- Archive on by default (90 days), with the B9 fix.
+
+**Batch 3 — 0.8: agent experience**
+
+- Idle wake-up (C5), one experiment at a time (decision 2 in §13.8). Codex: the app-server `turn/start`. Target: an idle session reads a message in less than 30 s (median), like the Grok bots.
+- Fewer tokens (C7): the full guide only once at SessionStart, one line after that. MCP returns only the needed fields, without indentation. Merge the 16 tools into about 8.
+- Session directory (C8): the daemon sends the names of its running sessions, each with a one-line purpose, to collaborator and owner peers. Peers stop guessing `@name`.
+- Local delivery between sessions of one identity (C8): decide after the use-case analysis (decision 3).
+- Task model aligned with A2A (decision 4) and a `get_request(id)` tool. This changes the protocol; ToxiOS must follow.
+
+**Long-term**
+
+- Offline store-and-forward (decision 5): an always-on node (mac-studio or a VPS) keeps end-to-end-encrypted messages for a receiver that is offline. Tox will not supply this.
+- Signed approval (§12 item 17), starting small: the phone signs the approval of one `needs_human` request.
+- NGC groups are not needed yet: 13 contacts and 1 room; app-layer rooms are sufficient.
+
+### 13.7 Direction
+
+Native Claude Code messaging covers sessions of one vendor and one account. A2A covers services with HTTP endpoints. Neither covers this case: **a private team of agents from different vendors, on different machines, with no public endpoint and no central server, and a person who takes part from a phone.** toxi makes this case reliable. It does not become a general chat app.
+
+Three moves:
+
+1. From message pipe to collaboration bus: session directory, task state and approval on the phone make one closed loop.
+2. One always-on node as the hub: it keeps offline messages, runs headless agents and pushes to the phone. ToxiOS's `toxid` already has this role.
+3. Security moves from prompt text to code: the daemon enforces which files and which contacts each peer can cause a send to.
+
+Success metrics:
+
+| Metric | Target |
+|---|---|
+| Idle session reads a message | median < 30 s, p90 < 5 min |
+| Silent failures | 0 |
+| `done` status | correct (no `done` from an ack, no open bounced request) |
+| Upgrade of one machine | one command |
+| Drift detection | `toxi doctor` finds all six kinds |
+
+### 13.8 Decisions (Jeff, 2026-11-22)
+
+1. Batch 1 starts now. Work is on branch `batch1-hardening`.
+2. Idle wake-up: one experiment at a time. First an `asyncRewake` hook. Then Claude Code's native messaging socket (`CLAUDE_CODE_MESSAGING_SOCKET`).
+3. Local delivery between sessions of one identity: not decided. First analyse the use cases, then decide. Example: SF-iOS (Claude Code) and SwordFish (Codex) on mac-studio. Two Claude sessions on one machine already have native SendMessage; Claude ↔ Codex and Codex ↔ Codex have nothing.
+4. Task model: align with A2A and support A2A, but do not limit toxi to A2A.
+5. Offline store-and-forward through an always-on node goes on the roadmap.
