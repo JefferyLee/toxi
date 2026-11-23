@@ -506,6 +506,13 @@ Batch 1 of §13. The IDs are those of §13.4.
 - Found during the work: on Ada, the editable install made the new CLI live at once, while the daemons still ran 0.6.11. From about 14:10 to 14:45, Stop hooks showed false "not delivered" notices, because the old daemon ignored an unknown filter and returned other rows. The fix is the separate RPC `list_failed`: an older daemon answers `METHOD_NOT_FOUND`, and the CLI reports nothing.
 - Upgrade: run `toxi service install` for each `TOXI_HOME`, run `/reload-plugins` in Claude Code, and restart Codex sessions. A headless bot that sends files from other dirs must list them in `[files] send_dirs`.
 
+### 0.6.13 An idle Claude Code session wakes when peer mail arrives (2026-11-22, v0.6.13)
+
+- An idle Claude Code session ran no hook, so a peer message waited until the user typed. SessionStart and Stop now start `hooks/wake_hook.py` in the background (`async` + `asyncRewake`, timeout 24 h). It watches `inbox.flag`. When messages for this session arrive, it prints them, marks them read and exits 2, and Claude Code starts a turn with them. UserPromptSubmit stops it. One waiter runs for each session. A session wakes at most 20 times between two prompts of the user. The experiments are in §13.9. In a test with real sessions, a request had its answer at the sender after 3.9 s.
+- The guides name toxi's send tool (`mcp__plugin_toxi_toxi__send_message`), because an agent first used the built-in `SendMessage` of Claude Code.
+- A send to a sender label (`main@bob`) goes to the contact (`bob`).
+- Upgrade: `toxi service install` for each `TOXI_HOME`; restart each Claude Code session, or run `/reload-plugins`, so that the new hooks run. Codex does not change.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 > The newer plan is in §13 (2026-11-22). This list stays as the record of 2026-10-16.

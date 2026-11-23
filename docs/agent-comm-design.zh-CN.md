@@ -505,6 +505,13 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - 开发中发现的问题：Ada 上是编辑式安装，新 CLI 立即生效，而 daemon 仍在跑 0.6.11。大约 14:10 到 14:45，Stop hook 显示了假的"未送达"提示，原因是旧 daemon 忽略了不认识的过滤条件，返回了别的记录。修法是单独的 RPC `list_failed`：旧 daemon 回 `METHOD_NOT_FOUND`，CLI 就什么也不报。
 - 升级：对每个 `TOXI_HOME` 运行 `toxi service install`，在 Claude Code 里运行 `/reload-plugins`，并重启 Codex 会话。从其他目录发文件的 headless bot，要把这些目录写进 `[files] send_dirs`。
 
+### 0.6.13 空闲的 Claude Code 会话在 peer 消息到达时醒来（2026-11-22，v0.6.13）
+
+- 空闲的 Claude Code 会话不运行任何 hook，所以 peer 消息要等用户输入才会被处理。现在 SessionStart 和 Stop 在后台启动 `hooks/wake_hook.py`（`async` + `asyncRewake`，超时 24 小时）。它盯着 `inbox.flag`。有本会话的消息到达时，它输出消息、标为已读并以退出码 2 结束，Claude Code 随即带着这些消息开始一个回合。UserPromptSubmit 会结束它。每个会话只跑一个等待进程。在用户两次输入之间，一个会话最多被唤醒 20 次。试验记录见 §13.9。在真实会话的测试中，请求发出 3.9 秒后，发送方就收到了答案。
+- 指引写明了 toxi 的发送工具（`mcp__plugin_toxi_toxi__send_message`），因为 agent 曾先去用 Claude Code 自带的 `SendMessage`。
+- 发给发送方标签（`main@bob`）的消息会送到对应的联系人（`bob`）。
+- 升级：对每个 `TOXI_HOME` 运行 `toxi service install`；重启各个 Claude Code 会话，或运行 `/reload-plugins`，让新的 hook 生效。Codex 没有变化。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 > 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。
