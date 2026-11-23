@@ -513,6 +513,17 @@ Batch 1 of §13. The IDs are those of §13.4.
 - A send to a sender label (`main@bob`) goes to the contact (`bob`).
 - Upgrade: `toxi service install` for each `TOXI_HOME`; restart each Claude Code session, or run `/reload-plugins`, so that the new hooks run. Codex does not change.
 
+### 0.6.14 Wake filter, limits, status tool (2026-11-22, v0.6.14)
+
+- Wake filter: not every message wakes an idle Claude Code session. A message from an `owner`, a decision for the user, and an answer to something the session sent always wake it. An `ack` never does. Other messages wake it only if their kind is in `[wake] kinds` (default `msg`, `request`, `relay`). A message that does not wake the session stays unread, and the hooks deliver it at the next turn.
+- Limits (A6): at most 30 files for each contact in an hour; no new file when `media/` holds more than 2 GB; at most 300 non-text envelopes for each contact in a minute. The webhook gives each message its `trust` (`null` for a contact that is not a peer).
+- A7: `security.md` no longer names a Tor or proxy setting, because there is none. SessionStart shows the messages of friends as previews of 160 characters.
+- B7: on SIGTERM the daemon saves its state and removes its socket. A failed webhook POST is tried again after 5 s.
+- B6: an index on `received_at` for incoming rows. On the 11,000 rows of Ada, the unread view took 2.1 ms instead of 3.9 ms.
+- D4: the MCP tool `get_message_status` shows where one message stands. `get_threads` counts failed and bounced requests.
+- C9: the unused `unread_hook.py` of the Codex plugin is gone. `codex-usage.md` §7 matches the trust levels.
+- Upgrade: `toxi service install` for each `TOXI_HOME`; restart each Claude Code session (or `/reload-plugins`).
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 > The newer plan is in §13 (2026-11-22). This list stays as the record of 2026-10-16.

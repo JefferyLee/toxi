@@ -512,6 +512,17 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - 发给发送方标签（`main@bob`）的消息会送到对应的联系人（`bob`）。
 - 升级：对每个 `TOXI_HOME` 运行 `toxi service install`；重启各个 Claude Code 会话，或运行 `/reload-plugins`，让新的 hook 生效。Codex 没有变化。
 
+### 0.6.14 唤醒过滤、限流、状态查询工具（2026-11-22，v0.6.14）
+
+- 唤醒过滤：不是每条消息都唤醒空闲的 Claude Code 会话。`owner` 的消息、需要用户决定的消息、对本会话所发消息的回复，总会唤醒它。`ack` 从不唤醒。其他消息只有类型在 `[wake] kinds` 里（默认 `msg`、`request`、`relay`）才唤醒。不唤醒的消息保持未读，由 hook 在下一回合送达。
+- 限流（A6）：每个联系人每小时最多 30 个文件；`media/` 超过 2 GB 时不再接收新文件；每个联系人每分钟最多 300 个非文本信封。webhook 为每条消息带上 `trust`（不是 peer 的联系人为 `null`）。
+- A7：`security.md` 不再提 Tor 或代理设置，因为并没有这项设置。SessionStart 只显示好友消息的前 160 个字符。
+- B7：收到 SIGTERM 时，daemon 保存状态并删除 socket。webhook 的 POST 失败后，5 秒后再试一次。
+- B6：为收到的消息按 `received_at` 加了索引。在 Ada 的 1.1 万条消息上，未读查询从 3.9 毫秒降到 2.1 毫秒。
+- D4：MCP 工具 `get_message_status` 显示一条消息走到了哪一步。`get_threads` 统计失败和被退回的请求。
+- C9：删除 Codex 插件里没被调用的 `unread_hook.py`。`codex-usage.md` §7 与信任级别一致。
+- 升级：对每个 `TOXI_HOME` 运行 `toxi service install`；重启各个 Claude Code 会话（或运行 `/reload-plugins`）。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 > 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。
