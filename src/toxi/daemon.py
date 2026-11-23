@@ -1495,8 +1495,19 @@ class Daemon:
         return new_uuid
 
     # --- outgoing files (design §4.6) ---
+    def _send_alias(self, alias: str) -> str:
+        """The contact a send is for. Agents often write the sender label
+        `session@alias` where the alias belongs; an alias may hold `@` itself
+        (`codex@belinda`), so drop one `session@` at a time until one matches."""
+        name = alias
+        while not self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (name,)).fetchone():
+            if "@" not in name:
+                return alias
+            name = name.split("@", 1)[1]
+        return name
+
     def _send_file(self, params: dict) -> dict:
-        alias = params.get("alias", "").strip()
+        alias = self._send_alias(params.get("alias", "").strip())
         path = Path(str(params.get("path") or "")).expanduser()
         contact = self.db.execute(
             "SELECT id, friend_number FROM contacts WHERE alias=?", (alias,)).fetchone()
@@ -1984,7 +1995,7 @@ class Daemon:
         return {"requests": [dict(r) for r in rows]}
 
     def _send_message(self, params: dict) -> dict:
-        alias = params.get("alias", "").strip()
+        alias = self._send_alias(params.get("alias", "").strip())
         body = params.get("body", "")
         contact = self.db.execute(
             "SELECT id, friend_number, is_online, profile_json FROM contacts WHERE alias=?",

@@ -140,7 +140,8 @@ async def send_message(alias: str, body: str, wait_read: int = 0, thread: str | 
                        reply_to: str | None = None, kind: str = "msg",
                        needs_human: bool = False, tags: list[str] | None = None,
                        wait_handled: int = 0) -> dict:
-    """Send a message to a contact. It is queued if they're currently offline.
+    """Send a message to a toxi contact (an alias from list_contacts or get_peers;
+    not a Claude Code session). It is queued if they're currently offline.
 
     Long bodies are split and reassembled on the other side (up to 64 KB). The
     message carries this session's label so the recipient knows which of the

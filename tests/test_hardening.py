@@ -463,3 +463,16 @@ def test_an_introduction_takes_a_peer_name_only_when_pinned_to_that_key(tmp_path
         d._accept_introduction({"from_alias": "codex", "whom": "ops"})
     assert e.value.code == "PEER_ALIAS"
     assert d._accept_introduction({"from_alias": "codex", "whom": "bot"})["alias"] == "bot"
+
+
+def test_a_send_to_a_sender_label_reaches_the_contact(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    d.db.execute("INSERT INTO contacts (public_key, alias, added_at) VALUES ('DD', 'codex@belinda', 1)")
+    d.db.commit()
+    assert d._send_alias("main@codex") == "codex"
+    assert d._send_alias("SwordFish@codex@belinda") == "codex@belinda"
+    assert d._send_alias("codex@belinda") == "codex@belinda"
+    assert d._send_alias("nobody@nowhere") == "nobody@nowhere"  # unchanged: CONTACT_NOT_FOUND
+    uid = d._send_message({"alias": "main@codex", "body": "hi"})["msg_uuid"]
+    assert d.db.execute("SELECT c.alias FROM messages m JOIN contacts c ON c.id=m.contact_id "
+                        "WHERE m.msg_uuid=?", (uid,)).fetchone()[0] == "codex"
