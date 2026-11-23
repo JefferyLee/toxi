@@ -148,7 +148,8 @@ def test_two_daemons_end_to_end(pair):
            30, "room reply on A")
 
     # --- file --------------------------------------------------------------------
-    f = Path(a) / "report.log"
+    work = Path(tempfile.mkdtemp(prefix="toxi-ew-", dir="/tmp"))  # never from toxi's own dir
+    f = work / "report.log"
     f.write_bytes(os.urandom(50_000))
     sent = _req(a, "send_file", {"alias": "bob", "path": str(f), "thread": "files"})
     got = _until(lambda: _req(b, "get_message", {"msg_uuid": sent["msg_uuid"]})["message"], 60, "file on B")
@@ -156,4 +157,5 @@ def test_two_daemons_end_to_end(pair):
     assert hashlib.sha256(Path(got["content"]).read_bytes()).hexdigest() == sent["sha256"]
     _until(lambda: _req(a, "get_message", {"msg_uuid": sent["msg_uuid"]})["message"]["status"] == "delivered",
            30, "file delivered")
+    shutil.rmtree(work, ignore_errors=True)
     print(f"\nconnected in {connect_s:.0f}s")

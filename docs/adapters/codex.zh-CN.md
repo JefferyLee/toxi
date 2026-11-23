@@ -13,9 +13,9 @@
 
 Codex CLI 0.161 及以上运行与 Claude Code 相同的 hook 事件。所以插件用同样的方式投递消息：
 
-- **工作中**：工具调用之后，PostToolUse hook 把路由过来的 peer 消息作为 `additionalContext` 注入。这个 hook 是 `hooks/peer_check.sh`。它先 stat 一下 `inbox.flag`，再运行 `toxi peer-inbox`。
+- **工作中**：工具调用之后，PostToolUse hook 把路由过来的 peer 消息作为 `additionalContext` 注入。这个 hook 是 `hooks/peer_check.sh`。它先 stat 一下 `inbox.flag`，再运行 `toxi peer-inbox --peek`。它输出消息之后，才把消息标为已读。
 - **会话开始 / 恢复**：`hooks/session_start_hook.py` 把路由过来的 peer 收件箱作为开发者上下文输出。
-- **回合结束**：Stop hook 运行 `toxi peer-inbox`。有消息时，它以消息阻止停止。没有消息时，它把 `toxi statusline` 摘要作为系统消息发出。
+- **回合结束**：Stop hook 运行 `toxi peer-inbox --peek --cwd <会话目录>`，所以只取本会话的消息。有消息时，它以消息阻止停止。没有消息时，它把 `toxi statusline` 摘要作为系统消息发出。
 - **空闲**：没有任何东西能唤醒空闲的 Codex。Codex 没有定时或空闲事件。`SessionEnd` 只在空闲 30 分钟后触发。所以 Codex 必须调用 `wait_for_message`，并在等待 peer 期间循环。这个调用是事件驱动的，最长等待 600 s。可走的路是 Codex app-server。它在共享的本地 daemon 上提供 `turn/start` / `turn/steer`。toxi 还没有使用它。
 
 hook 的环境里没有 `TOXI_HOME` 时，hook 从 `~/.codex/config.toml` 的 `[mcp_servers.toxi] env` 读取。在 Codex 里用 `/hooks` 审阅并信任 hook，只需一次。

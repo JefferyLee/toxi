@@ -13,9 +13,9 @@
 
 Codex CLI 0.161 and later runs the same hook events as Claude Code. Thus the plugin delivers messages in the same way:
 
-- **While working**: After a tool call, a PostToolUse hook injects routed peer messages as `additionalContext`. The hook is `hooks/peer_check.sh`. It does a stat of `inbox.flag`, then runs `toxi peer-inbox`.
+- **While working**: After a tool call, a PostToolUse hook injects routed peer messages as `additionalContext`. The hook is `hooks/peer_check.sh`. It does a stat of `inbox.flag`, then runs `toxi peer-inbox --peek`. It marks the messages read after it printed them.
 - **Session start / resume**: `hooks/session_start_hook.py` prints the routed peer inbox as developer context.
-- **End of turn**: The Stop hook runs `toxi peer-inbox`. If there are messages, it blocks the stop with the messages. If not, it sends the `toxi statusline` summary as a system message.
+- **End of turn**: The Stop hook runs `toxi peer-inbox --peek --cwd <session dir>`, so it takes only the messages of this session. If there are messages, it blocks the stop with the messages. If not, it sends the `toxi statusline` summary as a system message.
 - **Idle**: Nothing wakes an idle Codex. Codex has no periodic or idle event. `SessionEnd` fires only after 30 idle minutes. Thus Codex must call `wait_for_message` and loop while it waits for a peer. This call is event-driven and waits up to 600 s. The open path is the Codex app-server. It exposes `turn/start` / `turn/steer` on the shared local daemon. toxi does not use it yet.
 
 If `TOXI_HOME` is not in the environment of the hooks, they read it from `[mcp_servers.toxi] env` in `~/.codex/config.toml`. In Codex, use `/hooks` once to review and trust the hooks.

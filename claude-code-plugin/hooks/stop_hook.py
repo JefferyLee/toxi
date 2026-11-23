@@ -13,26 +13,26 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _inbox  # noqa: E402
+
 
 def peer_block(toxi: str) -> bool:
     """Deliver peer-agent messages by blocking the stop. Returns True if it did."""
-    args = [toxi, "peer-inbox"]
-    # The dir the session was started in; it stays put when the session cd's around.
-    cwd = os.environ.get("CLAUDE_PROJECT_DIR")
-    if not cwd and not sys.stdin.isatty():
+    data = {}
+    if not sys.stdin.isatty():
         try:
-            cwd = json.load(sys.stdin).get("cwd")
+            data = json.load(sys.stdin)
         except (ValueError, AttributeError):
             pass
-    if cwd:
-        args += ["--cwd", cwd]  # lets [agents.dirs] route peers to one session
-    try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=8)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-    text = out.stdout.strip() if out.returncode == 0 else ""
+    # The dir the session was started in; it stays put when the session cd's around.
+    cwd = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd")
+    text, uuids = _inbox.peek(toxi, cwd)  # cwd lets [peers] dirs route to one session
+    if text and _inbox.blocked_before(data, uuids):
+        text = ""  # the same messages again: they will not mark read, so do not loop
     if text:
-        print(json.dumps({"decision": "block", "reason": text}))
+        _inbox.emit({"decision": "block", "reason": text})
+    _inbox.mark_read(toxi, uuids)
     return bool(text)
 
 

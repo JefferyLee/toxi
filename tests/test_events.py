@@ -66,7 +66,10 @@ def _daemon(tmp_path, monkeypatch, caps=ALL_CAPS, status=2):
 def _subscriber(d, aliases=None, context=0):
     a, b = socket.socketpair()
     a.setblocking(False)
-    d._subs.append({"sock": a, "aliases": set(aliases) if aliases else None, "context": context})
+    sub = {"sock": a, "aliases": set(aliases) if aliases else None, "context": context,
+           "out": bytearray(), "events": selectors.EVENT_READ}
+    d._sel.register(a, selectors.EVENT_READ, data=sub)
+    d._subs.append(sub)
     return b
 
 
@@ -151,17 +154,23 @@ def test_parts_reassembled_once_hook_and_event_once(tmp_path, monkeypatch):
     assert _types(d).count("ack") == 4 and d._parts == {}
 
 
-def test_incomplete_parts_are_stored_after_timeout(tmp_path, monkeypatch):
+def test_parts_are_acked_only_once_stored_and_a_stalled_text_is_sent_again(tmp_path, monkeypatch):
     d = _daemon(tmp_path, monkeypatch)
     p = _parts("pid-2", ["aa", "bb", "cc"])
     d._on_friend_message(5, p[0], 0)
     d._on_friend_message(5, p[2], 0)
     d._tick_parts()
+    # Held in memory only: nothing stored, nothing ACKed (a restart would lose them).
     assert d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 0
+    assert _types(d).count("ack") == 0
     d._parts[(5, "pid-2")]["first"] -= PART_TIMEOUT + 1
     d._tick_parts()
-    row = d.db.execute("SELECT content FROM messages").fetchone()
-    assert row["content"] == "[toxi: only 2 of 3 parts arrived] aacc"
+    # Given up without storing a cut-off text; the sender's resend starts afresh.
+    assert d._parts == {} and d.db.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"] == 0
+    for raw in p:
+        d._on_friend_message(5, raw, 0)
+    assert d.db.execute("SELECT content FROM messages").fetchone()["content"] == "aabbcc"
+    assert _types(d).count("ack") == 3
 
 
 def test_parts_count_once_against_rate_limit_and_size_cap(tmp_path, monkeypatch):

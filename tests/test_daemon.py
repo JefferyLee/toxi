@@ -281,7 +281,8 @@ def test_send_too_long_message_is_split_into_parts(home):
 
 
 def test_retry_sweep_marks_failed(home):
-    """A 'sent' message left unacked past fail_after becomes 'failed'."""
+    """A 'sent' message an online contact leaves unacked past fail_after becomes
+    'failed'; time while the contact is offline does not count."""
     with open(os.path.join(home, "config.toml"), "w") as f:
         f.write("[retry]\nack_timeout_minutes = 0.001\nfail_after_hours = 0.001\n")
     d = Daemon()  # constructed in this thread, so its db is ours to query
@@ -292,18 +293,28 @@ def test_retry_sweep_marks_failed(home):
             "VALUES (?, ?, ?, 0, 0)",
             ("AB" * 32, "bob", now),
         )
-        cid = d.db.execute("SELECT id FROM contacts WHERE alias='bob'").fetchone()["id"]
         d.db.execute(
-            "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
-            "created_at, status, last_attempt_at) VALUES (?, ?, 'out', 'text', ?, ?, 'sent', ?)",
-            ("u1", cid, "old msg", now - 100, now - 100),
+            "INSERT INTO contacts (public_key, alias, added_at, is_online, friend_number) "
+            "VALUES (?, ?, ?, 1, 1)",
+            ("CD" * 32, "carol", now),
         )
+        cid = d.db.execute("SELECT id FROM contacts WHERE alias='bob'").fetchone()["id"]
+        online = d.db.execute("SELECT id FROM contacts WHERE alias='carol'").fetchone()["id"]
+        for uid, contact in (("u1", online), ("u2", cid)):
+            d.db.execute(
+                "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, "
+                "created_at, status, last_attempt_at, sent_at) "
+                "VALUES (?, ?, 'out', 'text', ?, ?, 'sent', ?, ?)",
+                (uid, contact, "old msg", now - 100, now - 100, now - 100),
+            )
         d.db.commit()
 
         d._retry_sweep()
 
-        status = d.db.execute("SELECT status FROM messages WHERE msg_uuid='u1'").fetchone()["status"]
-        assert status == "failed"
+        status = lambda u: d.db.execute(  # noqa: E731
+            "SELECT status FROM messages WHERE msg_uuid=?", (u,)).fetchone()["status"]
+        assert status("u1") == "failed"
+        assert status("u2") == "sent"
     finally:
         d.tox.kill()
         d.db.close()

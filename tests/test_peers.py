@@ -80,10 +80,13 @@ def _fake_toxi(tmp_path, peer_out: str) -> str:
     p = tmp_path / "faketoxi"
     p.write_text(
         "#!/usr/bin/env python3\n"
-        "import os, sys\n"
+        "import json, os, sys\n"
         f"open({str(tmp_path / 'home_seen')!r}, 'w').write(os.environ.get('TOXI_HOME', ''))\n"
         "args = sys.argv[1:]\n"
-        f"if args == ['peer-inbox']: print({peer_out!r})\n"
+        f"peer = {peer_out!r}\n"
+        "if args[:2] == ['peer-inbox', '--peek']:\n"
+        "    print(json.dumps({'text': peer, 'msg_uuids': ['u1'] if peer else []}))\n"
+        f"elif args[:1] == ['mark-read']: open({str(tmp_path / 'marked')!r}, 'a').write(' '.join(args[1:]))\n"
         "elif args == ['statusline']: print('toxi: 1/1 online')\n"
         "elif args == ['--json', 'unread']: print('[]')\n"
     )
@@ -105,6 +108,7 @@ CODEX_HOOK = ROOT / "plugins" / "toxi" / "hooks" / "stop_hook.py"
 def test_claude_stop_hook_blocks_on_peer_messages(tmp_path):
     r = _run(CC_HOOK, {"TOXI_BIN": _fake_toxi(tmp_path, "[toxi] 1 new message")})
     assert json.loads(r.stdout) == {"decision": "block", "reason": "[toxi] 1 new message"}
+    assert (tmp_path / "marked").read_text() == "-- u1"
 
 
 def test_claude_stop_hook_silent_without_peer_messages(tmp_path):
@@ -121,6 +125,19 @@ def test_codex_stop_hook_blocks_and_uses_codex_toxi_home(tmp_path):
                           "CODEX_HOME": str(codex_home)})
     assert json.loads(r.stdout) == {"decision": "block", "reason": "[toxi] hi"}
     assert (tmp_path / "home_seen").read_text() == "/x/toxi-codex"
+    assert (tmp_path / "marked").read_text() == "-- u1"
+
+
+def test_codex_stop_hook_takes_only_this_sessions_messages(tmp_path):
+    p = tmp_path / "faketoxi"
+    p.write_text("#!/usr/bin/env python3\nimport sys\n"
+                 f"open({str(tmp_path / 'args')!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
+    p.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "TOXI_HOME"}
+    env.update(TOXI_BIN=str(p), CODEX_HOME=str(tmp_path))
+    subprocess.run([sys.executable, str(CODEX_HOOK)], capture_output=True, text=True, env=env,
+                   input=json.dumps({"cwd": "/w/fish-tank"}))
+    assert "peer-inbox --peek --cwd /w/fish-tank" in (tmp_path / "args").read_text()
 
 
 def test_codex_stop_hook_falls_back_to_statusline(tmp_path):
@@ -166,8 +183,8 @@ def test_claude_stop_hook_passes_session_cwd(tmp_path):
     run(env)  # no CLAUDE_PROJECT_DIR: fall back to the hook input's cwd
     run(dict(env, CLAUDE_PROJECT_DIR="/w/proj"))  # preferred: the launch dir
     calls = (tmp_path / "args").read_text().splitlines()
-    assert "peer-inbox --cwd /w/proj/apple" in calls
-    assert "peer-inbox --cwd /w/proj" in calls
+    assert "peer-inbox --peek --cwd /w/proj/apple" in calls
+    assert "peer-inbox --peek --cwd /w/proj" in calls
 
 
 def test_target_takes_the_full_session_label(tmp_path, monkeypatch):

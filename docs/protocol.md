@@ -22,7 +22,7 @@
 | `v` | int | The protocol version. A v1 peer sends `1`. A v1 peer knows only `text`, `ack` and `contact_share`. |
 | `uuid` | string, **≤64 chars** | An id that the sender chooses. A UUID4 (36 chars) is recommended. The receiver dedupes on this id (`INSERT OR IGNORE`). If an id is longer than 64 characters, the receiver truncates it to 64 characters *in every place where it matches ids*. These places are the uuid, `reply_to`, `ref_uuid`, the part id and the file msg_uuid. If the uuid is missing, the receiver synthesizes one. |
 | `type` | string | See §3. **The receiver drops an unknown type silently. At most, it logs the type.** |
-| `ts` | int | The Unix time of the sender, in seconds. |
+| `ts` | int | The Unix time of the sender, in seconds. The receiver keeps `ts` only if it is a number and not more than 5 minutes in the future. Otherwise the receiver uses its own clock. |
 | `data` | object | The content depends on the type. **The receiver ignores unknown fields.** An unknown field is never an error. |
 
 Some input is not a JSON object with a `type`. An example is a plain message from another Tox client. The receiver treats this input as `text`, with the raw bytes as `body`.
@@ -58,7 +58,8 @@ The receiver must do these tasks:
 `data: {"ref_uuid"}`. An `ack` is a transport-level delivery confirmation. When the sender receives an `ack`, it moves `ref_uuid` from `sent` to `delivered`. A node never sends an `ack` for an `ack`.
 
 - If a text stays un-acked (status `sent`) for `ack_timeout`, the sender sends the text again. `ack_timeout` is 5 minutes. The sender does this only while the contact is online.
-- If a `sent` text is 24 h old, the sender stops and marks the text `failed`. The 24 h start when the sender creates the text.
+- When the link to the contact ends, the sender puts each un-acked text back to `queued`. The sender does the same when it starts. The reconnect then sends the text again at once.
+- If an online contact does not ack a text for 24 h, the sender stops and marks the text `failed`. Time while the contact is offline does not count. A late `ack` still moves a `failed` text to `delivered`.
 - A `queued` text never fails. It waits until the contact connects.
 
 ### 3.3 `receipt`
@@ -169,12 +170,12 @@ Sender:
 Receiver:
 
 - The receiver buffers parts by (friend, `id`).
-- The receiver sends an ack for **the uuid of each part**.
+- The receiver sends an ack for **the uuid of each part**, but only after it stored the whole message. A part that the receiver holds only in memory has no ack. Thus the sender sends it again if the receiver restarts.
 - One logical message counts once against the rate limit.
 - When all `n` parts arrive, the receiver stores **one** message. Its `uuid` is `id`. Its body is the concatenation of the parts in `i` order. Its metadata comes from the first part that the receiver saw.
-- After 60 s, the receiver stores the parts that arrived. It adds the prefix `[toxi: only k of n parts arrived] ` to the body.
+- If not all parts arrive in 60 s, the receiver drops the parts that it has, without an ack. The sender sends the un-acked parts again after `ack_timeout`, and the receiver assembles the message from them. A sender must send un-acked parts again.
 - If a part arrives for an `id` that the receiver already stored, the receiver sends an ack and ignores the part. This case is a late resend.
-- If the total is over 64 KB, the receiver drops the message and remembers the id.
+- If the total is over 64 KB, the receiver drops the message, acks its parts (so that the sender stops) and remembers the id.
 
 Notification:
 
@@ -188,15 +189,16 @@ Notification:
 - `delivered`: An ack arrived, or the file transfer completed.
 - `read`: A receipt arrived.
 - `handled`: A `done` receipt arrived.
-- `failed`: A `sent` text is still un-acked 24 h after its creation. A declined file transfer is also `failed`.
+- `failed`: An online contact did not ack a `sent` text for 24 h. A declined file transfer is also `failed`. The node tells the session that sent the text, once, in its next delivery.
+- `bounced`: A `bounce` that refers to the text arrived. No session took the text. A bounced request is not open.
 - A `queued` row never becomes `failed`.
 
-A periodic sweep sends un-acked `sent` texts again after `ack_timeout`. The sweep does this only while the contact is online. A reconnect flushes only `queued` rows and owed receipts. The reconnect flushes the `queued` rows in send order. For the queue decision, the sender asks toxcore for the presence at send time. The sender does not use a cached flag.
+A periodic sweep sends un-acked `sent` texts again after `ack_timeout`. The sweep does this only while the contact is online. When the link ends, un-acked texts go back to `queued`. A reconnect flushes the `queued` rows and owed receipts, in send order. For the queue decision, the sender asks toxcore for the presence at send time. The sender does not use a cached flag.
 
 A node routes replies locally. This is node behaviour, not wire format. The node applies these rules in this order:
 
 1. If a text starts with `@name`, `@name@me` or `name@me`, the node delivers it only to the session with the name `name`. `me` is the name on the card of the node. The name is `TOXI_SESSION`, or else the name that the user gave the Claude Code session, or else the name of the project directory. If another live session has that name, the node adds `-2`, `-3` and so on. When that other session stops, the session gets the name without the suffix. A session that was renamed keeps its earlier names while it runs: `@old-name` and replies to what it sent under the old name still reach it, and no other session can take the old name. The match is case-insensitive.
-2. Otherwise, the node uses its record of which of its own sessions sent each message. This record never goes on the wire. The node delivers an incoming `reply_to` to that session, or to the session that wrote last in the same thread with that contact. This link is valid for 30 minutes from the `created_at` of the incoming message.
+2. Otherwise, the node uses its record of which of its own sessions sent each message. This record never goes on the wire. The node delivers an incoming `reply_to` to that session, or to the session that wrote last in the same thread with that contact. This link is valid for 30 minutes from the time the node received the message.
 3. After 30 minutes, or if no such link exists, the node applies the configured binding of the peer.
 4. If no live session matches, or more than one session matches, the node does not deliver the text. It marks the text as handled and sends a `bounce` to the sender, with `reply_to` set to the text. A `collaborator` or `owner` peer also gets the names of the live sessions. The sender corrects the `@name` and sends the text again. Exceptions: the node does not bounce an `ack`, a `bounce`, relayed history or a room message, and it does not bounce when no session runs at all (a headless identity). Texts from contacts that are not peers stay in the shared inbox.
 
@@ -211,7 +213,7 @@ The `from_session` of an outgoing message is the name of the sending session. A 
 | file | 100 MB |
 | incoming texts per contact | 60 / minute. The parts of one message count once. The receiver drops extra texts **without an ack**. |
 | incoming friend requests | 5 / minute |
-| part reassembly window | 60 s. The file-meta window is 300 s. |
+| part reassembly window | 60 s. Then the receiver drops the parts without an ack. The file-meta window is 300 s. |
 | strings | See the limit of each field. Truncate a long string. Do not reject it. |
 
 Non-friends cannot send at all. Tox enforces this. Keys, databases, config, cards and received files are private files (0600 / 0700).

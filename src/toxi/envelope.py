@@ -6,7 +6,9 @@ Tox only moves opaque bytes between friends; all structure lives here as JSON:
 v2 (design doc §5) adds the `profile` type and optional text fields such as
 `from_session`; v1 peers ignore both, so the two versions interoperate.
 """
+import hashlib
 import json
+import re
 import time
 import uuid as _uuid
 
@@ -17,6 +19,18 @@ CAPS = ["profile", "session", "receipt", "part"]
 
 PROFILE_KEYS = ("kind", "name", "runtime", "model", "host", "operator", "role", "proto", "caps")
 PROFILE_KINDS = ("agent", "human", "service")
+
+# A message id as toxi stores it: it goes into commands an agent runs (`toxi show`,
+# `toxi mark-read`), so it never starts with "-" and holds no space or shell char.
+ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+
+
+def safe_id(raw) -> str:
+    """A sender-chosen id as stored: as is when it is a plain id, else a stable
+    digest of it (so a resend still dedupes)."""
+    s = str(raw or "")[:64]
+    return s if ID.fullmatch(s) else "h-" + hashlib.sha256(s.encode("utf-8", "replace")).hexdigest()[:32]
+
 
 # Structured fields a text may carry besides its body (design §4.5).
 KINDS = ("msg", "request", "report", "ack", "relay", "bounce")
@@ -207,8 +221,12 @@ def parse(raw: bytes) -> dict:
         if isinstance(env, dict) and "type" in env:
             env.setdefault("uuid", str(_uuid.uuid4()))
             # ids are capped at 64 chars everywhere (dedup, reply_to, receipts), so a
-            # peer with longer ids still gets consistent matching.
-            env["uuid"] = str(env["uuid"])[:64]
+            # peer with longer ids still gets consistent matching. The ACK names the
+            # id the sender used; toxi keeps a safe form of it.
+            raw_id = str(env["uuid"])[:64]
+            env["uuid"] = safe_id(raw_id)
+            if env["uuid"] != raw_id:
+                env["ack_uuid"] = raw_id
             env.setdefault("ts", int(time.time()))
             return env
     except (json.JSONDecodeError, UnicodeDecodeError):

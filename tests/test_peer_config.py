@@ -21,9 +21,9 @@ trust = "observer"
 trust = "root"
 ''')
     cfg = config.peer_config()
-    assert cfg["codex"] == {"dirs": ["/w/a", "/w/b"], "trust": "collaborator"}
-    assert cfg["castle-op"] == {"dirs": ["/w/chess"], "trust": "observer"}  # string -> list
-    assert cfg["vibe-op"] == {"dirs": [], "trust": "observer"}  # unknown level: least privilege
+    assert cfg["codex"] == {"dirs": ["/w/a", "/w/b"], "trust": "collaborator", "key": None}
+    assert cfg["castle-op"] == {"dirs": ["/w/chess"], "trust": "observer", "key": None}  # string -> list
+    assert cfg["vibe-op"] == {"dirs": [], "trust": "observer", "key": None}  # unknown level: least privilege
     assert config.agent_peers() == ["codex", "castle-op", "vibe-op"]
     assert config.agent_dirs() == {"codex": ["/w/a", "/w/b"], "castle-op": ["/w/chess"]}
 
@@ -98,7 +98,7 @@ def test_overview_merges_config_contacts_and_unread(tmp_path, monkeypatch):
 
 def test_owner_tier_parses_and_frames_messages_as_the_users_own(tmp_path, monkeypatch):
     _write(tmp_path, monkeypatch, '[peers.jeff-iphone]\ndirs = ["/w/toxi"]\ntrust = "owner"\n')
-    assert config.peer_config()["jeff-iphone"] == {"dirs": ["/w/toxi"], "trust": "owner"}
+    assert config.peer_config()["jeff-iphone"] == {"dirs": ["/w/toxi"], "trust": "owner", "key": None}
     msgs = [{"msg_uuid": "1", "alias": "jeff-iphone", "msg_type": "text", "content": "ship it",
              "profile": {"kind": "human", "runtime": "toxios"}}]
     monkeypatch.setattr(peers.client, "request",

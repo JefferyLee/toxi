@@ -5,6 +5,8 @@ Emits Codex hook JSON with a statusline-style summary, then peeks at unread
 messages with `toxi --json unread`. JSON mode is intentionally read-only, so
 this hook never marks messages read.
 """
+from __future__ import annotations  # hooks may run on an old system python3
+
 import json
 import os
 import subprocess

@@ -1,7 +1,7 @@
 ---
 description: Read unread toxi messages (fast, CLI-injected), mark them read, render images / play voice
 argument-hint: [--all] [alias]
-allowed-tools: Bash(toxi *), Read, Bash(afplay:*), SendUserFile
+allowed-tools: Bash(toxi unread:*), Bash(toxi show:*), Read, Bash(afplay:*), SendUserFile
 ---
 
 Unread toxi messages (running this marks them read):

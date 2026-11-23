@@ -38,7 +38,9 @@ class FileTox(FakeTox):
 
 def _daemon(tmp_path, monkeypatch):
     tmp_path.mkdir(exist_ok=True)
-    monkeypatch.setenv("TOXI_HOME", str(tmp_path))
+    # The files these tests send live in tmp_path; toxi's own dir is a subdir,
+    # because the daemon never sends files from its config dir.
+    monkeypatch.setenv("TOXI_HOME", str(tmp_path / "home"))
     d = object.__new__(Daemon)
     d.db = db.connect(tmp_path / "chat.db")
     d.tox = FileTox()

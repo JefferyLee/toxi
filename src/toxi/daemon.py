@@ -10,10 +10,12 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import selectors
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.request
@@ -40,8 +42,9 @@ HOOK_TIMEOUT = 30  # seconds before a still-running on_message hook is killed
 TEXT_RATE_LIMIT = 60  # incoming texts accepted per contact per minute (PRD §4.9.4)
 REQUEST_RATE_LIMIT = 5  # incoming friend requests accepted per minute
 INVITE_TTL = 600  # seconds a `toxi pair` invite stays valid
-PART_TIMEOUT = 60  # seconds to wait for the rest of a multi-part text before storing it partial
+PART_TIMEOUT = 60  # seconds to wait for the rest of a multi-part text before dropping the parts
 MAX_BODY_BYTES = 64 * 1024  # largest text body (after reassembly); bigger bodies go as a file
+SUB_BACKLOG = 4 * 1024 * 1024  # bytes of events a subscriber may fall behind before it is dropped
 FILE_META_TTL = 300  # seconds a `file` meta waits for its transfer (or the other way round)
 
 # Map a filename extension to one of our media msg_types (PRD: image/voice/video).
@@ -81,11 +84,57 @@ def _sha256(path) -> str:
 
 
 def _safe_filename(raw: bytes) -> str:
-    """Strip any path components and control chars from a sender-supplied name."""
+    """A sender-supplied name without path components, control chars or shell
+    metacharacters: an agent may put the saved path in a command line."""
     name = os.path.basename(raw.decode("utf-8", "replace"))
-    name = name.replace("/", "_").replace("\\", "_").replace("\x00", "")
-    name = "".join(c for c in name if c.isprintable()).strip()
+    name = re.sub(r"[^\w .,+=@%()\[\]-]", "_", name).strip(" .")
     return name[:120] or "file"
+
+
+# Never sent, wherever a send comes from: keys, tokens, agent and app configs.
+_SECRET_DIRS = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config", ".claude",
+                ".codex", "Library")
+_SECRET_FILES = (".netrc", ".npmrc", ".pypirc", ".git-credentials", ".env")
+
+
+def _temp_dirs() -> list:
+    return [tempfile.gettempdir(), "/tmp"]
+
+
+def _send_refusal(path: Path, session_dir: str | None, interactive: bool,
+                  caller_dir: str | None = None) -> str | None:
+    """Why this file may not be sent, or None. A file goes out only from toxi's
+    media dir, the temp dir, a running session's project dir (not the home dir
+    itself) or a `[files] send_dirs` entry, so an agent talked into it cannot
+    send the user's other files in one call. A person at a terminal
+    (`interactive`) may send any file outside the secret places; a script that
+    runs outside an agent session, files below its own dir (`caller_dir`).
+    The caller states both, so this guards against a misled agent, not against
+    other programs of the user."""
+    real = path.resolve()
+    if real.is_relative_to(paths.media_dir().resolve()):
+        return None
+    if real.is_relative_to(paths.config_dir().resolve()):
+        return "it is in toxi's own config dir (keys, history)"
+    home = Path.home().resolve()
+    for d in _SECRET_DIRS:
+        if real.is_relative_to(home / d):
+            return f"it is under ~/{d}, where keys and tokens are kept"
+    if real.name in _SECRET_FILES or real.name.startswith(".env."):
+        return f"{real.name} files hold credentials"
+    if interactive:
+        return None
+    roots = [*_temp_dirs(), *config.send_dirs(),
+             *(s["cwd"] for s in sessions.live()), session_dir, caller_dir]
+    for r in roots:
+        if not r:
+            continue
+        root = Path(r).expanduser().resolve()
+        # Not the home dir, nor a dir above it: that would allow every file.
+        if not home.is_relative_to(root) and real.is_relative_to(root):
+            return None
+    return ("it is not in a running session's project dir, the temp dir or toxi's media dir"
+            f" (to allow a dir, add it to [files] send_dirs in {paths.config_path()})")
 
 
 def _is_hex(s: str) -> bool:
@@ -94,6 +143,18 @@ def _is_hex(s: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _sender_ts(env: dict) -> int:
+    """When the sender says it wrote this: its `ts`, unless that is not a number or
+    lies in the future (a skewed clock, or a sender pushing its texts to the top
+    of every newest-first view). Then: now."""
+    now = int(time.time())
+    try:
+        ts = int(env.get("ts"))
+    except (TypeError, ValueError):
+        return now
+    return ts if 0 < ts <= now + 300 else now
 
 
 def _within_rate(times: deque, limit: int, now: float, window: float = 60.0) -> bool:
@@ -200,7 +261,8 @@ def _merge_room_sends(msgs: list) -> list:
     """Collapse the fan-out copies of one outgoing room message (same room_msg_id)
     into a single row carrying `recipients: [{alias, status}]`."""
     out, groups = [], {}
-    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "handled": 4, "failed": -1}
+    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "handled": 4, "failed": -1,
+            "bounced": -1}
     for m in msgs:
         rid = m.get("room_msg_id")
         if not rid or m.get("direction") != "out":
@@ -240,7 +302,8 @@ def _merge_parts(msgs: list) -> list:
     single message: content joined in order, msg_uuid = part_id, status = the
     least advanced part. Rows arrive newest first and leave newest first."""
     out, groups = [], {}
-    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "handled": 4, "failed": -1}
+    rank = {"queued": 0, "sent": 1, "delivered": 2, "read": 3, "handled": 4, "failed": -1,
+            "bounced": -1}
     for m in msgs:
         pid = m.get("part_id")
         if not pid:
@@ -305,6 +368,7 @@ class Daemon:
         self._hook_started = 0.0
         self.tox = self._init_tox()
         self._remap_friend_numbers()
+        self._requeue_texts()  # nobody is connected yet: resend them on reconnect
         self._save_state()  # ensure tox_state.bin exists from first run
         _harden_permissions()
         self._bootstrap()
@@ -322,6 +386,7 @@ class Daemon:
             "send_message": self._send_message,
             "get_messages": self._get_messages,
             "get_message": self._get_message,
+            "list_failed": self._list_failed,
             "mark_read": self._mark_read,
             "list_queue": self._list_queue,
             "introduce": self._introduce,
@@ -375,6 +440,16 @@ class Daemon:
                 )
         self.db.commit()
 
+    def _requeue_texts(self, contact_id: int | None = None) -> None:
+        """Texts sent but not ACKed go back to the queue when the link ends (or at
+        start), so the reconnect flush resends them at once. A queued text never
+        fails; `sent_at` starts again with the next hand-off."""
+        sql = ("UPDATE messages SET status='queued', sent_at=NULL WHERE direction='out' "
+               "AND msg_type='text' AND status='sent' AND delivered_at IS NULL")
+        self.db.execute(sql + (" AND contact_id=?" if contact_id is not None else ""),
+                        () if contact_id is None else (contact_id,))
+        self.db.commit()
+
     # --- tox callbacks (fire during tox.iterate() on this thread) ---
     def _on_friend_request(self, public_key: bytes, message: bytes) -> None:
         pk = public_key.hex().upper()
@@ -415,6 +490,7 @@ class Daemon:
                    {"alias": row["alias"]}, row["alias"])
         if not online:
             self._abort_outgoing(friend_number)
+            self._requeue_texts(row["id"])
         if online:
             self._send_profile(friend_number)
             self._send_room_cards(friend_number)
@@ -436,9 +512,10 @@ class Daemon:
                 continue
             if not self.tox.friend_send_message(friend_number, _row_payload(row)):
                 break
+            now = int(time.time())
             self.db.execute(
-                "UPDATE messages SET status='sent', last_attempt_at=? WHERE msg_uuid=?",
-                (int(time.time()), row["msg_uuid"]),
+                "UPDATE messages SET status='sent', last_attempt_at=?, sent_at=? WHERE msg_uuid=?",
+                (now, now, row["msg_uuid"]),
             )
         self.db.commit()
         if rows:
@@ -446,7 +523,9 @@ class Daemon:
 
     def _retry_sweep(self) -> None:
         """Resend 'sent' messages still unacked past ack_timeout (if the friend is
-        online), and give up on ones older than fail_after (PRD §4.4.1, simplified)."""
+        online), and give up on a text the friend has not ACKed for fail_after
+        while connected (PRD §4.4.1, simplified). Texts go back to the queue when
+        the link ends, so time offline never counts."""
         now = int(time.time())
         # File rows marked sent whose transfer is no longer running (daemon restart,
         # link drop toxcore did not report): queue them again so the flush restarts them.
@@ -461,18 +540,21 @@ class Daemon:
             self._flush_queue(c["id"], c["friend_number"])
             self._flush_receipts(c["id"], c["friend_number"])
         rows = self.db.execute(
-            "SELECT m.msg_uuid, m.content, m.created_at, m.last_attempt_at, m.from_session, "
+            "SELECT m.msg_uuid, m.content, m.created_at, m.last_attempt_at, m.sent_at, m.from_session, "
             "m.part_id, m.part_i, m.part_n, m.thread, m.reply_to, m.kind, m.needs_human, m.tags, "
-            "m.room_id, m.room_msg_id, c.friend_number, c.is_online FROM messages m "
+            "m.room_id, m.room_msg_id, c.alias, c.friend_number, c.is_online FROM messages m "
             "JOIN contacts c ON c.id=m.contact_id "
             "WHERE m.direction='out' AND m.msg_type='text' AND m.status='sent' "
             "AND m.delivered_at IS NULL"
         ).fetchall()
+        failed = []
         for r in rows:
-            if now - r["created_at"] > self.fail_after:
+            since = r["sent_at"] or r["last_attempt_at"] or r["created_at"]
+            if r["is_online"] and now - since > self.fail_after:
                 self.db.execute(
                     "UPDATE messages SET status='failed' WHERE msg_uuid=?", (r["msg_uuid"],)
                 )
+                failed.append(r)
             elif r["is_online"] and now - (r["last_attempt_at"] or r["created_at"]) > self.ack_timeout:
                 if self.tox.friend_send_message(r["friend_number"], _row_payload(r)):
                     self.db.execute(
@@ -480,6 +562,13 @@ class Daemon:
                         (now, r["msg_uuid"]),
                     )
         self.db.commit()
+        for ref in dict.fromkeys(r["part_id"] or r["msg_uuid"] for r in failed):
+            alias = next(r["alias"] for r in failed if (r["part_id"] or r["msg_uuid"]) == ref)
+            log.warning("text %s to %s failed: no ACK for %d h while connected",
+                        ref[:8], alias, self.fail_after // 3600)
+            self._emit("send.failed", {"msg_uuid": ref, "alias": alias,
+                                       "reason": "not acknowledged while the contact was online"},
+                       alias)
 
     def _on_friend_message(self, friend_number: int, message: bytes, msg_type: int) -> None:
         env = envelope.parse(message)
@@ -488,9 +577,11 @@ class Daemon:
         if etype == "ack":
             ref = env.get("data", {}).get("ref_uuid")
             if ref:
+                # A late ACK still counts: the text did arrive.
                 cur = self.db.execute(
                     "UPDATE messages SET status='delivered', delivered_at=? "
-                    "WHERE msg_uuid=? AND direction='out' AND status='sent'",
+                    "WHERE msg_uuid=? AND direction='out' AND msg_type='text' "
+                    "AND status IN ('queued', 'sent', 'failed')",
                     (int(time.time()), ref),
                 )
                 self.db.commit()
@@ -545,7 +636,7 @@ class Daemon:
             "content, created_at, received_at, status, from_session, "
             "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, relayed, read_at) "
             "VALUES (?, ?, 'in', 'text', ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (env["uuid"], row["id"], body, env.get("ts", int(time.time())), int(time.time()),
+            (env["uuid"], row["id"], body, _sender_ts(env), int(time.time()),
              session, *_meta_values(meta), int(time.time()) if meta.get("relayed") else None),
         )
         self.db.commit()
@@ -554,7 +645,8 @@ class Daemon:
         elif cur.rowcount:
             self._stored(env["uuid"], row["alias"], meta)
         # ACK even for a duplicate, so the sender can clear it (PRD §4.4.1).
-        self.tox.friend_send_message(friend_number, envelope.encode(envelope.make_ack(env["uuid"])))
+        self.tox.friend_send_message(friend_number, envelope.encode(envelope.make_ack(
+            env.get("ack_uuid") or env["uuid"])))
 
     @staticmethod
     def _is_owner(alias: str) -> bool:
@@ -583,13 +675,13 @@ class Daemon:
     def _receive_part(self, friend_number: int, row, env: dict, data: dict) -> None:
         part = data["part"]
         try:
-            pid = str(part.get("id") or "")[:64]
+            pid = envelope.safe_id(part.get("id")) if part.get("id") else ""
             i, n = int(part.get("i") or 0), int(part.get("n") or 0)
         except (TypeError, ValueError):
             return
         if not pid or not 1 <= i <= n:
             return
-        ack = envelope.encode(envelope.make_ack(env["uuid"]))
+        ack = envelope.encode(envelope.make_ack(env.get("ack_uuid") or env["uuid"]))
         if (pid in self._dropped_parts
                 or self.db.execute("SELECT 1 FROM messages WHERE msg_uuid=?", (pid,)).fetchone()):
             self.tox.friend_send_message(friend_number, ack)  # finished or given up: just ACK
@@ -604,29 +696,31 @@ class Daemon:
                 return
             buf = self._parts[key] = {
                 "n": n, "got": {}, "first": time.time(), "contact_id": row["id"],
-                "alias": row["alias"], "ts": env.get("ts", int(time.time())),
+                "alias": row["alias"], "ts": _sender_ts(env), "friend": friend_number,
                 "session": str(data.get("from_session") or "")[:64] or None, "size": 0,
-                "meta": envelope.clean_meta(data),
+                "meta": envelope.clean_meta(data), "acks": {},
             }
         if i not in buf["got"]:
             body = str(data.get("body", ""))
             buf["got"][i] = body
             buf["size"] += len(body.encode("utf-8"))
-        self.tox.friend_send_message(friend_number, ack)
+        # The ACK waits until the whole text is stored: a part held only in memory
+        # is lost on a restart, and the sender must then send it again.
+        buf["acks"][env["uuid"]] = ack
         if buf["size"] > MAX_BODY_BYTES:
             log.warning("multi-part text from friend %d exceeds %d bytes; dropped",
                         friend_number, MAX_BODY_BYTES)
             del self._parts[key]
             self._dropped_parts.append(pid)
+            for a in buf["acks"].values():  # given up on purpose: stop the resends
+                self.tox.friend_send_message(friend_number, a)
             return
         if len(buf["got"]) >= buf["n"]:
-            self._finish_parts(key, complete=True)
+            self._finish_parts(key)
 
-    def _finish_parts(self, key: tuple[int, str], complete: bool) -> None:
+    def _finish_parts(self, key: tuple[int, str]) -> None:
         buf = self._parts.pop(key)
         body = "".join(buf["got"][i] for i in sorted(buf["got"]))
-        if not complete:
-            body = f"[toxi: only {len(buf['got'])} of {buf['n']} parts arrived] " + body
         now = int(time.time())
         cur = self.db.execute(
             "INSERT OR IGNORE INTO messages (msg_uuid, contact_id, direction, msg_type, "
@@ -637,6 +731,8 @@ class Daemon:
              *_meta_values(buf["meta"]), now if buf["meta"].get("relayed") else None),
         )
         self.db.commit()
+        for a in buf["acks"].values():
+            self.tox.friend_send_message(buf["friend"], a)
         if cur.rowcount:
             self._stored(key[1], buf["alias"], buf["meta"])
 
@@ -644,7 +740,15 @@ class Daemon:
         """A text was stored: wake hooks and flag unless it is a mere `ack`
         (design §4.5: acknowledgements never wake anyone) or relayed room
         history (old news, stored as already read); always tell subscribers.
-        A peer text that no running session can take goes back (`_bounce`)."""
+        A peer text that no running session can take goes back (`_bounce`).
+        A bounce of one of our texts marks that text `bounced`."""
+        if meta.get("kind") == "bounce" and meta.get("reply_to"):
+            ref = meta["reply_to"]
+            self.db.execute(
+                "UPDATE messages SET status='bounced' WHERE direction='out' "
+                "AND contact_id=(SELECT id FROM contacts WHERE alias=?) "
+                "AND (msg_uuid=? OR part_id=?) AND handled_at IS NULL", (alias, ref, ref))
+            self.db.commit()
         if self._bounce(msg_uuid, alias, meta):
             return
         wake = meta.get("kind") != "ack" and not meta.get("relayed")
@@ -690,7 +794,9 @@ class Daemon:
     def _tick_parts(self) -> None:
         now = time.time()
         for key in [k for k, b in self._parts.items() if now - b["first"] > PART_TIMEOUT]:
-            self._finish_parts(key, complete=False)
+            buf = self._parts.pop(key)  # nothing was ACKed: the sender sends it all again
+            log.warning("multi-part text from friend %d: %d of %d parts in %d s; waiting for a resend",
+                        key[0], len(buf["got"]), buf["n"], PART_TIMEOUT)
         for key in [k for k, m in self._file_meta.items() if now - m["ts"] > FILE_META_TTL]:
             del self._file_meta[key]
 
@@ -784,9 +890,11 @@ class Daemon:
         self._send_receipts(done, "done")
         return {"handled": len(done)}
 
-    def _auto_done(self, contact_id: int, reply_to) -> None:
-        """A reply that references one of this contact's messages handles it."""
-        if not reply_to:
+    def _auto_done(self, contact_id: int, meta: dict) -> None:
+        """A reply that references one of this contact's messages handles it. A
+        mere `ack` ("got it") does not: the work is still to do."""
+        reply_to = meta.get("reply_to")
+        if not reply_to or meta.get("kind") == "ack":
             return
         row = self.db.execute(
             "SELECT msg_uuid FROM messages WHERE msg_uuid=? AND contact_id=? AND direction='in' "
@@ -818,12 +926,38 @@ class Daemon:
             if sub["context"] and alias and event == "message.new":
                 payload = dict(data, context=self._recent(alias, sub["context"]))
             try:
-                ipc.send_message(sub["sock"], {"event": event, "data": payload,
-                                               "ts": int(time.time())})
-            except (OSError, ipc.IPCError):
+                sub["out"] += ipc.frame({"event": event, "data": payload, "ts": int(time.time())})
+            except ipc.IPCError:
+                continue  # a frame over the IPC limit: skip this one event
+            if not self._flush_subscriber(sub):
                 dead.append(sub)  # closed, or too slow to keep up
         for sub in dead:
             self._drop_subscriber(sub)
+
+    def _flush_subscriber(self, sub: dict) -> bool:
+        """Write what the socket takes now; the select loop writes the rest when
+        it can take more. A frame larger than the socket buffer is normal (a long
+        text); a subscriber with SUB_BACKLOG bytes waiting is too slow. False:
+        drop it."""
+        out = sub["out"]
+        try:
+            while out:
+                n = sub["sock"].send(out)
+                del out[:n]
+        except BlockingIOError:
+            pass
+        except OSError:
+            return False
+        if len(out) > SUB_BACKLOG:
+            return False
+        want = selectors.EVENT_READ | (selectors.EVENT_WRITE if out else 0)
+        if want != sub["events"]:
+            try:
+                self._sel.modify(sub["sock"], want, data=sub)
+            except (KeyError, ValueError, OSError):
+                return False
+            sub["events"] = want
+        return True
 
     def _recent(self, alias: str, n: int) -> list:
         return list(reversed(self._get_messages({"alias": alias, "limit": n})["messages"]))
@@ -831,7 +965,8 @@ class Daemon:
     def _subscribe(self, conn: socket.socket, req: dict) -> None:
         params = req.get("params") or {}
         aliases = set(params.get("aliases") or []) or None
-        sub = {"sock": conn, "aliases": aliases, "context": max(0, int(params.get("context") or 0))}
+        sub = {"sock": conn, "aliases": aliases, "context": max(0, int(params.get("context") or 0)),
+               "out": bytearray(), "events": selectors.EVENT_READ}
         ipc.send_message(conn, {"id": req.get("id"), "result": {"subscribed": True}})
         conn.setblocking(False)
         self._sel.register(conn, selectors.EVENT_READ, data=sub)
@@ -1173,7 +1308,12 @@ class Daemon:
         fn = self.tox.friend_add_norequest(bytes.fromhex(pk))
         if fn == NO_FRIEND:
             return False
-        alias = self._free_alias(name or pk[:8].lower())
+        # The joining side picks the name. It never picks a name a [peers.X] entry
+        # holds, or it would get that entry's trust; an entry pinned to its key does.
+        cfg = config.peer_config()
+        pinned = [a for a, spec in cfg.items() if spec.get("key") == pk
+                  and not self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (a,)).fetchone()]
+        alias = pinned[0] if pinned else self._free_alias(name or pk[:8].lower(), set(cfg))
         now = int(time.time())
         self.db.execute(
             "INSERT INTO contacts (public_key, alias, added_at, added_by, friend_number) "
@@ -1186,12 +1326,21 @@ class Daemon:
         log.info("accepted invited friend %s as %r", pk[:8], alias)
         return True
 
-    def _free_alias(self, name: str) -> str:
+    def _free_alias(self, name: str, reserved=frozenset()) -> str:
         base = invite.safe_alias(name)
         alias, n = base, 2
-        while self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (alias,)).fetchone():
+        while (alias in reserved
+               or self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (alias,)).fetchone()):
             alias, n = f"{base}-{n}", n + 1
         return alias
+
+    @staticmethod
+    def _check_peer_key(alias: str, pk: str) -> None:
+        """A [peers.<alias>] entry with a `key` lets only that key have the alias."""
+        key = config.peer_config().get(alias, {}).get("key")
+        if key and key != pk:
+            raise RpcError("PEER_KEY_MISMATCH",
+                           f"[peers.{alias}] in config.toml is pinned to another key")
 
     # --- incoming file transfers (image/voice/video, fired during tox.iterate()) ---
     def _on_file_recv(self, friend_number: int, file_number: int, kind: int,
@@ -1294,7 +1443,7 @@ class Daemon:
             size = int(d.get("size") or 0)
         except (TypeError, ValueError):
             return
-        meta = {"msg_uuid": str(d.get("msg_uuid") or "")[:64],
+        meta = {"msg_uuid": envelope.safe_id(d.get("msg_uuid")) if d.get("msg_uuid") else "",
                 "sha256": str(d.get("sha256") or "")[:64].lower(),
                 "session": str(d.get("from_session") or "")[:64] or None,
                 "meta": envelope.clean_meta(d), "ts": time.time()}
@@ -1355,6 +1504,10 @@ class Daemon:
             raise RpcError("CONTACT_NOT_FOUND", f"no contact named {alias!r}")
         if not path.is_file():
             raise RpcError("FILE_NOT_FOUND", f"no such file: {path}")
+        why = _send_refusal(path, params.get("session_dir"), bool(params.get("interactive")),
+                            params.get("caller_dir"))
+        if why:
+            raise RpcError("FILE_NOT_ALLOWED", f"not sending {path}: {why}")
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
             raise RpcError("FILE_TOO_LARGE",
@@ -1374,7 +1527,7 @@ class Daemon:
              *_meta_values(meta), from_dir),
         )
         self.db.commit()
-        self._auto_done(contact["id"], meta.get("reply_to"))
+        self._auto_done(contact["id"], meta)
         fn = contact["friend_number"]
         started = False
         if fn is not None and self.tox.friend_get_connection_status(fn) != 0:
@@ -1607,7 +1760,7 @@ class Daemon:
                     self._archive_tick()
                     self._last_sweep = time.time()
                 timeout = min(self.tox.iteration_interval() / 1000, 0.1)
-                for key, _ in self._sel.select(timeout):
+                for key, events in self._sel.select(timeout):
                     if key.data is None:  # the listening socket
                         try:
                             conn, _ = self.sock.accept()
@@ -1615,8 +1768,11 @@ class Daemon:
                             self.running = False
                             break
                         self._handle(conn)
-                    else:  # a subscriber socket
-                        self._drain_subscriber(key.data)
+                    elif key.data in self._subs:  # a subscriber socket
+                        if events & selectors.EVENT_WRITE and not self._flush_subscriber(key.data):
+                            self._drop_subscriber(key.data)
+                        elif events & selectors.EVENT_READ:
+                            self._drain_subscriber(key.data)
         finally:
             self._cleanup()
 
@@ -1729,6 +1885,7 @@ class Daemon:
             "SELECT 1 FROM contacts WHERE alias=? OR public_key=?", (alias, public_key)
         ).fetchone():
             raise RpcError("CONTACT_EXISTS", "a contact with that alias or key already exists")
+        self._check_peer_key(alias, public_key)
 
         fn = self.tox.friend_add(bytes.fromhex(tox_id), request_msg.encode("utf-8"))
         if fn == NO_FRIEND:
@@ -1761,7 +1918,7 @@ class Daemon:
         self.db.execute("DELETE FROM contacts WHERE id=?", (row["id"],))
         self.db.commit()
         self._save_state()
-        return {"alias": alias}
+        return {"alias": alias, "stale_peer": alias in config.peer_config()}
 
     def _accept_request(self, params: dict) -> dict:
         prefix = params.get("public_key", "").strip().upper()
@@ -1781,6 +1938,7 @@ class Daemon:
             "SELECT 1 FROM contacts WHERE alias=? OR public_key=?", (alias, pk)
         ).fetchone():
             raise RpcError("CONTACT_EXISTS", "a contact with that alias or key already exists")
+        self._check_peer_key(alias, pk)
 
         fn = self.tox.friend_add_norequest(bytes.fromhex(pk))
         if fn == NO_FRIEND:
@@ -1800,13 +1958,15 @@ class Daemon:
         new = (params.get("new_alias") or "").strip()
         if not old or not new:
             raise RpcError("INVALID_ALIAS", "both the current and the new alias are required")
-        if not self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (old,)).fetchone():
+        row = self.db.execute("SELECT public_key FROM contacts WHERE alias=?", (old,)).fetchone()
+        if not row:
             raise RpcError("CONTACT_NOT_FOUND", f"no contact named {old!r}")
         if self.db.execute("SELECT 1 FROM contacts WHERE alias=?", (new,)).fetchone():
             raise RpcError("CONTACT_EXISTS", f"a contact named {new!r} already exists")
+        self._check_peer_key(new, row["public_key"])
         self.db.execute("UPDATE contacts SET alias=? WHERE alias=?", (new, old))
         self.db.commit()
-        return {"alias": new, "was": old}
+        return {"alias": new, "was": old, "stale_peer": old in config.peer_config()}
 
     def _list_contacts(self, params: dict) -> dict:
         query = ("SELECT alias, public_key, tox_id, is_online, last_seen, proto, profile_json "
@@ -1880,15 +2040,15 @@ class Daemon:
             online = online and self.tox.friend_send_message(fn, envelope.encode(env))
             if online:
                 self.db.execute(
-                    "UPDATE messages SET status='sent', last_attempt_at=? WHERE msg_uuid=?",
-                    (env["ts"], env["uuid"]),
+                    "UPDATE messages SET status='sent', last_attempt_at=?, sent_at=? WHERE msg_uuid=?",
+                    (env["ts"], env["ts"], env["uuid"]),
                 )
                 self.db.commit()
         if not online and fn is not None and self.tox.friend_get_connection_status(fn) != 0:
             self._emit("send.failed", {"msg_uuid": part_id or uuids[0], "alias": alias,
                                        "reason": "toxcore refused the message; queued for retry"},
                        alias)
-        self._auto_done(contact["id"], meta.get("reply_to"))
+        self._auto_done(contact["id"], meta)
         res = {"msg_uuid": part_id or uuids[0], "status": "sent" if online else "queued"}
         if len(uuids) > 1:
             res.update(parts=len(uuids), msg_uuids=uuids)
@@ -1923,7 +2083,7 @@ class Daemon:
             return {"messages": []}
         qs = ",".join("?" * len(keys))
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                 "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
+                 "m.received_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                  "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
                  "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                  f"{base}{where}{' AND' if conds else ' WHERE'} {key} IN ({qs}) "
@@ -1931,9 +2091,21 @@ class Daemon:
         rows = [_with_profile(r) for r in self.db.execute(query, (*args, *keys)).fetchall()]
         return {"messages": _merge_room_sends(_merge_parts(rows))}
 
+    def _list_failed(self, params: dict) -> dict:
+        """Our texts that failed and whose session has not been told yet (a
+        mark_read of one records that it was told). Its own method, so a client
+        talking to an older daemon gets METHOD_NOT_FOUND rather than other rows."""
+        rows = self.db.execute(
+            "SELECT m.msg_uuid, m.part_id, m.part_i, m.part_n, c.alias, m.direction, m.msg_type, "
+            "m.content, m.created_at, m.status, m.from_session, m.from_dir, m.thread "
+            "FROM messages m JOIN contacts c ON c.id=m.contact_id "
+            "WHERE m.direction='out' AND m.msg_type='text' AND m.status='failed' AND m.notified_at IS NULL "
+            "ORDER BY m.created_at DESC, m.id DESC LIMIT ?", (int(params.get("limit", 20)),)).fetchall()
+        return {"messages": _merge_parts([dict(r) for r in rows])}
+
     def _get_message(self, params: dict) -> dict:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
-                "m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
+                "m.received_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                 "FROM messages m "
@@ -1957,6 +2129,10 @@ class Daemon:
             )
             if cur.rowcount:
                 marked.append(u)
+            else:  # one of our failed texts: its session has now been told
+                self.db.execute("UPDATE messages SET notified_at=? WHERE direction='out' "
+                                "AND status='failed' AND notified_at IS NULL "
+                                "AND (msg_uuid=? OR part_id=?)", (now, u, u))
         self.db.commit()
         self._send_receipts(marked)
         return {"marked": len(marked)}
@@ -2027,6 +2203,11 @@ class Daemon:
             "SELECT 1 FROM contacts WHERE alias=? OR public_key=?", (alias, public_key)
         ).fetchone():
             raise RpcError("CONTACT_EXISTS", "a contact with that alias or key already exists")
+        self._check_peer_key(alias, public_key)
+        spec = config.peer_config().get(alias)
+        if not params.get("alias") and spec and spec.get("key") != public_key:
+            # The introducer chose this name; taking it would give its [peers] trust.
+            raise RpcError("PEER_ALIAS", f"{alias!r} is a [peers] entry; choose another alias")
         fn = self.tox.friend_add(bytes.fromhex(tox_id), b"added you via an introduction")
         if fn == NO_FRIEND:
             raise RpcError("FRIEND_ADD_FAILED", "tox_friend_add failed")
@@ -2051,10 +2232,11 @@ class Daemon:
         rows = self.db.execute(
             "SELECT c.alias, m.thread, COUNT(*) AS count, MAX(m.created_at) AS last_at, "
             "SUM(CASE WHEN m.direction='in' AND m.read_at IS NULL THEN 1 ELSE 0 END) AS unread, "
-            "SUM(CASE WHEN m.needs_human=1 AND m.direction='in' AND m.read_at IS NULL "
+            # A decision stays open until it is handled: delivering it marks it read.
+            "SUM(CASE WHEN m.needs_human=1 AND m.direction='in' AND m.handled_at IS NULL "
             "THEN 1 ELSE 0 END) AS needs_human, "
             "SUM(CASE WHEN m.direction='out' AND m.kind='request' AND m.status NOT IN "
-            "('handled','failed') THEN 1 ELSE 0 END) AS open_requests "
+            "('handled','failed','bounced') THEN 1 ELSE 0 END) AS open_requests "
             "FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE " + " AND ".join(conds) +
             " GROUP BY c.alias, m.thread ORDER BY last_at DESC LIMIT ?",
             (*args, int(params.get("limit", 50))),
@@ -2091,7 +2273,15 @@ class Daemon:
                 self.db.execute("CREATE TABLE IF NOT EXISTS arc.messages AS "
                                 "SELECT c.alias AS alias, m.* FROM messages m "
                                 "JOIN contacts c ON c.id=m.contact_id WHERE 0")
-                self.db.execute(f"INSERT OR IGNORE INTO arc.messages SELECT c.alias AS alias, m.* "
+                # An archive made before a column was added lacks it: add it, then copy by name.
+                have = {r["name"] for r in self.db.execute("PRAGMA arc.table_info(messages)")}
+                cols = [r["name"] for r in self.db.execute("PRAGMA main.table_info(messages)")]
+                for c in cols:
+                    if c not in have:
+                        self.db.execute(f"ALTER TABLE arc.messages ADD COLUMN {c}")
+                names = ", ".join(cols)
+                self.db.execute(f"INSERT OR IGNORE INTO arc.messages (alias, {names}) "
+                                f"SELECT c.alias, {', '.join('m.' + c for c in cols)} "
                                 f"FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE {where}", args)
                 self.db.commit()
             finally:

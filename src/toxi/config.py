@@ -35,7 +35,8 @@ TRUST_LEVELS = ("observer", "collaborator", "owner")
 def peer_config() -> dict[str, dict]:
     """Peers by alias: {"dirs": [...], "trust": "observer" | "collaborator" | "owner"}.
 
-    Read from `[peers.<alias>]` (`dirs = [...]`, `trust = "..."`). The legacy
+    Read from `[peers.<alias>]` (`dirs = [...]`, `trust = "..."`, optional
+    `key = "<64 hex public key>"`: only that key may get this alias). The legacy
     `[agents] peers = [...]` + `[agents.dirs]` form is still honoured and means
     trust = "collaborator". An unknown trust level degrades to "observer".
     """
@@ -54,8 +55,16 @@ def peer_config() -> dict[str, dict]:
             dirs = [dirs]
         trust = spec.get("trust", "collaborator")
         out[alias] = {"dirs": [str(d) for d in dirs],
-                      "trust": trust if trust in TRUST_LEVELS else "observer"}
+                      "trust": trust if trust in TRUST_LEVELS else "observer",
+                      "key": str(spec.get("key") or "").strip().upper()[:64] or None}
     return out
+
+
+def send_dirs() -> list[str]:
+    """`[files] send_dirs = [...]`: more dirs whose files may be sent, besides a
+    running session's project dir, the temp dir and toxi's media dir."""
+    d = _load().get("files", {}).get("send_dirs", [])
+    return [str(x) for x in ([d] if isinstance(d, str) else d)]
 
 
 def archive_after_days() -> int:

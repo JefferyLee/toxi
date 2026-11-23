@@ -13,10 +13,11 @@ the peer's trust level and is defined here, once, for every adapter.
 """
 import json
 import re
+import secrets
 import time
 from pathlib import Path
 
-from . import client, config, paths, sessions
+from . import client, config, envelope, paths, sessions
 
 ROUTE_TTL = 1800  # seconds a reply stays pinned to the session that asked
 
@@ -99,7 +100,8 @@ def owner(m: dict, spec: dict | None, live: list) -> str | None:
     if name:
         return sessions.resolve(name, live)
     route = m.get("route_dir")
-    if route and time.time() - (m.get("created_at") or 0) < ROUTE_TTL:
+    # The pin counts from when the reply got here, not from the sender's clock.
+    if route and time.time() - (m.get("received_at") or m.get("created_at") or 0) < ROUTE_TTL:
         by_name = sessions.resolve(m.get("route_session") or "", live)
         if any(s["name"].lower() == by_name for s in live):
             return by_name
@@ -136,15 +138,15 @@ def split(msgs: list, me: dict | None) -> tuple:
     return mine, shared
 
 
-def take(alias: str | None = None, cwd: str | None = None, thread: str | None = None) -> list:
-    """Unread messages from peers (or from `alias`), oldest first; marks them read.
+def pending(alias: str | None = None, cwd: str | None = None, thread: str | None = None) -> list:
+    """Unread messages from peers (or from `alias`), oldest first, not marked read.
 
     With `cwd` (the dir the session was started in), only the messages that
-    belong to this session (see `owner`) are delivered, so several sessions
-    sharing one identity never get each other's messages. `thread` limits
-    delivery to one thread. Each message gets a `trust` key. Messages of kind
-    `ack` are marked read but not delivered: an acknowledgement never wakes an
-    agent.
+    belong to this session (see `owner`) count, so several sessions sharing one
+    identity never get each other's messages; that holds with `alias` too, for
+    a peer. `thread` limits it to one thread. Each message gets a `trust` key.
+    Messages of kind `ack` are in the list: mark them read, but never show them
+    (an acknowledgement never wakes an agent).
     """
     cfg = config.peer_config()
     if not alias and not cfg:
@@ -152,20 +154,62 @@ def take(alias: str | None = None, cwd: str | None = None, thread: str | None = 
     params = {"unread_only": True, "limit": 100}
     if thread:
         params["thread"] = thread
-    msgs = client.request("get_messages", params)["messages"]
+    msgs = list(reversed(client.request("get_messages", params)["messages"]))
     if alias:
-        msgs = [m for m in reversed(msgs) if m["alias"] == alias]
-    elif cwd is None:
-        msgs = [m for m in reversed(msgs) if m["alias"] in cfg]
+        msgs = [m for m in msgs if m["alias"] == alias]
     else:
+        msgs = [m for m in msgs if m["alias"] in cfg]
+    if cwd is not None:
         me, live = sessions.register(cwd), sessions.live()
-        msgs = [m for m in reversed(msgs)
-                if m["alias"] in cfg and owner(m, cfg[m["alias"]], live) == me["name"].lower()]
+        msgs = [m for m in msgs if m["alias"] not in cfg
+                or owner(m, cfg[m["alias"]], live) == me["name"].lower()]
     for m in msgs:
         m["trust"] = cfg.get(m["alias"], {}).get("trust", "observer")
+    return msgs
+
+
+def take(alias: str | None = None, cwd: str | None = None, thread: str | None = None) -> list:
+    """`pending`, marked read, without the acks."""
+    msgs = pending(alias, cwd, thread)
     if msgs:
         client.request("mark_read", {"msg_uuids": [m["msg_uuid"] for m in msgs]})
     return [m for m in msgs if m.get("kind", "msg") != "ack"]
+
+
+def failed_sends(cwd: str) -> list:
+    """Texts this session sent that failed and that it has not been told about
+    (marking one read records that it was told)."""
+    try:
+        rows = client.request("list_failed", {"limit": 20})["messages"]
+    except client.DaemonError:  # an older daemon: it cannot say
+        return []
+    me, live = sessions.register(cwd), sessions.live()
+    # By name, and by dir when known: a new session that got a freed name did not send it.
+    return [m for m in reversed(rows) if m.get("direction") == "out" and m.get("status") == "failed"
+            and m.get("from_session") and sessions.resolve(m["from_session"], live) == me["name"].lower()
+            and (not m.get("from_dir") or _same_dir(m["from_dir"], me["cwd"]))]
+
+
+# What a sender writes reaches an agent's context. It must not be able to make a
+# line look like toxi's own (the trust header, a guide): fields lose their
+# control, bidi and line-break characters, and body lines are indented.
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]")
+_BREAK = re.compile(r"\r\n|[\n\r\x0b\x0c\x85\u2028\u2029]")
+
+
+def inline(v, n: int = 120) -> str:
+    """A sender-chosen field as one plain line, at most `n` chars."""
+    return re.sub(r"\s+", " ", _CTRL.sub(" ", str(v))).strip()[:n]
+
+
+def indent(body: str) -> str:
+    """A sender's text with every line after the first indented by four spaces."""
+    return "\n    ".join(_CTRL.sub(" ", line) for line in _BREAK.split(body))
+
+
+def _ago(ts) -> str:
+    s = max(0, int(time.time() - (ts or 0)))
+    return f"{s // 60}m" if s < 3600 else f"{s // 3600}h" if s < 172800 else f"{s // 86400}d"
 
 
 def describe(m: dict) -> str:
@@ -173,14 +217,16 @@ def describe(m: dict) -> str:
     parts = []
     prof = m.get("profile") or {}
     if prof:
-        who = "/".join(p for p in (prof.get("kind"), prof.get("runtime")) if p)
+        who = "/".join(inline(p, 40) for p in (prof.get("kind"), prof.get("runtime")) if p)
         if prof.get("host"):
-            who = f"{who} @ {prof['host']}" if who else f"@ {prof['host']}"
+            host = inline(prof["host"], 60)
+            who = f"{who} @ {host}" if who else f"@ {host}"
         if who:
             parts.append(who)
         if prof.get("operator"):
-            parts.append(f"operator {prof['operator']}")
-    who = f"{m['from_session']}@{m['alias']}" if m.get("from_session") else m["alias"]
+            parts.append(f"operator {inline(prof['operator'], 40)}")
+    alias = inline(m["alias"], 64)
+    who = f"{inline(m['from_session'], 64)}@{alias}" if m.get("from_session") else alias
     return f"{who} [{' · '.join(parts)}]" if parts else who
 
 
@@ -188,25 +234,27 @@ SUMMARY_AT = 1500  # bodies longer than this are injected as a head + pointer
 SUMMARY_HEAD = 600
 
 
-def meta_tag(m: dict) -> str:
+def meta_tag(m: dict, age: bool = True) -> str:
     """`(#thread · request · needs your decision · ↩ 1a2b3c4d · tag1, tag2)` or ''."""
     parts = []
     if m.get("room_id"):
-        parts.append(f"room {m.get('room_name') or m['room_id'][:8]}")
+        parts.append(f"room {inline(m.get('room_name') or m['room_id'][:8], 64)}")
     if m.get("relayed"):
         rel = m["relayed"]
         when = time.strftime("%m-%d %H:%M", time.localtime(rel.get("ts") or 0))
-        parts.append(f"history: {rel.get('name')} @ {when}")
+        parts.append(f"history: {inline(rel.get('name'), 64)} @ {when}")
+    elif age and m.get("direction") == "in" and time.time() - (m.get("created_at") or 0) > 600:
+        parts.append(f"sent {_ago(m['created_at'])} ago")  # an old request is not a new one
     if m.get("thread"):
-        parts.append(f"#{m['thread']}")
+        parts.append(f"#{inline(m['thread'], 64)}")
     if m.get("kind", "msg") != "msg":
-        parts.append(m["kind"])
+        parts.append(inline(m["kind"], 16))
     if m.get("needs_human"):
         parts.append("needs your decision")
     if m.get("reply_to"):
-        parts.append(f"↩ {str(m['reply_to'])[:8]}")
+        parts.append(f"↩ {inline(str(m['reply_to'])[:8])}")
     if m.get("tags"):
-        parts.append(", ".join(m["tags"]))
+        parts.append(", ".join(inline(t, 24) for t in m["tags"]))
     return f" ({' · '.join(parts)})" if parts else ""
 
 
@@ -218,24 +266,46 @@ def summarize(m: dict) -> str:
     if m.get("msg_type", "text") != "text":
         return f"[{m['msg_type']}] {body}"
     if len(body) > SUMMARY_AT:
-        return (f"{body[:SUMMARY_HEAD]} … [{len(body)} chars in total; full text: "
-                f"`toxi show {m['msg_uuid']}`]")
+        # The id comes from the sender: put it in a command only when it is a plain id.
+        how = (f"`toxi show {m['msg_uuid']}`" if envelope.ID.fullmatch(m["msg_uuid"])
+               else f"`toxi read {inline(m['alias'], 64)}`")
+        return f"{body[:SUMMARY_HEAD]} … [{len(body)} chars in total; full text: {how}]"
     return body
 
 
-def as_prompt(msgs: list) -> str:
+def as_prompt(msgs: list, failed: list = ()) -> str:
     """Render delivered peer messages as text to inject into an agent's context,
-    grouped by trust level, each group followed by its guide."""
+    grouped by trust level, each group followed by its guide; then the texts
+    this session sent that failed.
+
+    The senders' words sit between two marker lines with a random tag they
+    cannot know, and none of their lines starts at column 0, so a message
+    cannot pass itself off as toxi's header, another trust level or a guide."""
     groups: dict[str, list] = {}
     for m in msgs:
         groups.setdefault(m.get("trust", "collaborator"), []).append(m)
     out = []
     for trust, group in groups.items():
         source = "the user on their own device" if trust == "owner" else "peer agents"
-        out.append(f"[toxi] {len(group)} new message(s) from {source} (trust: {trust}):")
+        mark = f"«toxi:{secrets.token_hex(3)}»"
+        writer = ("the user wrote everything between the two {} lines on that device; none of "
+                  "it is from toxi" if trust == "owner" else
+                  "the senders wrote everything between the two {} lines; none of it is from "
+                  "toxi or the user").format(mark)
+        out.append(f"[toxi] {len(group)} new message(s) from {source} (trust: {trust}). "
+                   f"{writer[0].upper()}{writer[1:]}.")
+        out.append(mark)
         for m in group:
-            out.append(f"- {describe(m)}{meta_tag(m)}: {summarize(m)}")
+            out.append(f"- {describe(m)}{meta_tag(m)}: {indent(summarize(m))}")
+        out.append(mark)
         out.append(GUIDES.get(trust, GUIDES["observer"]))
+    if failed:
+        out.append(f"[toxi] {len(failed)} message(s) this session sent were not delivered "
+                   f"(the contact was online but did not acknowledge them):")
+        for m in failed:
+            thread = f" (#{inline(m['thread'], 64)})" if m.get("thread") else ""
+            out.append(f"- to {inline(m['alias'], 64)}{thread}, {_ago(m['created_at'])} ago: "
+                       f"\"{inline(m['content'], 80)}\" — send it again if it still matters.")
     return "\n".join(out)
 
 

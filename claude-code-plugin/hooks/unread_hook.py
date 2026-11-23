@@ -20,6 +20,9 @@ import os
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _inbox  # noqa: E402
+
 EVENT = "SessionStart"
 
 _MEDIA_DESC = {"image": "an image", "voice": "a voice message",
@@ -28,29 +31,31 @@ _MEDIA_DESC = {"image": "an image", "voice": "a voice message",
 
 def _describe(m: dict) -> str:
     if m.get("msg_type", "text") == "text":
-        return f"- {m['alias']}: {m['content']}"
+        return f"- {m['alias']}: {_inbox.indent(m['content'])}"
     what = _MEDIA_DESC.get(m["msg_type"], "a file")
     return f"- {m['alias']} sent {what} (saved at: {m['content']})"
 
 
-def _peer_context(toxi: str) -> str:
+def _peer_context(toxi: str) -> tuple:
     cwd = os.environ.get("CLAUDE_PROJECT_DIR")
     if not cwd and not sys.stdin.isatty():
         try:
             cwd = json.load(sys.stdin).get("cwd")
         except (ValueError, AttributeError):
             pass
-    args = [toxi, "peer-inbox"] + (["--cwd", cwd] if cwd else [])
-    try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=8)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return ""
-    return out.stdout.strip() if out.returncode == 0 else ""
+    return _inbox.peek(toxi, cwd)
 
 
 def main() -> None:
     toxi = os.environ.get("TOXI_BIN", "toxi")
-    peer_text = _peer_context(toxi)
+    peer_text, peer_uuids = _peer_context(toxi)
+    try:
+        _answer(toxi, peer_text)
+    finally:
+        _inbox.mark_read(toxi, peer_uuids)  # after the answer is out
+
+
+def _answer(toxi: str, peer_text: str) -> None:
     try:
         out = subprocess.run(
             [toxi, "--json", "unread"], capture_output=True, text=True, timeout=8
@@ -66,9 +71,7 @@ def main() -> None:
     if not msgs and not peer_text:
         return
     if not msgs:
-        print(json.dumps({
-            "hookSpecificOutput": {"hookEventName": EVENT, "additionalContext": peer_text}
-        }))
+        _inbox.emit({"hookSpecificOutput": {"hookEventName": EVENT, "additionalContext": peer_text}})
         return
 
     lines = "\n".join(_describe(m) for m in msgs)
@@ -87,9 +90,7 @@ def main() -> None:
         "explicitly asks you to.\n\n"
         f"{lines}"
     )
-    print(json.dumps({
-        "hookSpecificOutput": {"hookEventName": EVENT, "additionalContext": context}
-    }))
+    _inbox.emit({"hookSpecificOutput": {"hookEventName": EVENT, "additionalContext": context}})
 
 
 if __name__ == "__main__":

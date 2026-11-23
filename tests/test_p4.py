@@ -75,7 +75,7 @@ def test_webhook_posts_signed_batch_with_optional_bodies(tmp_path, monkeypatch):
 
 def test_rename_contact(tmp_path, monkeypatch):
     d = _daemon(tmp_path, monkeypatch)
-    assert d._rename_contact({"alias": "codex", "new_alias": "codex@Ada"}) == {"alias": "codex@Ada", "was": "codex"}
+    assert d._rename_contact({"alias": "codex", "new_alias": "codex@Ada"}) == {"alias": "codex@Ada", "was": "codex", "stale_peer": False}
     with pytest.raises(RpcError):
         d._rename_contact({"alias": "nope", "new_alias": "x"})
     d.db.execute("INSERT INTO contacts (public_key, alias, added_at) VALUES ('DD', 'bob', 1)")

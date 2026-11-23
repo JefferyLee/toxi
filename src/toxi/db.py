@@ -107,7 +107,9 @@ _ADDED_COLUMNS = {
                  ("from_dir", "TEXT"),                # outgoing: project dir of the sending session (local only)
                  ("handled_at", "INTEGER"),           # `done` receipt (out) / we marked it handled (in)
                  ("receipt_pending", "TEXT"),         # incoming: receipt kind still owed to the sender
-                 ("relayed", "TEXT")],                # JSON {name, ts}: room history relayed by the creator
+                 ("relayed", "TEXT"),                 # JSON {name, ts}: room history relayed by the creator
+                 ("sent_at", "INTEGER"),              # outgoing text: first hand-off since the peer came online
+                 ("notified_at", "INTEGER")],         # outgoing: when the sending session was told it failed
     "room_members": [("history_sent", "INTEGER")],   # creator: when this member got the room's history
 }
 
@@ -118,6 +120,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for name, decl in cols:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                if (table, name) == ("messages", "notified_at"):
+                    # Failures from before this column are old news: do not report them all now.
+                    conn.execute("UPDATE messages SET notified_at=CAST(strftime('%s','now') AS INTEGER) "
+                                 "WHERE direction='out' AND status='failed'")
+                    # Before, a decision counted as open only while unread: decisions
+                    # read before this upgrade are closed, not open again.
+                    now_cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+                    if {"read_at", "needs_human", "handled_at"} <= now_cols:
+                        conn.execute("UPDATE messages SET handled_at=read_at WHERE direction='in' "
+                                     "AND needs_human=1 AND handled_at IS NULL AND read_at IS NOT NULL")
     # On added columns, so here and not in SCHEMA. They keep the reply-route
     # subqueries in get_messages from scanning the whole table once per row.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_part ON messages(part_id)")

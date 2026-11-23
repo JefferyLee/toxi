@@ -8,10 +8,16 @@ emits Codex Stop hook JSON with the current `toxi statusline` summary.
 Hooks don't see the MCP server's env, so when TOXI_HOME isn't set we reuse the
 one configured for the toxi MCP server in Codex's config.toml.
 """
+from __future__ import annotations  # hooks may run on an old system python3
+
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _inbox  # noqa: E402
 
 
 def codex_toxi_home() -> str | None:
@@ -41,10 +47,21 @@ def main() -> None:
         if home:
             os.environ["TOXI_HOME"] = os.path.expanduser(home)
     toxi = os.environ.get("TOXI_BIN", "toxi")
-
-    peer = run(toxi, "peer-inbox")
-    if peer:
-        print(json.dumps({"decision": "block", "reason": peer}))
+    data = {}
+    if not sys.stdin.isatty():
+        try:
+            data = json.load(sys.stdin)
+        except (ValueError, AttributeError):
+            pass
+    # Codex runs hooks in the session's dir. With --cwd only this session's
+    # messages come, not those of every session on the identity.
+    text, uuids = _inbox.peek(toxi, data.get("cwd") or os.getcwd())
+    if text and _inbox.blocked_before(data, uuids):
+        text = ""  # the same messages again: they will not mark read, so do not loop
+    if text:
+        _inbox.emit({"decision": "block", "reason": text})
+    _inbox.mark_read(toxi, uuids)
+    if text:
         return
 
     status = run(toxi, "statusline")

@@ -8,9 +8,11 @@ Set TOXI_BIN if `toxi` isn't on PATH; TOXI_HOME is taken from Codex's own
 """
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _inbox  # noqa: E402
 
 
 def codex_toxi_home():
@@ -35,14 +37,11 @@ def main() -> None:
             cwd = json.load(sys.stdin).get("cwd")
         except (ValueError, AttributeError):
             pass
-    cwd = cwd or os.getcwd()
-    try:
-        out = subprocess.run([toxi, "peer-inbox", "--cwd", cwd], capture_output=True, text=True, timeout=8)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
-    text = out.stdout.strip() if out.returncode == 0 else ""
+    text, uuids = _inbox.peek(toxi, cwd or os.getcwd())
     if text:
         print(text)
+        sys.stdout.flush()
+    _inbox.mark_read(toxi, uuids)  # after the text is out
 
 
 if __name__ == "__main__":

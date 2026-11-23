@@ -60,7 +60,8 @@ def _default_session_dir() -> str | None:
 
 def _sender(m: dict) -> str:
     """`alias` or `session@alias` when the sender tagged the message with a session."""
-    return f"{m['from_session']}@{m['alias']}" if m.get("from_session") else m["alias"]
+    return (f"{peers.inline(m['from_session'], 64)}@{m['alias']}" if m.get("from_session")
+            else m["alias"])
 
 
 @click.group()
@@ -173,8 +174,11 @@ def remove(alias, yes):
         click.confirm(
             f"Remove '{alias}' and delete all messages with them?", abort=True
         )
-    _call("remove_contact", {"alias": alias})
+    res = _call("remove_contact", {"alias": alias})
     click.echo(f"✓ Removed {alias}.")
+    if res.get("stale_peer"):
+        click.echo(f"⚠ config.toml still has [peers.{alias}]. The next contact named {alias} "
+                   f"gets its trust: remove the table, or pin it with key = \"<public key>\".")
 
 
 @cli.command()
@@ -239,10 +243,10 @@ _MEDIA_LABEL = {"image": "📷 image", "voice": "🎤 voice message",
 def _content(m: dict) -> str:
     """Render a message body for the terminal: thread/kind tags first, media rows
     show type + saved path."""
-    tag = peers.meta_tag(m).strip()
+    tag = peers.meta_tag(m, age=False).strip()
     prefix = f"{tag} " if tag else ""
     if m.get("msg_type", "text") == "text":
-        return prefix + m["content"]
+        return prefix + peers.indent(m["content"])  # no line of it starts at column 0
     label = _MEDIA_LABEL.get(m["msg_type"], "📎 file")
     return f"{prefix}[{label}] {m['content']}"
 
@@ -284,7 +288,13 @@ def send(ctx, alias, message, file_path, session, wait_read, wait_handled, threa
     if message is not None:
         res = _call("send_message", {"alias": alias, "body": message, **meta})
     if file_path:
-        fres = _call("send_file", {"alias": alias, "path": file_path, **meta})
+        # A person at a terminal may send any file that is not a secret; an agent
+        # only files from its project dir and the other places the daemon allows.
+        # A script outside any agent session (a headless bot) also from its cwd.
+        outside = sessions.current() is None
+        person = outside and sys.stdin.isatty() and sys.stdout.isatty()
+        fres = _call("send_file", {"alias": alias, "path": file_path, "interactive": person,
+                                   "caller_dir": os.getcwd() if outside else None, **meta})
         if message is None:
             res = fres
         elif _emit_quiet(ctx):
@@ -294,9 +304,9 @@ def send(ctx, alias, message, file_path, session, wait_read, wait_handled, threa
     if res.get("as_file"):
         click.echo(f"ℹ body over 64 KB — sent as a text file ({res['size']} bytes)", err=True)
     if wait_handled > 0:
-        res["status"] = _wait_status(res["msg_uuid"], wait_handled, ("handled", "failed"))
+        res["status"] = _wait_status(res["msg_uuid"], wait_handled, ("handled", "failed", "bounced"))
     elif wait_read > 0:
-        res["status"] = _wait_status(res["msg_uuid"], wait_read, ("read", "handled", "failed"))
+        res["status"] = _wait_status(res["msg_uuid"], wait_read, ("read", "handled", "failed", "bounced"))
     if wait_read or wait_handled:
         res["read"] = res["status"] in ("read", "handled")
         res["handled"] = res["status"] == "handled"
@@ -554,13 +564,37 @@ def read(ctx, alias, limit, oldest_first, thread, room):
 @cli.command(name="peer-inbox")
 @click.option("--alias", help="Only this contact instead of all peer agents.")
 @click.option("--cwd", help="Dir the session was started in, matched against [agents.dirs].")
+@click.option("--peek", is_flag=True,
+              help='Mark nothing; print {"text", "msg_uuids"} as JSON. The caller hands the text '
+                   "on, then runs `toxi mark-read` with the ids, so a message is never lost.")
 @click.pass_context
-def peer_inbox(ctx, alias, cwd):
+def peer_inbox(ctx, alias, cwd, peek):
     """Deliver unread peer-agent messages (marks them read). Used by Stop hooks."""
-    msgs = peers.take(alias, cwd)
-    if _emit(ctx, msgs) or not msgs:
+    if peek:
+        msgs = peers.pending(alias, cwd)
+        failed = peers.failed_sends(cwd) if cwd else []
+        shown = [m for m in msgs if m.get("kind", "msg") != "ack"]
+        text = peers.as_prompt(shown, failed) if shown or failed else ""
+        click.echo(json.dumps({"text": text, "msg_uuids": [m["msg_uuid"] for m in msgs + failed]},
+                              ensure_ascii=False))
         return
-    click.echo(peers.as_prompt(msgs))
+    msgs = peers.take(alias, cwd)
+    if _emit(ctx, msgs):
+        return
+    failed = peers.failed_sends(cwd) if cwd else []
+    if failed:
+        _call("mark_read", {"msg_uuids": [m["msg_uuid"] for m in failed]})
+    if not (msgs or failed):
+        return
+    click.echo(peers.as_prompt(msgs, failed))
+
+
+@cli.command(name="mark-read", hidden=True)
+@click.argument("msg_uuids", nargs=-1, required=True)
+def mark_read(msg_uuids):
+    """Mark messages read (and send read receipts). For hooks, after `peer-inbox --peek`."""
+    res = _call("mark_read", {"msg_uuids": list(msg_uuids)})
+    click.echo(f"✓ {res['marked']} message(s) marked read")
 
 
 @cli.command(name="peers")
@@ -1051,16 +1085,19 @@ def _doctor_checks() -> list:
             prof = _call("get_profile")["profile"]
             add(bool(prof), "profile", (f"{prof.get('kind')}/{prof.get('runtime')} {prof.get('name')}"
                                         if prof else "none — `toxi profile set --kind agent ...`"))
-            known = {c["alias"] for c in _call("list_contacts")["contacts"]}
+            known = {c["alias"]: c["public_key"] for c in _call("list_contacts")["contacts"]}
         except (click.ClickException, KeyError) as e:
             add(False, "daemon rpc", str(e))
-            known = set()
+            known = {}
     else:
         known = None
     for alias, spec in config.peer_config().items():
         problems = [d for d in spec["dirs"] if not Path(d).expanduser().is_dir()]
         if known is not None and alias not in known:
-            problems.append("not a contact")
+            # Whoever gets this alias next (an invite, an add) would get this trust.
+            problems.append("not a contact: remove the table, or pin it with `key`")
+        elif known and spec.get("key") and known[alias] != spec["key"]:
+            problems.append("key does not match the contact's public key")
         add(not problems, f"peer {alias}", f"{spec['trust']}" + (f" — {', '.join(problems)}" if problems else ""))
     plugin = bootstrap.toxi_plugin_cache_root()
     if plugin.exists():

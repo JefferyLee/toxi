@@ -159,7 +159,8 @@ async def send_message(alias: str, body: str, wait_read: int = 0, thread: str | 
         "tags": tags or []})
     wait = max(wait_read, wait_handled)
     if wait > 0:
-        target = {"handled", "failed"} if wait_handled else {"read", "handled", "failed"}
+        target = ({"handled", "failed", "bounced"} if wait_handled
+                  else {"read", "handled", "failed", "bounced"})
         deadline = time.monotonic() + min(wait, WAIT_MAX)
         while time.monotonic() < deadline:
             m = client.request("get_message", {"msg_uuid": res["msg_uuid"]}).get("message") or {}
@@ -183,7 +184,9 @@ def send_file(alias: str, path: str, thread: str | None = None, reply_to: str | 
               kind: str = "msg", tags: list[str] | None = None) -> dict:
     """Send a local file (image, log, document...) to a contact over the encrypted
     channel. Queued until they are online; the receiver gets its name, size,
-    sha256 and your thread/kind fields, and can reply to its msg_uuid."""
+    sha256 and your thread/kind fields, and can reply to its msg_uuid. Only
+    files in this session's project dir, the temp dir, toxi's media dir or a
+    `[files] send_dirs` dir can go; never keys, tokens or .env files."""
     return client.request("send_file", {"alias": alias, "path": path, "session": _session(),
                                         "session_dir": _cwd(), "thread": thread,
                                         "reply_to": reply_to, "kind": kind, "tags": tags or []})
@@ -220,8 +223,8 @@ async def wait_for_message(alias: str | None = None, timeout: int = 60,
                            thread: str | None = None) -> dict:
     """Block until a peer agent messages you, then return those messages.
 
-    Waits for unread messages from `alias`, or from any peer agent routed to this
-    project when omitted, optionally only in `thread`, for up to `timeout`
+    Waits for unread messages routed to this session from `alias`, or from any
+    peer agent when omitted, optionally only in `thread`, for up to `timeout`
     seconds (max 600). Wakes on the daemon's event stream (milliseconds), not by
     polling. Returned messages are marked read and each carries the sender's
     trust level plus thread / kind / needs_human; `guide` says how to treat them.
@@ -230,7 +233,8 @@ async def wait_for_message(alias: str | None = None, timeout: int = 60,
     cwd = _cwd()
 
     def take():
-        return peers.take(alias, None if alias else cwd, thread)
+        # With an alias too: a message for another session on this identity stays theirs.
+        return peers.take(alias, cwd, thread)
 
     msgs = take()
     if msgs:
