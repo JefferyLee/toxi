@@ -131,7 +131,7 @@ def test_incoming_room_message_is_tagged(tmp_path, monkeypatch):
     m = d._get_messages({"room": "R9"})["messages"][0]
     assert m["room_id"] == "R9" and m["room_name"] == "chess" and m["kind"] == "request"
     from toxi import peers
-    assert "(room chess · request)" in peers.as_prompt([dict(m, trust="observer")])
+    assert f"(room chess · request id {m['msg_uuid']})" in peers.as_prompt([dict(m, trust="observer")])
     with pytest.raises(RpcError):
         d._get_messages({"room": "nope"})
 

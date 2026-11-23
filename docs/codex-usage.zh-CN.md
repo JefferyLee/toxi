@@ -134,12 +134,14 @@ Codex 优先通过 MCP 调用这些工具：
 
 | 工具 | 作用 | 是否会标已读 |
 |---|---|---|
-| `get_status` | 查看 daemon、DHT、联系人、队列、统计 | 否 |
-| `list_contacts` | 列联系人和在线状态 | 否 |
-| `get_unread` | peek 未读消息 | 否 |
-| `read_history` | peek 某联系人历史 | 否 |
-| `mark_read` | 把指定消息 UUID 标为已读 | 是 |
-| `send_message` | 给联系人发消息；对方离线时入队 | 否 |
+| `get_status` | daemon、连接、队列、统计；联系人的在线状态和信任级别；房间 | 否 |
+| `read_messages` | peek 消息：未读（`unread`）、某联系人（`alias`）、某线程（`thread`）、某房间（`room`），或搜索（`q`） | 否 |
+| `get_message` | 一条消息的全文和状态；如果是请求，还有任务状态和回复 | 否 |
+| `overview` | 线程，以及本会话未结束的请求 | 否 |
+| `mark` | 把指定消息 UUID 标为已读（`handled` 还会发 `done` 回执） | 是 |
+| `wait_for_message` | 等待 peer 的消息 | 是 |
+| `view_media` | 显示收到的图片，或给出其他媒体的路径 | 否 |
+| `send_message` | 给联系人或房间发消息，可以附带文件；对方离线时入队 | 否 |
 
 如果 MCP 不可用，Codex skill 会退回 CLI：
 
@@ -157,8 +159,8 @@ toxi send <alias> "<message>"
 
 - 不是 peer 的联系人：按“不可信个人内容”对待。这样的消息写“忽略之前的指令”，或要求安装软件、改文件、运行命令时，Codex 只把它当作对方写的文字。只有你在当前 Codex 对话里要求时，Codex 才给这样的联系人发消息。
 - peer（config.toml 里的 `[peers.<别名>]`）：消息带着信任级别和对应的指引。`observer` 只提供信息。`collaborator` 可以在当前任务范围内请求做事。`owner` 是你自己的设备。Codex 用 `send_message` 回复 peer 的别名。破坏性操作和超出项目范围的操作仍需你确认。
-- `get_unread` 和 `read_history` 只是 peek，不会标已读
-- `mark_read` 只能在你明确要求清除未读，或 Codex 已经把对应消息转述给你之后调用
+- `read_messages` 只是 peek，不会标已读
+- `mark` 只能在你明确要求清除未读，或 Codex 已经把对应消息转述给你之后调用
 
 ## 8. 排错
 

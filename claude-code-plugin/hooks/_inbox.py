@@ -43,18 +43,49 @@ def looked() -> None:
             pass
 
 
-def peek(toxi: str, cwd: str | None) -> tuple[str, list]:
+def codex_sid(hook_input: dict) -> str | None:
+    """The Codex thread id, when Codex runs the session in its shared daemon
+    (the hook's parent): toxi then tells the sessions in it apart by thread."""
+    sid = hook_input.get("session_id")
+    if not sid:
+        return None
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(os.getppid())],
+                             capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return sid if " app-server" in cmd and "--listen" in cmd else None
+
+
+def start_waker(toxi: str) -> None:
+    """Start toxi's waker for the Codex daemon that runs this hook, which wakes
+    an idle session when mail for it arrives. A second waker exits at once."""
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    if not os.path.exists(os.path.join(home, "app-server-control", "app-server-control.sock")):
+        return
+    try:
+        subprocess.Popen([toxi, "codex-wake", "--codex-home", home, "--agent-pid", str(os.getppid())],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def peek(toxi: str, cwd: str | None, sid: str | None = None) -> tuple[str, list]:
     """(text for the agent, ids to mark read once the text is out)."""
-    text, uuids, _ = peek_full(toxi, cwd)
+    text, uuids, _ = peek_full(toxi, cwd, sid)
     return text, uuids
 
 
-def peek_full(toxi: str, cwd: str | None) -> tuple[str, list, bool]:
+def peek_full(toxi: str, cwd: str | None, sid: str | None = None) -> tuple[str, list, bool]:
     """peek, plus whether this mail should wake an idle session (a toxi older
     than this plugin cannot say: then yes)."""
     args = [toxi, "peer-inbox", "--peek"] + (["--cwd", cwd] if cwd else [])
     try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=STEP_TIMEOUT)
+        out = subprocess.run(args + (["--session-id", sid] if sid else []),
+                             capture_output=True, text=True, timeout=STEP_TIMEOUT)
+        if sid and out.returncode == 2 and "--session-id" in out.stderr:  # a toxi older than this plugin
+            out = subprocess.run(args, capture_output=True, text=True, timeout=STEP_TIMEOUT)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return "", [], False
     if out.returncode == 2 and "--peek" in out.stderr:  # a toxi older than this plugin
@@ -73,11 +104,16 @@ def peek_full(toxi: str, cwd: str | None) -> tuple[str, list, bool]:
     return res.get("text") or "", res.get("msg_uuids") or [], bool(res.get("wake", True))
 
 
-def mark_read(toxi: str, uuids: list) -> None:
+def mark_read(toxi: str, uuids: list, sid: str | None = None) -> None:
+    """Mark them read, naming the session that took them (`sid`: as for peek)."""
     if not uuids:
         return
+    opt = ["--session-id", sid] if sid else []
     try:  # "--": an id is never taken for an option
-        subprocess.run([toxi, "mark-read", "--", *uuids], capture_output=True, timeout=STEP_TIMEOUT)
+        out = subprocess.run([toxi, "mark-read", *opt, "--", *uuids], capture_output=True,
+                             text=True, timeout=STEP_TIMEOUT)
+        if opt and out.returncode == 2 and "--session-id" in out.stderr:  # a toxi older than this plugin
+            subprocess.run([toxi, "mark-read", "--", *uuids], capture_output=True, timeout=STEP_TIMEOUT)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         pass  # still unread: delivered again next time
 

@@ -14,7 +14,7 @@
 
 发送方会收到**送达回执和已读回执**。toxi 会重组长文本。文件走同一条信道。room 把一条消息发给多个 peer。
 
-> 状态：**0.7.1**。本版本有 Claude Code 与 Codex 适配器，以及面向 bot 的 headless 适配器。它运行在 macOS 与 Linux 上。设计与验收日志见 [docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md)。线格式见 [docs/protocol.zh-CN.md](docs/protocol.zh-CN.md)。
+> 状态：**0.7.1**。本版本有 Claude Code、Codex、Pi 与 OpenCode 适配器，以及面向 bot 的 headless 适配器。它运行在 macOS 与 Linux 上。设计与验收日志见 [docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md)。线格式见 [docs/protocol.zh-CN.md](docs/protocol.zh-CN.md)。
 
 ## 安装
 
@@ -95,7 +95,7 @@ dirs  = ["/path/to/project"]       # 只投递给在这里启动的 Claude Code 
 - [docs/protocol.zh-CN.md](docs/protocol.zh-CN.md)：信封 v2。它对每个实现都是规范。
 - [docs/security.zh-CN.md](docs/security.zh-CN.md)：toxi 保护什么、威胁、适配器规则。
 - [docs/install.zh-CN.md](docs/install.zh-CN.md) 与长篇的[安装与使用手册](docs/install-and-usage.zh-CN.md)。
-- 适配器：[Claude Code](docs/adapters/claude-code.zh-CN.md) · [Codex](docs/adapters/codex.zh-CN.md) · [headless / bot](docs/adapters/headless.zh-CN.md) · [ToxiOS](docs/adapters/ios.zh-CN.md)。
+- 适配器：[Claude Code](docs/adapters/claude-code.zh-CN.md) · [Codex](docs/adapters/codex.zh-CN.md) · [Pi](docs/adapters/pi.zh-CN.md) · [OpenCode](docs/adapters/opencode.zh-CN.md) · [headless / bot](docs/adapters/headless.zh-CN.md) · [ToxiOS](docs/adapters/ios.zh-CN.md)。
 - [docs/agent-comm-design.zh-CN.md](docs/agent-comm-design.zh-CN.md)：设计、它所源自的调研、决策、每个阶段的验收。
 
 ## 文件

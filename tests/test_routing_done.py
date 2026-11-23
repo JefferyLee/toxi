@@ -108,7 +108,7 @@ def test_mcp_send_passes_session_dir_and_wait_listens_to_all_peers(tmp_path, mon
     monkeypatch.setattr(mcp_server.client, "asubscribe", fake_sub)
     calls = []
 
-    def take(alias=None, cwd=None, thread=None):
+    def take(alias=None, cwd=None, thread=None, **_):
         calls.append(cwd)
         return [] if len(calls) == 1 else [{"msg_uuid": "1", "alias": "codex", "content": "r",
                                             "trust": "observer"}]
@@ -116,7 +116,7 @@ def test_mcp_send_passes_session_dir_and_wait_listens_to_all_peers(tmp_path, mon
     monkeypatch.setattr(mcp_server.peers, "take", take)
     res = asyncio.run(mcp_server.wait_for_message(timeout=2))
     assert calls == ["/w/asker", "/w/asker"]
-    assert sorted(seen["aliases"]) == ["bot", "codex"] and res["messages"]
+    assert sorted(seen["aliases"]) == ["bot", "codex", "self"] and res["messages"]
 
 
 # --- done receipts -------------------------------------------------------------

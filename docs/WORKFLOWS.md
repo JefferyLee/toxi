@@ -119,8 +119,8 @@ the workspace pattern):
    decentralized product; treat it as such.
 
 **Mark-read is an explicit action, not a side effect.** Both the toxi
-MCP server instructions and the Codex skill say it: `get_unread` and
-`read_history` are read-only peeks. `mark_read` only fires when the
+MCP server instructions and the Codex skill say it: `read_messages`
+is a read-only peek. `mark` only fires when the
 user explicitly clears unread, or after the agent has relayed the
 exact messages being marked. A `ship` loop that mass-marks-read
 because "the user asked for a summary" has drifted.

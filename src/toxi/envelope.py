@@ -15,7 +15,7 @@ import uuid as _uuid
 VERSION = 2
 # What this daemon implements; advertised in its profile so peers can feature-gate:
 # profile cards, from_session labels, read receipts, multi-part reassembly.
-CAPS = ["profile", "session", "receipt", "part"]
+CAPS = ["profile", "session", "receipt", "part", "task"]
 
 PROFILE_KEYS = ("kind", "name", "runtime", "model", "host", "operator", "role", "proto", "caps")
 PROFILE_KINDS = ("agent", "human", "service")
@@ -34,7 +34,14 @@ def safe_id(raw) -> str:
 
 # Structured fields a text may carry besides its body (design §4.5).
 KINDS = ("msg", "request", "report", "ack", "relay", "bounce")
-META_KEYS = ("thread", "reply_to", "kind", "needs_human", "tags", "room", "room_msg", "relayed")
+META_KEYS = ("thread", "reply_to", "kind", "needs_human", "tags", "room", "room_msg", "relayed", "state")
+# Task states, as A2A 1.0 names them (design §13.11). A text that sets one
+# answers a request (`reply_to`); `submitted`, plain `working` and `completed`
+# also follow from receipts, so they need no text.
+STATES = ("submitted", "working", "input-required", "auth-required",
+          "completed", "failed", "canceled", "rejected")
+WORKER_STATES = ("working", "input-required", "auth-required", "completed", "failed", "rejected")
+TERMINAL = ("completed", "failed", "canceled", "rejected")
 
 
 def clean_meta(raw) -> dict:
@@ -53,6 +60,9 @@ def clean_meta(raw) -> dict:
         out["kind"] = kind
     if raw.get("needs_human"):
         out["needs_human"] = True
+    state = str(raw.get("state") or "").strip().lower()
+    if state in STATES and reply_to:
+        out["state"] = state
     tags = raw.get("tags")
     if isinstance(tags, list):
         tags = [str(t).strip()[:24] for t in tags[:8] if str(t).strip()]
@@ -152,6 +162,22 @@ def clean_profile(raw) -> dict:
                 out[k] = s
     if out.get("kind") not in PROFILE_KINDS:
         out.pop("kind", None)
+    sessions = clean_sessions(raw.get("sessions"))
+    if sessions:
+        out["sessions"] = sessions
+    return out
+
+
+def clean_sessions(raw) -> list:
+    """The session directory on a card (design §13.6, C8): the sessions running
+    on that identity, so a peer can address one with `@name`.
+    [{name ≤64, about ≤120}], at most 16."""
+    out = []
+    for s in raw[:16] if isinstance(raw, list) else []:
+        name = str(s.get("name") or "").strip()[:64] if isinstance(s, dict) else ""
+        if name:
+            about = str(s.get("about") or "").strip()[:120]
+            out.append({"name": name, **({"about": about} if about else {})})
     return out
 
 

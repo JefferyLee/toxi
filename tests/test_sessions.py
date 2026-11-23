@@ -213,3 +213,125 @@ def test_a_text_no_session_can_take_goes_back_to_the_sender(tmp_path, monkeypatc
         assert unread(_incoming_in(d, "@nobody hi")) and len(_bounces(d)) == n + 1
     finally:
         LIVE.update({101, 102, 103})
+
+
+def test_one_process_can_hold_several_sessions_by_their_ids(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    a = sessions.register("/w/app", pid=101, sid="ses_a", name="fix login")
+    b = sessions.register("/w/app", pid=101, sid="ses_b")
+    assert (a["name"], b["name"]) == ("fix-login", "app")
+    assert sessions.current(101, "ses_a")["name"] == "fix-login"
+    assert sorted(s["sid"] for s in sessions.live()) == ["ses_a", "ses_b"]
+    sessions.end(101, "ses_a")
+    assert [s["sid"] for s in sessions.live()] == ["ses_b"]
+    # The process lives on, but an entry its adapter stopped renewing ends.
+    e = sessions.current(101, "ses_b")
+    e["seen"] -= sessions.SID_TTL + 1
+    sessions._file(101, "ses_b").write_text(json.dumps(e))
+    assert sessions.live() == []
+
+
+def test_the_session_id_comes_from_the_agents_environment(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    monkeypatch.setenv("PI_SESSION_ID", "pi-123")
+    me = sessions.register("/w/x", pid=102)
+    assert me["sid"] == "pi-123" and sessions.current(102)["sid"] == "pi-123"
+
+
+def test_a_helper_without_the_id_joins_the_one_session_of_its_process(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    sessions.register("/w/p", pid=101, sid="pi-1")
+    assert sessions.register("/w/p", pid=101)["sid"] == "pi-1"  # Pi's MCP server: no PI_SESSION_ID
+    assert len(sessions.live()) == 1
+    sessions.register("/w/p", pid=102, sid="oc-1")
+    sessions.register("/w/p", pid=102, sid="oc-2")
+    me = sessions.register("/w/p", pid=102)  # two sessions in it: cannot tell
+    assert "sid" not in me and me["transient"]
+    assert len([s for s in sessions.live() if s["pid"] == 102]) == 2  # and no third one appears
+
+
+def test_a_caller_without_a_name_keeps_the_name_the_adapter_gave(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, "")
+    assert sessions.register("/w/p", pid=103, sid="ses_1", name="Greeting")["name"] == "Greeting"
+    assert sessions.register("/w/p", pid=103, sid="ses_1")["name"] == "Greeting"  # MCP server, failed_sends
+    assert sessions.register("/w/p", pid=103, sid="ses_1", name="Review")["name"] == "Review"  # a rename
+
+
+def test_a_codex_thread_id_is_the_session_id_only_in_the_shared_daemon(monkeypatch):
+    import types
+    cmds = {1: "/x/codex app-server --remote-control --listen unix://",  # the shared daemon
+            2: "/Applications/ChatGPT.app/.../codex -c a=b app-server --analytics-default-enabled",  # the app's own
+            3: "codex -C /w/p"}  # a TUI with --no-daemon
+    monkeypatch.setattr(sessions.subprocess, "run",
+                        lambda args, **kw: types.SimpleNamespace(stdout=cmds[int(args[-1])] + "\n"))
+    assert sessions.codex_sid("t1", pid=1) is None  # the hooks did not register it by thread: old hooks
+    monkeypatch.setattr(sessions, "live", lambda: [{"pid": 1, "sid": "t1", "name": "p"}])
+    assert sessions.codex_sid("t1", pid=1) == "t1"
+    assert sessions.codex_sid("t1", pid=2) is None
+    assert sessions.codex_sid("t1", pid=3) is None
+    assert sessions.codex_sid(None, pid=1) is None
+
+
+# --- the session directory on the card (design §13.6, C8) ---
+
+def _cards(d):
+    from toxi import envelope
+    return [e["data"] for _, e in d.tox.sent if e["type"] == "profile"]
+
+
+def test_collaborators_get_the_session_directory_and_observers_do_not(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    _setup(tmp_path, monkeypatch, '[peers.codex]\ntrust = "collaborator"\n')
+    monkeypatch.setenv("TOXI_SESSION_ABOUT", "iOS build")
+    sessions.register(str(tmp_path / "ios"), pid=101)
+    monkeypatch.delenv("TOXI_SESSION_ABOUT")
+    sessions.register(str(tmp_path / "web"), pid=102)
+    fn = d.db.execute("SELECT friend_number FROM contacts WHERE alias='codex'").fetchone()[0]
+    d._send_profile(fn)
+    assert _cards(d)[-1]["sessions"] == [{"name": "ios", "about": "iOS build"}, {"name": "web"}]
+    (tmp_path / "config.toml").write_text('[peers.codex]\ntrust = "observer"\n')
+    d.profile = {"kind": "agent"}
+    d._send_profile(fn)
+    assert "sessions" not in _cards(d)[-1]  # a session name can tell a project's name
+
+
+def test_the_directory_goes_out_again_only_when_it_changes(tmp_path, monkeypatch):
+    d = _daemon(tmp_path, monkeypatch)
+    _setup(tmp_path, monkeypatch, '[peers.codex]\ntrust = "owner"\n')
+    sessions.register(str(tmp_path / "ios"), pid=101)
+    d._directory_tick()
+    d._directory_tick()
+    assert len(_cards(d)) == 1
+    sessions.register(str(tmp_path / "web"), pid=102)
+    d._directory_tick()
+    assert [s["name"] for s in _cards(d)[-1]["sessions"]] == ["ios", "web"]
+
+
+def test_a_long_directory_fits_one_tox_message(tmp_path, monkeypatch):
+    from toxi import envelope
+    d = _daemon(tmp_path, monkeypatch)
+    _setup(tmp_path, monkeypatch, '[peers.codex]\ntrust = "collaborator"\n')
+    monkeypatch.setattr(sessions, "_alive", lambda pid: True)
+    monkeypatch.setenv("TOXI_SESSION_ABOUT", "x" * 120)
+    for i in range(16):
+        sessions.register(str(tmp_path / f"project-with-a-long-name-{i:02d}-" / ("y" * 30)), pid=200 + i)
+    fn = d.db.execute("SELECT friend_number FROM contacts WHERE alias='codex'").fetchone()[0]
+    d._send_profile(fn)
+    card = _cards(d)[-1]
+    assert len(envelope.encode(envelope.make_profile(card))) <= 1372
+    assert card["sessions"] and not any("about" in s for s in card["sessions"])  # the purposes go first
+
+
+def test_a_card_keeps_a_bounded_directory_and_a_session_sets_its_purpose(tmp_path, monkeypatch):
+    from toxi import envelope
+    card = envelope.clean_profile({"kind": "agent", "sessions": [{"name": "a" * 99, "about": "b" * 200},
+                                                                  {"about": "no name"}, "junk"] * 9})
+    assert len(card["sessions"]) <= 16 and len(card["sessions"][0]["name"]) == 64
+    assert len(card["sessions"][0]["about"]) == 120
+    _setup(tmp_path, monkeypatch, "")
+    _as(monkeypatch, 101)
+    sessions.register(str(tmp_path / "ios"), pid=101)
+    assert CliRunner().invoke(cli, ["about", "fixing the iOS build"]).exit_code == 0
+    assert sessions.register(str(tmp_path / "ios"), pid=101)["about"] == "fixing the iOS build"
+    _as(monkeypatch, 999)  # not an agent session
+    assert CliRunner().invoke(cli, ["about", "x"]).exit_code != 0

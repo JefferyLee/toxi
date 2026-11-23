@@ -14,7 +14,7 @@ Each message carries this information:
 
 The sender gets **delivery and read receipts** back. toxi reassembles long texts. Files travel over the same channel. A room sends one message to several peers.
 
-> Status: **0.7.1**. This release has Claude Code and Codex adapters and a headless adapter for bots. It runs on macOS and Linux. The design and acceptance log is in [docs/agent-comm-design.md](docs/agent-comm-design.md). The wire format is in [docs/protocol.md](docs/protocol.md).
+> Status: **0.7.1**. This release has adapters for Claude Code, Codex, Pi and OpenCode, and a headless adapter for bots. It runs on macOS and Linux. The design and acceptance log is in [docs/agent-comm-design.md](docs/agent-comm-design.md). The wire format is in [docs/protocol.md](docs/protocol.md).
 
 ## Install
 
@@ -95,7 +95,7 @@ For machine-readable output, add `--json` before any read command.
 - [docs/protocol.md](docs/protocol.md): envelope v2. It is normative for every implementation.
 - [docs/security.md](docs/security.md): what toxi protects, the threats and the rules for adapters.
 - [docs/install.md](docs/install.md) and the long-form [install & usage guide](docs/install-and-usage.md).
-- Adapters: [Claude Code](docs/adapters/claude-code.md) · [Codex](docs/adapters/codex.md) · [headless / bots](docs/adapters/headless.md) · [ToxiOS](docs/adapters/ios.md).
+- Adapters: [Claude Code](docs/adapters/claude-code.md) · [Codex](docs/adapters/codex.md) · [Pi](docs/adapters/pi.md) · [OpenCode](docs/adapters/opencode.md) · [headless / bots](docs/adapters/headless.md) · [ToxiOS](docs/adapters/ios.md).
 - [docs/agent-comm-design.md](docs/agent-comm-design.md): the design, the survey it came from, the decisions and the acceptance for each phase.
 
 ## Files

@@ -44,6 +44,7 @@
 | `room` | ≤64 | 本消息所属 room 的 id（§3.6）。 |
 | `room_msg` | ≤64 | 同一条 room 消息的所有扇出拷贝共享的 id。 |
 | `relayed` | `{name ≤64, ts}` | room 创建者用此字段转发 room 历史。此字段说明原消息的作者和时间（§3.6）。接收方把消息存为已读。接收方不提醒。 |
+| `state` | 一个任务状态（§3.8） | 与指向一条 `request` 的 `reply_to` 一起出现：这条 text 设置那条请求的任务状态，正文是状态说明。没有 `reply_to` 时，接收方忽略它。 |
 
 接收方必须做这些事：
 
@@ -67,7 +68,7 @@
 `data: {"ref_uuid", "kind": "read" | "done"}`。节点只向 `caps` 含 `receipt` 的对端发送回执。回执绝不唤醒任何人。
 
 - `read`：消息**已展示给人，或已送进 agent 的上下文**。发送方把 `ref_uuid` 标为 `read`。如果 ack 丢失，发送方同时把 `ref_uuid` 标为 `delivered`。
-- `done`：接收方**已处理**该消息。"已处理"有两种含义。第一种含义是接收方用指向该消息的 `reply_to` 做了回复。这种情况下回执是自动的。第二种含义是接收方显式地把消息标为已处理（`toxi done`、MCP `mark_handled`）。
+- `done`：接收方**已处理**该消息。"已处理"有两种含义。第一种含义是接收方用指向该消息的 `reply_to` 做了回复。这种情况下回执是自动的，除非这条回复把 `state` 设为 `working`、`input-required`、`auth-required`、`failed` 或 `rejected`（§3.8）。第二种含义是接收方显式地把消息标为已处理（`toxi done`、MCP `mark_handled`）。
 - 发送方收到 `done` 时，把消息标为 `handled`。`done` 蕴含 `read`。之后到来的 `read` 绝不把 `handled` 降级。
 - 如果节点不认识 `done`，它把收到的 `done` 当作 `read`。
 
@@ -77,7 +78,7 @@
 
 ```json
 {"kind":"agent","name":"castle-op","runtime":"grok","model":"grok-4","host":"grok-vm",
- "operator":"jeff","role":"Power-Up-Chess ops bot","proto":2,"caps":["profile","session","receipt","part"]}
+ "operator":"jeff","role":"Power-Up-Chess ops bot","proto":2,"caps":["profile","session","receipt","part","task"]}
 ```
 
 每个字符串 ≤120。`kind ∈ agent|human|service`。`caps` 最多 16 个字符串，每个字符串 ≤32。
@@ -85,6 +86,7 @@
 - 如果节点有卡片，它在**联系人每次连上时**发送卡片。卡片每次变更时，它也发送卡片。
 - 接收方为每个联系人保存最新的卡片。接收方用 `caps` 做能力门控。
 - 节点启动时必须用自身构建刷新 `proto` 和 `caps`。它绝不能从保存的卡片取这些值。
+- `sessions`（可选）：会话目录。它是最多 16 个 `{"name" ≤64, "about" ≤120}` 的列表：节点上正在运行的 agent 会话，以及每个会话的用途。对端在 text 开头写 `@name` 就能找到其中一个（§5）。节点只把它发给信任级别为 `collaborator` 或 `owner` 的对端，因为会话名可能透露项目名。名单变化时，节点重发卡片。卡片放不进一条 Tox 消息时，节点先去掉 `about` 字段，再去掉排在最后的会话。卡片里没有 `sessions`，表示没有会话在运行，或者节点不对这个对端公开会话。
 - 卡片内容是自述的。但卡片走端到端加密信道。因此只有持钥者能发出它。
 
 每个能力名说明节点**能接收并处理**什么。声明某项能力绝不要求节点发送对应字段。
@@ -156,6 +158,17 @@
 
 如果文本正文超过 64 KB，发送方按此方式把它作为 `.txt` 文件发送。发送方不把它作为 text 发送。
 
+### 3.8 任务状态
+
+一条 `request` 就是一个任务。任务 id 是这条请求的 `uuid`（多段请求用段 id）。状态采用 A2A 1.0 的名字：`submitted`、`working`、`input-required`、`auth-required`、`completed`、`failed`、`canceled`、`rejected`。终止状态是 `completed`、`failed`、`canceled` 和 `rejected`。
+
+- 一条 text 用 `state` 设置状态，并用 `reply_to` 指向那条请求。这条 text 的正文是状态说明。
+- 执行请求的一方可以设置 `working`、`input-required`、`auth-required`、`completed`、`failed` 和 `rejected`。发出请求的一方只能设置 `canceled`。
+- 接收方忽略这些 `state`：来自不该设置它的一方的、针对非请求消息的、针对已处于终止状态的任务的。这条 text 本身照常存储和显示。
+- 理解 `state` 的节点在 `caps` 里放上能力 `task`。发送方对所有对端都可以带 `state`：没有这项能力的对端忽略该字段，照常收到正文。
+- 没有 text 设置过状态时，状态由回执推出：`delivered` 为 `submitted`，`read` 为 `working`，`done` 为 `completed`，`bounce` 为 `rejected`。
+- 不带 `state` 的回复通过它的 `done` 回执（§3.3）设为 `completed`。带 `failed` 或 `rejected` 的回复不发 `done`：先到的 `done` 会把状态设为 `completed`。
+
 ## 4. 多段文本
 
 发送方：
@@ -198,7 +211,7 @@
 节点在本地路由回复。这是节点行为，不是线路格式。节点按以下顺序应用这些规则：
 
 1. 如果 text 以 `@name`、`@name@me` 或 `name@me` 开头，节点只把它投递给名为 `name` 的会话。`me` 是该节点卡片上的名字。名字是 `TOXI_SESSION`，否则是用户给 Claude Code 会话起的名字，否则是项目目录名。如果另一个在运行的会话已用了这个名字，节点加上 `-2`、`-3` 等后缀。那个会话停止后，本会话改用不带后缀的名字。会话改名后，在运行期间保留旧名字：`@旧名字` 和对它用旧名字发出的消息的回复仍然到达它，其他会话也不能拿走这个旧名字。匹配不区分大小写。
-2. 否则，节点使用自己的记录：每条消息由自己的哪个会话发出。这个记录绝不上线路。节点把收到的 `reply_to` 投递给那个会话，或投递给最近在同一线程里与该联系人对话的会话。这个关联从节点收到这条消息时起 30 分钟有效。
+2. 否则，节点使用自己的记录：每条消息由自己的哪个会话发出。这个记录绝不上线路。节点把收到的 `reply_to` 投递给那个会话；或者投递给取走了 `reply_to` 所指消息的会话（例如请求的发送方撤回这条请求）；或者投递给最近在同一线程里与该联系人对话的会话。这个关联从节点收到这条消息时起 30 分钟有效。
 3. 30 分钟之后，或没有这种关联时，节点按该对端配置的绑定投递。
 4. 如果没有在运行的会话匹配，或有多于一个会话匹配，节点不投递这条 text。节点把它标为已处理，并给发送方发一条 `bounce`，`reply_to` 指向这条 text。`collaborator` 或 `owner` 对端还会收到在运行的会话名单。发送方改正 `@name` 后重发。例外：节点不对 `ack`、`bounce`、转发的历史或房间消息退信；一个会话都没在运行时（无头身份）也不退信。不是 peer 的联系人发来的 text 留在公共收件箱。
 
@@ -232,7 +245,7 @@
 | 对端 | 它认识什么 | v2 节点对它怎么做 |
 |---|---|---|
 | v1（今天的 ToxiOS、toxi ≤0.3.0） | `text`（只有 body）、`ack`、`contact_share` | 不发送 `profile`、`receipt`、`room` 或 `file`。把长文本按 `[i/n] ` 分条发送。对端忽略多出的 text 字段。 |
-| v2 但缺某能力 | 它的 `caps` 声明的内容 | 按每项能力门控（`part`、`receipt`）。 |
+| v2 但缺某能力 | 它的 `caps` 声明的内容 | 按每项能力门控（`part`、`receipt`）。没有 `task` 的对端忽略 `state`，照常收到正文。 |
 | v2 完整 | 以上全部 | — |
 
 v2 节点必须无限期地与 v1 对端正常工作。v1 对端只失去新功能。v1 对端绝不丢失消息。

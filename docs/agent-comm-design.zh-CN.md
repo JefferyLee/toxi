@@ -540,6 +540,19 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 
 - 在 Ada 上（负载约 450），`toxi upgrade --all` 只重启成功了 4 个身份中的 1 个：`launchctl bootstrap` 在 `bootout` 之后马上运行时失败（"5: Input/output error"），另外 3 个 daemon 停了几分钟，直到手动运行 `service install`。`bootout` 在任务真正结束前就返回了。现在 `service install` 先等 launchd 里不再有这个任务（最多 10 秒），再最多尝试 5 次 `bootstrap`。在同样的负载下再跑一次，4 个身份都一次重启成功。
 
+### 0.8.0 更多运行时、空闲唤醒、任务状态、会话目录（2026-11-23，v0.8.0）
+
+- **Pi 适配器**（`toxi setup pi`）：一个 Pi 扩展。Pi 忙时在工具调用之间送达；空闲时只有该唤醒的消息才开始新回合，以自定义消息注入，不冒充用户。真实会话里空闲唤醒 2.0 秒得到回答。
+- **OpenCode 适配器**（`toxi setup opencode`，然后 `opencode service restart`）：一个 V2 server 插件。用 `session.synthetic` 注入；用 `session.execution.*` 事件判断运行状态（2.3.2 不发 `session.status`）。会话有活动即在线，12 小时没有活动下线。插件里写入 toxi 的完整路径和 `TOXI_HOME`，因为后台 server 没有 shell 的环境。空闲唤醒 4.5 秒。
+- **Codex 空闲唤醒**（`toxi codex-wake`，由 Codex hook 启动）：通过共享 app-server daemon 的控制 socket（WebSocket 上的 JSON-RPC），把消息作为 developer 消息注入线程，再开始一个没有用户输入的回合。空闲唤醒 6.4 秒。daemon 里的 Codex 会话按线程 id 登记（hook 的 `session_id`、MCP 调用的 `_meta.threadId`）。ChatGPT 桌面版用私有 server，不能唤醒（见 §13.10 之后的实验记录）。
+- **按会话 id 登记**：一个进程里可以有多个会话（OpenCode、Codex daemon）。登记键是"进程 + 会话 id"，一小时不续期即过期；`toxi session-end` 主动注销。
+- **A2A 任务状态**（§13.11）：text 新增可选字段 `state`，能力 `task`。回复请求时可以设 `input-required`、`rejected`、`failed` 等；发出方可以 `canceled`。注入的文字里每条 `request` 带上自己的 id，以前没有 id，自动 `done` 常常失效。回复问题不再算处理完。
+- **减少 token**（C7）：引导语每个会话第一次给全文，之后给精简版；MCP 返回去掉卡片和空字段，紧凑 JSON；长消息截断阈值 1,500 → 3,000 字，指针改指 MCP 工具。
+- **MCP 工具 18 个合并成 8 个**：`read_messages`、`send_message`、`wait_for_message`、`get_message`、`view_media`、`mark`、`get_status`、`overview`。旧名字不再有，会话重启后用新工具。
+- **会话目录**（C8）：卡片上带正在运行的会话名单，只发给 collaborator 和 owner；`toxi about "…"` 写一句用途。
+- **本身份会话之间的本地投递**（§13.12）：`send_message` 的 alias 写 `self`，正文以 `@会话名` 开头，消息不离开本机；会话之间互为 collaborator。
+- 线路格式只有向后兼容的新增（`state`、`task`、卡片上的 `sessions`）。ToxiOS 要跟进：显示任务状态和会话名单，在手机上撤回请求。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 > 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。
@@ -861,3 +874,98 @@ Jeff 要求把 OpenCode、Pi coding agent 和 Cursor 纳入。以下事实于 20
 4. **Cursor**：MCP，加上 `postToolUse` 和 `stop` hook。不支持空闲唤醒。`followup_message` 会作为用户消息到达，所以要在文字里标明发送方。`postToolUse` 分辨不出子 agent：只在 `stop` 时送达，或排除 `subagentStart` 报告的 id。命令行版只运行部分 hook（Cursor 工作人员，2026-11-11）。
 
 0.7 只做一件事：等适配器做好后，`doctor --all`、`upgrade --all` 和"跑旧代码的进程"检查会认得它们。
+
+### 13.11 任务模型对齐 A2A（2026-11-23，Jeff 已确认）
+
+决定 4："对齐 A2A，支持 A2A，但不限于 A2A"。本节只做第一步：借用 A2A 1.0 的任务状态，让发请求的一方知道请求进行到哪一步。A2A 的 HTTP 端点、Agent Card 和 JSON-RPC 绑定不在本节范围。以后的网关可以按 §13.11.6 的对照表，把 toxi 的请求映射成 A2A 任务。
+
+**13.11.1 现状和缺口**
+
+- 发送方只知道投递状态：`queued → sent → delivered → read → handled`。`handled` 来自 `done` 回执：接收方用 `reply_to` 回复了，或者显式标记了已处理。
+- 缺口：接收方不能说"我需要更多信息"、"我做不了"、"失败了"，发送方也不能说"不用做了"。这些现在只能写在正文里，程序读不出来，`handled` 也会把"回了一个问题"错当成"做完了"。
+- 没有办法按 id 查一个请求的当前状态和结果，只能翻聊天记录。
+
+**13.11.2 模型**
+
+- **任务就是一条 `request`。** 任务 id 是这条请求的 `uuid`；A2A 的 `contextId` 对应 toxi 的 `thread`。不在线路上新增"任务对象"。
+- **状态用 A2A 1.0 的名字**（线路上用小写加连字符）：`submitted`、`working`、`input-required`、`auth-required`、`completed`、`failed`、`canceled`、`rejected`。终止状态是 `completed`、`failed`、`canceled`、`rejected`。
+- **能从现有回执推出的状态不上线路**：
+  - `delivered` 记为 `submitted`；
+  - 消息送进了 agent 会话的上下文（`read` 回执）记为 `working`；
+  - `done` 回执记为 `completed`。
+- **只有回执表达不了的状态才上线路**：`input-required`、`auth-required`、`failed`、`rejected`、`canceled`，以及带说明的 `working`（进度）。
+
+**13.11.3 线路格式（协议 v2 的加法，向后兼容）**
+
+- `text` 的 data 新增可选字段 `state`。值是 §13.11.2 的状态名之一。只有当这条 text 带着 `reply_to`、并且 `reply_to` 指向一条 `request` 时，`state` 才有意义：它表示"这条消息把那个任务改成这个状态"。正文就是状态说明（A2A 的 `TaskStatus.message`）。
+- 接收方忽略未知字段（协议 §2），所以旧节点照常收到正文，只是看不到状态。
+- 新的能力标记 `task` 写进 `caps`，表示"我理解 `state`"。发送方不必据此改变发送方式，只用它来决定是否在界面上展示状态。
+- 谁可以设什么：
+  - 执行请求的一方：`working`、`input-required`、`auth-required`、`completed`、`failed`、`rejected`。
+  - 发出请求的一方：`canceled`。
+  - 节点丢弃方向不对的 `state`，也丢弃改动终止状态的 `state`。
+- 兼容 `done`：带 `reply_to` 的回复今天会自动发 `done` 回执。改为：只有 `state` 为空或 `completed` 时才自动发 `done`。所以旧的发送方仍然能收到 `handled`；回一个问题（`input-required`）不再被当作做完了。
+
+**13.11.4 agent 怎么用（尽量不增加 token）**
+
+- `send_message` 新增参数 `state`。回复一条请求时不填，就是 `completed`，和今天一样。回一个问题时填 `input-required`，做不了填 `rejected`，出错填 `failed`。发出请求的一方要撤回时，用 `reply_to` 指向自己的请求，填 `canceled`。
+- 新增一个工具 `get_request(id)`：返回请求原文、双方、线程、投递状态、任务状态、状态历史（每次改动的状态、时间、说明）、所有回复和附件。不带 id 时，列出本会话未结束的请求（收到的和发出的）。
+- CLI 对应：`toxi send --state …`，`toxi request [<id>]`。
+- 注入给 agent 的文字里，每条 `request` 都带上自己的 id（`request id …`），引导语也说明怎么回复、怎么设状态。以前注入的文字里没有 id，agent 填的 `reply_to` 常常是错的，自动 `done` 因此经常不生效。
+- 唤醒规则不变：状态总是随一条 text 到达，text 按现有规则唤醒。`canceled` 到达时按回答处理，会唤醒正在等待或空闲的执行方，让它停下。执行方节点把它送给当初接收这条请求的会话（节点记录了是哪个会话取走了请求），而不是按 §5 的回复规则去找发出方。
+
+**13.11.5 存储**
+
+- `messages` 表新增列 `state`（这条 text 带的状态）和 `task_state`、`task_at`（一条 request 的当前状态和时间）。
+- 再新增列 `taken_by`：取走这条 request 的会话名。会话把它标为已读时记下，供 `canceled` 的路由使用。
+- 收到带 `state` 的 text 时，节点更新被引用的 request 的 `task_state`。自己发出带 `state` 的回复时，也更新本地那条收到的 request。
+- 状态历史不另建表：它就是 `reply_to` 指向这条 request、并且带 `state` 的那些 text。
+
+**13.11.6 与 A2A 1.0 的对照（给以后的网关）**
+
+| A2A | toxi |
+|---|---|
+| `Task.id` | request 的 `uuid` |
+| `Task.contextId` | `thread` |
+| `TaskStatus.state` | `task_state`（或从回执推出） |
+| `TaskStatus.message` | 带 `state` 的那条 text |
+| `Message.taskId` | `reply_to` |
+| `Artifact` | `reply_to` 指向这条 request 的文件 |
+| Cancel Task | 发出方发 `state: canceled` |
+
+**13.11.7 不做的**
+
+- 截止时间、优先级、子任务。
+- 线路上的任务对象和流式进度事件。
+- A2A 网关（以后做，见决定 4 的"支持 A2A"）。
+
+**13.11.8 决定（Jeff，2026-11-23：四项都按推荐）**
+
+1. `working` 是否从 `read` 回执推出，而不是让 agent 显式发送？推荐：推出。agent 读到请求时就是在处理，省一次工具调用。
+2. `auth-required` 怎么用？A2A 的本意是"需要认证"。推荐：toxi 只接收和显示它，不主动使用；"要等我的人类决定"用 `input-required` 加 `needs_human`。
+3. `canceled` 是否唤醒执行方？推荐：唤醒。否则执行方会白干。
+4. 不带 `state` 的普通回复是否仍然算 `completed`？推荐：是，和今天的 `done` 行为一致。
+
+协议改动要同步到 `docs/protocol.md`（中英文），并给 ToxiOS 开一个工作项：显示任务状态，并允许在手机上撤回请求。
+
+### 13.12 决定 3：同一身份的会话之间本地投递（2026-11-23 分析）
+
+**场景**（2026-11-23 只读核实）：mac-studio 的 belinda 身份下同时运行 5 个会话（Click2wakeup、SwordFish、SF-iOS、Atelier、local-llm-3）。SF-iOS（Claude Code）和 SwordFish（Codex）要协作，但它们共用一个身份，toxi 不能给自己发消息。Ada 上 Claude Code 和 Codex 分用两个身份（`toxi`、`toxi-codex`），所以没有这个问题。
+
+**已有的路，及其缺点**
+
+- Claude Code 原生 SendMessage：只在 Claude Code 会话之间可用，到不了 Codex、Pi、OpenCode。
+- 每个 agent 一个身份（方案 B）：今天就能用，信任级别、回执、任务状态、唤醒全都现成。代价随身份数增长：每个身份一个 daemon 和服务；身份之间要逐对配对；手机（owner）要和每个身份配对，才能联系到它们；`[peers]` 配置要每个身份各写一份。
+- 共享文件或 git：没有唤醒，没有回执，也没有信任外框。
+
+**方案 A：本地投递**
+
+- 会话用 `send_message` 发给本身份的另一个会话：`alias` 写本身份的名字（或者 `self`），正文以 `@会话名` 开头。守护进程不走 Tox，直接把它存成一条收到的消息，按 `@会话名` 路由，然后照常唤醒、回执、跟踪任务状态。
+- 信任级别：本机会话之间按 `collaborator` 处理，不按 `owner`。一个被提示注入的会话不能借此冒充用户。
+- 会话目录（C8）已经能告诉每个会话本机还有哪些会话。
+- 成本：守护进程里要加一个代表"本身份"的伪联系人，以及发件和收件两条记录；大约一到两天。不改线路协议，ToxiOS 不用跟进。
+- 风险：同一台机器上的会话互相唤醒会形成循环。现有的唤醒上限（Claude Code 每个空闲期 20 次，Codex 每小时 20 次）可以挡住。
+
+**决定（Jeff，2026-11-23）**：做方案 A，已实现：`alias` 写 `self`；消息存成两条记录（发出的 `id` 和收到的 `id:in`），回执在本地即时生效；会话之间互为 collaborator；MCP `get_status` 在 `here` 下列出其他会话。
+
+**建议**：做方案 A。现在一个身份下跑多个会话已经是常态（mac-studio 有 5 个），方案 B 的配置成本会随会话数增长。方案 B 仍然适用于需要不同对外身份的场合，比如对外 bot。

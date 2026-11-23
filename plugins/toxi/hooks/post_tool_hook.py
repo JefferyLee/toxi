@@ -29,11 +29,12 @@ def main() -> None:
         return
     _inbox.looked()
     cwd = os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd")
-    text, uuids = _inbox.peek(toxi, cwd)
+    sid = _inbox.codex_sid(data)
+    text, uuids = _inbox.peek(toxi, cwd, sid)
     if text:
         _inbox.emit({"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                             "additionalContext": text}})
-    _inbox.mark_read(toxi, uuids)
+    _inbox.mark_read(toxi, uuids, sid)
 
 
 if __name__ == "__main__":

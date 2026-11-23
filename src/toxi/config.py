@@ -30,6 +30,10 @@ def daemon_log_level() -> str:
 
 
 TRUST_LEVELS = ("observer", "collaborator", "owner")
+# The other sessions of this identity, as a contact (design §13.12): messages
+# between them stay on this machine. They are collaborators of each other,
+# never `owner`: a session that a message misled must not pass for the user.
+SELF = "self"
 
 
 def peer_config() -> dict[str, dict]:
@@ -58,6 +62,12 @@ def peer_config() -> dict[str, dict]:
                       "trust": trust if trust in TRUST_LEVELS else "observer",
                       "key": str(spec.get("key") or "").strip().upper()[:64] or None}
     return out
+
+
+def routing_peers() -> dict[str, dict]:
+    """peer_config() plus `self`, the other sessions of this identity: the peers
+    whose messages are routed to a session. Not configurable."""
+    return dict(peer_config(), **{SELF: {"dirs": [], "trust": "collaborator", "key": None}})
 
 
 WAKE_KINDS = ("msg", "request", "relay")

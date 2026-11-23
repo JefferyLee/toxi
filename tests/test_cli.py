@@ -162,7 +162,7 @@ def test_setup_codex_installs_read_prompt_once(monkeypatch, tmp_path):
     first = CliRunner().invoke(cli, ["setup-codex"])
     assert "/prompts:toxi-read installed" in first.output
     text = prompt.read_text()
-    assert "get_unread" in text and "mark_read" in text and "$ARGUMENTS" in text
+    assert "read_messages" in text and "`mark`" in text and "$ARGUMENTS" in text
     assert "toxi unread" not in text  # Codex's shell lacks the MCP server's TOXI_HOME
 
     again = CliRunner().invoke(cli, ["setup-codex"])

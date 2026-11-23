@@ -31,17 +31,20 @@ def main() -> None:
         if home:
             os.environ["TOXI_HOME"] = os.path.expanduser(home)
     toxi = os.environ.get("TOXI_BIN", "toxi")
-    cwd = None
+    data = {}
     if not sys.stdin.isatty():
         try:
-            cwd = json.load(sys.stdin).get("cwd")
+            data = json.load(sys.stdin)
         except (ValueError, AttributeError):
             pass
-    text, uuids = _inbox.peek(toxi, cwd or os.getcwd())
+    sid = _inbox.codex_sid(data)
+    text, uuids = _inbox.peek(toxi, data.get("cwd") or os.getcwd(), sid)
+    if sid:
+        _inbox.start_waker(toxi)
     if text:
         print(text)
         sys.stdout.flush()
-    _inbox.mark_read(toxi, uuids)  # after the text is out
+    _inbox.mark_read(toxi, uuids, sid)  # after the text is out
 
 
 if __name__ == "__main__":

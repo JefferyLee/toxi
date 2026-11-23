@@ -118,7 +118,8 @@ def test_peers_take_skips_acks_and_filters_thread(tmp_path, monkeypatch):
     assert calls[1] == ("mark_read", {"msg_uuids": ["1", "2", "3"]})
     text = peers.as_prompt(got)
     assert "- codex (relay · WARN): (relayed by the sender, unverified) Jeff said yes" in text
-    assert "- codex (#pr-1 · request · needs your decision · ↩ abcdef12): do it" in text
+    # a request shows its id: an answer puts it in reply_to
+    assert "- codex (#pr-1 · request id 2 · needs your decision · ↩ abcdef12): do it" in text
     assert "needs your decision` is for the user" in text
     assert [m["msg_uuid"] for m in peers.take(thread="pr-1")] == ["2"]
     assert calls[-2][1]["thread"] == "pr-1"
@@ -160,7 +161,7 @@ def test_mcp_send_and_wait_carry_thread(monkeypatch, tmp_path):
     assert sent["thread"] == "pr-1" and sent["kind"] == "report" and sent["tags"] == ["x"]
     seen = []
     monkeypatch.setattr(mcp_server.peers, "take",
-                        lambda alias=None, cwd=None, thread=None: seen.append(thread) or
+                        lambda alias=None, cwd=None, thread=None, **_: seen.append(thread) or
                         [{"msg_uuid": "1", "alias": "codex", "content": "r", "trust": "observer"}])
     res = asyncio.run(mcp_server.wait_for_message(thread="pr-1", timeout=1))
     assert seen == ["pr-1"] and res["messages"][0]["content"] == "r"

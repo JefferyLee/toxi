@@ -55,12 +55,15 @@ def main() -> None:
             pass
     # Codex runs hooks in the session's dir. With --cwd only this session's
     # messages come, not those of every session on the identity.
-    text, uuids = _inbox.peek(toxi, data.get("cwd") or os.getcwd())
+    sid = _inbox.codex_sid(data)
+    if sid:
+        _inbox.start_waker(toxi)  # in case it stopped
+    text, uuids = _inbox.peek(toxi, data.get("cwd") or os.getcwd(), sid)
     if text and _inbox.blocked_before(data, uuids):
         text = ""  # the same messages again: they will not mark read, so do not loop
     if text:
         _inbox.emit({"decision": "block", "reason": text})
-    _inbox.mark_read(toxi, uuids)
+    _inbox.mark_read(toxi, uuids, sid)
     if text:
         return
 

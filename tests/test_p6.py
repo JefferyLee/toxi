@@ -186,4 +186,4 @@ def test_cli_archive_and_search(monkeypatch):
     assert calls[-1][1] == {"q": "ancient", "alias": "bob", "thread": None, "limit": 20, "archived": True}
     from toxi import mcp_server
     monkeypatch.setattr(mcp_server.client, "request", request)
-    assert mcp_server.search_messages("ancient", archived=True)["count"] == 1
+    assert mcp_server.read_messages(q="ancient", archived=True)["count"] == 1

@@ -107,8 +107,8 @@ App Store 审核风险。一个 agent 从模拟器跑完报 `done`，要求带�
    去中心化产品里唯一的集中化点；当一个 attack surface 看待。
 
 **标已读是显式动作，不是副作用。** toxi MCP server instructions 和
-Codex skill 都明确：`get_unread` 和 `read_history` 是只读 peek。
-`mark_read` 只在用户明确清未读、或者 agent 已经把待标的消息精确
+Codex skill 都明确：`read_messages` 是只读 peek。
+`mark` 只在用户明确清未读、或者 agent 已经把待标的消息精确
 relay 过之后才触发。`ship` 循环因为"用户问了个 summary"就批量
 mark-read 等于漂移了。
 

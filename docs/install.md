@@ -18,6 +18,8 @@ Then run one of these commands:
 
 - `toxi setup claude`. Then run `/plugin install toxi@toxi` in Claude Code, or let `install.sh --for claude` deploy the plugin.
 - `toxi setup codex`.
+- `toxi setup pi`. See [adapters/pi.md](adapters/pi.md).
+- `toxi setup opencode`. Then run `opencode service restart`. See [adapters/opencode.md](adapters/opencode.md).
 - `toxi setup headless`.
 
 ## Or: one line

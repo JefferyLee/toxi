@@ -44,6 +44,7 @@ Some input is not a JSON object with a `type`. An example is a plain message fro
 | `room` | ≤64 | The id of the room for this message (§3.6). |
 | `room_msg` | ≤64 | The id that all fan-out copies of one room message share. |
 | `relayed` | `{name ≤64, ts}` | The room creator relays room history with this field. The field tells who wrote the original message and when (§3.6). The receiver stores the message as read. The receiver does not notify. |
+| `state` | a task state (§3.8) | With `reply_to` set to a `request`: this text sets the task state of that request. The body is the status message. Without `reply_to`, the receiver ignores it. |
 
 The receiver must do these tasks:
 
@@ -67,7 +68,7 @@ The receiver must do these tasks:
 `data: {"ref_uuid", "kind": "read" | "done"}`. A node sends a receipt only to peers whose `caps` include `receipt`. A receipt never wakes anyone.
 
 - `read`: The message **was shown to a person or delivered into the context of an agent**. The sender marks `ref_uuid` as `read`. If the ack was lost, the sender also marks `ref_uuid` as `delivered`.
-- `done`: The receiver **handled** the message. "Handled" has two meanings. The first meaning is that the receiver answered with `reply_to` set to that message. In this case, the receipt is automatic. The second meaning is that the receiver marked the message as handled explicitly (`toxi done`, MCP `mark_handled`).
+- `done`: The receiver **handled** the message. "Handled" has two meanings. The first meaning is that the receiver answered with `reply_to` set to that message. In this case, the receipt is automatic, unless the answer sets `state` to `working`, `input-required`, `auth-required`, `failed` or `rejected` (§3.8). The second meaning is that the receiver marked the message as handled explicitly (`toxi done`, MCP `mark_handled`).
 - When the sender receives `done`, it marks the message as `handled`. `done` implies `read`. A later `read` never downgrades `handled`.
 - If a node does not know `done`, it treats an incoming `done` as `read`.
 
@@ -77,7 +78,7 @@ For a multi-part message, `ref_uuid` is the part id. The sender marks every part
 
 ```json
 {"kind":"agent","name":"castle-op","runtime":"grok","model":"grok-4","host":"grok-vm",
- "operator":"jeff","role":"Power-Up-Chess ops bot","proto":2,"caps":["profile","session","receipt","part"]}
+ "operator":"jeff","role":"Power-Up-Chess ops bot","proto":2,"caps":["profile","session","receipt","part","task"]}
 ```
 
 Each string is ≤120. `kind ∈ agent|human|service`. `caps` has ≤16 strings, and each string is ≤32.
@@ -85,6 +86,7 @@ Each string is ≤120. `kind ∈ agent|human|service`. `caps` has ≤16 strings,
 - If a node has a card, it sends the card **each time a contact connects**. It also sends the card each time the card changes.
 - The receiver keeps the latest card for each contact. The receiver uses `caps` for feature gating.
 - At start-up, a node must refresh `proto` and `caps` from its own build. It must not take these values from a saved card.
+- `sessions` (optional): the session directory. It is a list of at most 16 `{"name" ≤64, "about" ≤120}`: the agent sessions that run on the node now, and what each one is for. A peer starts a text with `@name` to reach one of them (§5). A node sends it only to peers that it trusts as `collaborator` or `owner`, because a session name can tell the name of a project. It sends the card again when the list changes. If the card does not fit in one Tox message, the node first drops the `about` fields, then the last sessions. A card without `sessions` means that no session runs, or that the node does not share them.
 - The card content is self-described. But the card travels inside the E2E channel. Thus only the key holder can send it.
 
 Each capability name tells what the node can **receive and act on**. A declared capability never obliges the node to send the related field.
@@ -156,6 +158,17 @@ Files have no `ack`.
 
 If a text body is over 64 KB, the sender sends it as a `.txt` file in this way. The sender does not send it as text.
 
+### 3.8 Task state
+
+A `request` is a task. The task id is the `uuid` of the request (the part id for a multi-part request). The states have the names of A2A 1.0: `submitted`, `working`, `input-required`, `auth-required`, `completed`, `failed`, `canceled`, `rejected`. The terminal states are `completed`, `failed`, `canceled` and `rejected`.
+
+- A text sets a state with `state`, and with `reply_to` set to the request. The body of the text is the status message.
+- The side that does the request may set `working`, `input-required`, `auth-required`, `completed`, `failed` and `rejected`. The side that sent the request may set only `canceled`.
+- The receiver ignores a `state` from the wrong side, a `state` for a message that is not a request, and a `state` for a task in a terminal state. It still stores and shows the text.
+- A node that understands `state` puts the cap `task` in its `caps`. A sender sends `state` to every peer: a peer without the cap ignores the field and gets the body.
+- Receipts give the state when no text set one: `delivered` gives `submitted`, `read` gives `working`, `done` gives `completed`, and a `bounce` gives `rejected`.
+- An answer without `state` sets `completed`, through its `done` receipt (§3.3). An answer with `failed` or `rejected` sends no `done`: a `done` that arrives first would set `completed`.
+
 ## 4. Multi-part texts
 
 Sender:
@@ -198,7 +211,7 @@ A periodic sweep sends un-acked `sent` texts again after `ack_timeout`. The swee
 A node routes replies locally. This is node behaviour, not wire format. The node applies these rules in this order:
 
 1. If a text starts with `@name`, `@name@me` or `name@me`, the node delivers it only to the session with the name `name`. `me` is the name on the card of the node. The name is `TOXI_SESSION`, or else the name that the user gave the Claude Code session, or else the name of the project directory. If another live session has that name, the node adds `-2`, `-3` and so on. When that other session stops, the session gets the name without the suffix. A session that was renamed keeps its earlier names while it runs: `@old-name` and replies to what it sent under the old name still reach it, and no other session can take the old name. The match is case-insensitive.
-2. Otherwise, the node uses its record of which of its own sessions sent each message. This record never goes on the wire. The node delivers an incoming `reply_to` to that session, or to the session that wrote last in the same thread with that contact. This link is valid for 30 minutes from the time the node received the message.
+2. Otherwise, the node uses its record of which of its own sessions sent each message. This record never goes on the wire. The node delivers an incoming `reply_to` to that session, or to the session that took the message that `reply_to` refers to (a request that its sender cancels), or to the session that wrote last in the same thread with that contact. This link is valid for 30 minutes from the time the node received the message.
 3. After 30 minutes, or if no such link exists, the node applies the configured binding of the peer.
 4. If no live session matches, or more than one session matches, the node does not deliver the text. It marks the text as handled and sends a `bounce` to the sender, with `reply_to` set to the text. A `collaborator` or `owner` peer also gets the names of the live sessions. The sender corrects the `@name` and sends the text again. Exceptions: the node does not bounce an `ack`, a `bounce`, relayed history or a room message, and it does not bounce when no session runs at all (a headless identity). Texts from contacts that are not peers stay in the shared inbox.
 
@@ -232,7 +245,7 @@ Non-friends cannot send at all. Tox enforces this. Keys, databases, config, card
 | peer | what it understands | what a v2 node does for it |
 |---|---|---|
 | v1 (ToxiOS today, toxi ≤0.3.0) | `text` (body only), `ack`, `contact_share` | It does not send `profile`, `receipt`, `room` or `file`. It sends long texts as `[i/n] ` pieces. The peer ignores extra text fields. |
-| v2 without a cap | what its `caps` declare | It applies feature gating for each cap (`part`, `receipt`). |
+| v2 without a cap | what its `caps` declare | It applies feature gating for each cap (`part`, `receipt`). Without `task`, the peer ignores `state` and gets the body. |
 | v2 full | everything above | — |
 
 A v2 node must continue to work with a v1 peer indefinitely. A v1 peer loses only the new features. A v1 peer never loses messages.

@@ -274,9 +274,12 @@ def _content(m: dict) -> str:
 @click.option("--needs-human", is_flag=True,
               help="Flag that a person, not the peer agent, must decide this.")
 @click.option("--tag", "tags", multiple=True, help="Free-form tag (repeatable), e.g. WARN.")
+@click.option("--state", type=click.Choice([s for s in envelope.STATES if s != "submitted"]),
+              default=None, help="With --reply-to a request: its new task state. None means "
+                                 "completed; its sender may only set canceled.")
 @click.pass_context
 def send(ctx, alias, message, file_path, session, wait_read, wait_handled, thread, reply_to, kind,
-         needs_human, tags):
+         needs_human, tags, state):
     """Send a message: toxi send <alias> <message> (use - to read from stdin), or a file
     with --file. Bodies over 64 KB go as a text file automatically."""
     if message == "-":
@@ -285,7 +288,7 @@ def send(ctx, alias, message, file_path, session, wait_read, wait_handled, threa
         raise click.UsageError("give a MESSAGE, or --file PATH, or both")
     meta = {"session": session or _default_session(), "session_dir": _default_session_dir(),
             "thread": thread, "reply_to": reply_to, "kind": kind, "needs_human": needs_human,
-            "tags": list(tags)}
+            "tags": list(tags), "state": state}
     if message is not None:
         res = _call("send_message", {"alias": alias, "body": message, **meta})
     if file_path:
@@ -324,6 +327,33 @@ def send(ctx, alias, message, file_path, session, wait_read, wait_handled, threa
             f" — not read within {wait_read}s" if wait_read > 0 else ""))
     else:
         click.echo(f"✓ {alias} is offline — queued{parts} (will send when they come online)")
+
+
+@cli.command(name="request")
+@click.argument("msg_id", required=False)
+@click.pass_context
+def request_cmd(ctx, msg_id):
+    """A request and its task state, with what answers it; with no id, the open requests."""
+    res = _call("get_request", {"msg_uuid": msg_id} if msg_id else {})
+    if _emit(ctx, res):
+        return
+    if not msg_id:
+        if not res["requests"]:
+            click.echo("No open requests.")
+        for r in res["requests"]:
+            way = f"to {r['alias']}" if r["direction"] == "out" else f"from {r['alias']}"
+            thread = f" #{r['thread']}" if r.get("thread") else ""
+            click.echo(f"{r['state']:<15} {r['msg_uuid']}  {way}{thread}: {peers.inline(r['content'], 70)}")
+        return
+    r = res["request"]
+    way = f"to {r['alias']}" if r["direction"] == "out" else f"from {r['alias']}"
+    click.echo(f"{r['state']} — request {r['msg_uuid']} {way}" + (f" #{r['thread']}" if r.get("thread") else ""))
+    click.echo(f"  {peers.inline(r['content'], 200)}")
+    for m in r["replies"]:
+        who = "→" if m["direction"] == "out" else "←"
+        tag = f" [{m['state']}]" if m.get("state") else ""
+        click.echo(f"  {who} {time.strftime('%m-%d %H:%M', time.localtime(m['created_at']))}{tag} "
+                   f"{peers.inline(m['content'], 160)}")
 
 
 def _emit_quiet(ctx) -> bool:
@@ -571,35 +601,67 @@ def read(ctx, alias, limit, oldest_first, thread, room):
 @click.option("--peek", is_flag=True,
               help='Mark nothing; print {"text", "msg_uuids"} as JSON. The caller hands the text '
                    "on, then runs `toxi mark-read` with the ids, so a message is never lost.")
+@click.option("--session-id", "sid", default=None,
+              help="The agent's own id of this session, when one process runs several (OpenCode, Cursor).")
+@click.option("--name", default=None, help="What the agent calls this session.")
 @click.pass_context
-def peer_inbox(ctx, alias, cwd, peek):
+def peer_inbox(ctx, alias, cwd, peek, sid, name):
     """Deliver unread peer-agent messages (marks them read). Used by Stop hooks."""
     if peek:
-        msgs = peers.pending(alias, cwd)
-        failed = peers.failed_sends(cwd) if cwd else []
-        shown = [m for m in msgs if m.get("kind", "msg") != "ack"]
-        text = peers.as_prompt(shown, failed) if shown or failed else ""
-        kinds = config.wake_kinds()
-        click.echo(json.dumps({"text": text, "msg_uuids": [m["msg_uuid"] for m in msgs + failed],
-                               "wake": any(peers.wakes(m, kinds) for m in shown)},
-                              ensure_ascii=False))
+        click.echo(json.dumps(peers.peek(alias, cwd, sid=sid, name=name), ensure_ascii=False))
         return
-    msgs = peers.take(alias, cwd)
+    msgs = peers.take(alias, cwd, sid=sid, name=name)
     if _emit(ctx, msgs):
         return
-    failed = peers.failed_sends(cwd) if cwd else []
+    failed = peers.failed_sends(cwd, sid) if cwd else []
     if failed:
         _call("mark_read", {"msg_uuids": [m["msg_uuid"] for m in failed]})
     if not (msgs or failed):
         return
-    click.echo(peers.as_prompt(msgs, failed))
+    click.echo(peers.as_prompt(msgs, failed, sessions.register(cwd, sid=sid, name=name) if cwd else None))
+
+
+@cli.command(name="about")
+@click.argument("text")
+@click.option("--session-id", "sid", default=None, help="As for peer-inbox, for multi-session agents.")
+def about_cmd(text, sid):
+    """Set what this agent session is for, in one line. Collaborator and owner
+    peers see it next to the session's name, so they know which @name to write to."""
+    me = sessions.set_about(text, sid)
+    if me is None:
+        raise click.ClickException("not run from an agent session (Claude Code, Codex, Pi, OpenCode)")
+    click.echo(f"✓ {me['name']}: {me.get('about', '(no purpose)')}")
+
+
+@cli.command(name="session-end", hidden=True)
+@click.option("--session-id", "sid", required=True)
+@click.option("--pid", type=int, default=None, help="The agent process (default: found from the parents).")
+def session_end(sid, pid):
+    """An adapter says one session of a multi-session agent ended."""
+    sessions.end(pid, sid)
+
+
+@cli.command(name="codex-wake", hidden=True)
+@click.option("--codex-home", required=True, help="CODEX_HOME of the daemon.")
+@click.option("--agent-pid", type=int, required=True, help="The Codex app-server daemon.")
+def codex_wake_cmd(codex_home, agent_pid):
+    """Wake idle Codex sessions when peer mail for them arrives. Started by the
+    Codex hooks; exits at once when one runs already."""
+    from . import codex_wake
+    codex_wake.run(codex_home, agent_pid)
 
 
 @cli.command(name="mark-read", hidden=True)
 @click.argument("msg_uuids", nargs=-1, required=True)
-def mark_read(msg_uuids):
+@click.option("--session-id", "sid", default=None,
+              help="The agent's own id of the session that took them, as for peer-inbox.")
+def mark_read(msg_uuids, sid):
     """Mark messages read (and send read receipts). For hooks, after `peer-inbox --peek`."""
-    res = _call("mark_read", {"msg_uuids": list(msg_uuids)})
+    me = sessions.current(sid=sid)  # the session that took them: a reply to one goes back to it
+    params = {"msg_uuids": list(msg_uuids)}
+    if me:
+        params.update(session=me["name"], session_dir=me["cwd"])
+    res = _call("mark_read", params)
     click.echo(f"✓ {res['marked']} message(s) marked read")
 
 
@@ -626,6 +688,8 @@ def peers_cmd(ctx):
             card += f" · operator {prof['operator']}"
         if prof.get("role"):
             card += f" · {prof['role']}"
+        if prof.get("sessions"):
+            card += " · sessions: " + ", ".join("@" + s["name"] for s in prof["sessions"])
         extra = f" · 📬 {r['unread']}" if r["unread"] else ""
         if not r["known"]:
             extra += " (not a contact yet)"
@@ -1919,6 +1983,95 @@ def setup_claude_cmd():
 def setup_codex_cmd(ctx):
     """Register the MCP server and plugin with Codex."""
     ctx.invoke(setup_codex)
+
+
+def _pi_dir() -> Path:
+    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+
+
+@setup.command("pi")
+@click.option("--remove", is_flag=True, help="Take the extension and the MCP server out of Pi again.")
+def setup_pi(remove):
+    """Wire toxi into the Pi coding agent: an extension that delivers peer
+    messages (and wakes an idle session), and the toxi MCP server for sending."""
+    ext_dir = _pi_dir() / "extensions" / "toxi"
+    mcp_p = _pi_dir() / "mcp.json"
+    try:
+        mcp = json.loads(mcp_p.read_text()) if mcp_p.exists() else {}
+    except ValueError:
+        raise click.ClickException(f"{mcp_p} is not valid JSON; it is left as it is. Fix it first.")
+    servers = mcp.setdefault("mcpServers", {})
+    if remove:
+        shutil.rmtree(ext_dir, ignore_errors=True)
+        servers.pop("toxi", None)
+    else:
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(__file__).parent / "adapters" / "pi" / "index.ts", ext_dir / "index.ts")
+        entry = {"command": "toxi", "args": ["mcp", "serve"], "exposure": "direct",
+                 "description": "toxi: messages with other machines, agents and the user's phone"}
+        if os.environ.get("TOXI_HOME"):
+            entry["env"] = {"TOXI_HOME": str(paths.config_dir())}
+        servers["toxi"] = entry
+    mcp_p.parent.mkdir(parents=True, exist_ok=True)
+    if mcp_p.exists():
+        shutil.copy2(mcp_p, mcp_p.with_name(mcp_p.name + ".bak-toxi"))
+    mcp_p.write_text(json.dumps(mcp, indent=2) + "\n")
+    if remove:
+        click.echo(f"✓ toxi removed from Pi ({ext_dir}, {mcp_p})")
+    else:
+        click.echo(f"✓ Pi extension: {ext_dir / 'index.ts'}")
+        click.echo(f"✓ Pi MCP server `toxi` (exposure direct): {mcp_p}")
+        click.echo("In a running Pi session, run /reload.")
+
+
+def _opencode_dir() -> Path:
+    return Path(os.environ.get("OPENCODE_CONFIG_DIR")
+                or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode")
+
+
+@setup.command("opencode")
+@click.option("--remove", is_flag=True, help="Take the plugin and the MCP server out of OpenCode again.")
+def setup_opencode(remove):
+    """Wire toxi into OpenCode (V2): a server plugin that delivers peer messages
+    (and wakes an idle session), and the toxi MCP server for sending."""
+    plugin_dir = _opencode_dir() / "plugins" / "toxi"
+    # The later name wins when both exist, as in OpenCode.
+    cfg_p = next((p for p in (_opencode_dir() / n for n in ("opencode.jsonc", "opencode.json")) if p.exists()),
+                 _opencode_dir() / "opencode.json")
+    try:
+        cfg = json.loads(cfg_p.read_text()) if cfg_p.exists() else {}
+    except ValueError:
+        raise click.ClickException(
+            f"{cfg_p} is not plain JSON (comments?); it is left as it is. Add this under mcp.servers by hand:\n"
+            + json.dumps({"toxi": {"type": "local", "command": ["toxi", "mcp", "serve"], "codemode": False}}))
+    servers = cfg.setdefault("mcp", {}).setdefault("servers", {})
+    if remove:
+        shutil.rmtree(plugin_dir, ignore_errors=True)
+        servers.pop("toxi", None)
+    else:
+        # The OpenCode server is a background service: it has neither the
+        # shell's PATH nor its TOXI_HOME, so both are written in.
+        toxi_bin = shutil.which("toxi") or "toxi"
+        text = (Path(__file__).parent / "adapters" / "opencode" / "index.ts").read_text()
+        text = text.replace('process.env.TOXI_BIN || "toxi"', f"process.env.TOXI_BIN || {json.dumps(toxi_bin)}")
+        entry = {"type": "local", "command": [toxi_bin, "mcp", "serve"], "codemode": False}
+        if os.environ.get("TOXI_HOME"):
+            home = str(paths.config_dir())
+            text = text.replace("process.env.TOXI_HOME ||", f"process.env.TOXI_HOME || {json.dumps(home)} ||")
+            entry["environment"] = {"TOXI_HOME": home}
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "index.ts").write_text(text)
+        servers["toxi"] = entry
+    cfg_p.parent.mkdir(parents=True, exist_ok=True)
+    if cfg_p.exists():
+        shutil.copy2(cfg_p, cfg_p.with_name(cfg_p.name + ".bak-toxi"))
+    cfg_p.write_text(json.dumps(cfg, indent=2) + "\n")
+    if remove:
+        click.echo(f"✓ toxi removed from OpenCode ({plugin_dir}, {cfg_p})")
+    else:
+        click.echo(f"✓ OpenCode plugin: {plugin_dir / 'index.ts'}")
+        click.echo(f"✓ OpenCode MCP server `toxi`: {cfg_p}")
+        click.echo("Restart the OpenCode server to load the plugin: opencode service restart")
 
 
 @setup.command("headless")

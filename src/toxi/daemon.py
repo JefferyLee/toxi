@@ -205,11 +205,15 @@ def _harden_permissions() -> None:
 # last wrote in the same thread with that contact. Local project dirs only.
 def _route_sql(col: str) -> str:
     """`col` of the outgoing message an incoming one answers (by reply_to, else
-    the latest in its thread to that contact)."""
+    the latest in its thread to that contact). A reply to a message of theirs
+    (a request they cancel) goes to the session that took that message."""
+    took = {"from_dir": "taken_dir", "from_session": "taken_by"}[col]
     return (
         "CASE WHEN m.direction='in' THEN COALESCE("
         f"(SELECT o.{col} FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
         " AND m.reply_to IS NOT NULL AND (o.msg_uuid=m.reply_to OR o.part_id=m.reply_to) LIMIT 1),"
+        f"(SELECT i.{took} FROM messages i WHERE i.direction='in' AND i.taken_dir IS NOT NULL "
+        " AND m.reply_to IS NOT NULL AND (i.msg_uuid=m.reply_to OR i.part_id=m.reply_to) LIMIT 1),"
         f"(SELECT o.{col} FROM messages o WHERE o.direction='out' AND o.from_dir IS NOT NULL "
         " AND m.thread IS NOT NULL AND o.thread=m.thread AND o.contact_id=m.contact_id "
         " ORDER BY o.created_at DESC, o.id DESC LIMIT 1)) END"
@@ -307,6 +311,26 @@ def _caps(row) -> list:
         return list((json.loads(row["profile_json"]) or {}).get("caps") or []) if row["profile_json"] else []
     except (ValueError, KeyError, IndexError, TypeError):
         return []
+
+
+_LOCAL = ":in"  # the received copy of a message between two sessions of this identity
+
+
+def _twin(uid: str) -> str:
+    """The other copy of a local message: sent `id` ↔ received `id:in`."""
+    return uid[:-len(_LOCAL)] if uid.endswith(_LOCAL) else uid + _LOCAL
+
+
+def _task_state(m: dict) -> str:
+    """The A2A state of a request (design §13.11): the one a text set, else
+    what the receipts tell."""
+    if m.get("task_state"):
+        return m["task_state"]
+    if m.get("handled_at"):
+        return "completed"
+    if m.get("direction") == "out":
+        return {"failed": "failed", "bounced": "rejected", "read": "working"}.get(m.get("status"), "submitted")
+    return "working" if m.get("read_at") else "submitted"
 
 
 def _row_payload(row) -> bytes:
@@ -425,6 +449,7 @@ class Daemon:
             "send_file": self._send_file,
             "rename_contact": self._rename_contact,
             "mark_handled": self._mark_handled,
+            "get_request": self._get_request,
             "archive_messages": self._archive_messages,
             "archive_status": self._archive_status,
             "search_messages": self._search_messages,
@@ -780,7 +805,13 @@ class Daemon:
         (design §4.5: acknowledgements never wake anyone) or relayed room
         history (old news, stored as already read); always tell subscribers.
         A peer text that no running session can take goes back (`_bounce`).
-        A bounce of one of our texts marks that text `bounced`."""
+        A bounce of one of our texts marks that text `bounced`. A text that sets
+        a task state records it on its request (design §13.11)."""
+        if meta.get("state"):
+            c = self.db.execute("SELECT id FROM contacts WHERE alias=?", (alias,)).fetchone()
+            req = c and self._task_request(c["id"], meta, incoming=True)
+            if req:
+                self._set_task_state(req, [msg_uuid], meta["state"])
         if meta.get("kind") == "bounce" and meta.get("reply_to"):
             ref = meta["reply_to"]
             self.db.execute(
@@ -802,7 +833,8 @@ class Daemon:
         Never for acks, bounces or relayed history, and not when no session
         runs at all (a headless identity, or sessions not started yet)."""
         spec = config.peer_config().get(alias)
-        if spec is None or meta.get("kind") in ("ack", "bounce") or meta.get("relayed"):
+        if spec is None or alias == config.SELF or meta.get("kind") in ("ack", "bounce") \
+                or meta.get("relayed"):
             return False
         live = sessions.live()
         if not live:
@@ -847,8 +879,10 @@ class Daemon:
         data = env.get("data", {})
         ref = str(data.get("ref_uuid") or "")[:64]
         kind = "done" if data.get("kind") == "done" else "read"
-        if not ref:
-            return
+        if ref:
+            self._apply_receipt(ref, kind, self._alias_of(friend_number))
+
+    def _apply_receipt(self, ref: str, kind: str, alias) -> None:
         now = int(time.time())
         if kind == "done":
             cur = self.db.execute(
@@ -857,6 +891,10 @@ class Daemon:
                 "WHERE direction='out' AND handled_at IS NULL AND (msg_uuid=? OR part_id=?)",
                 (now, now, now, ref, ref),
             )
+            self.db.execute(
+                "UPDATE messages SET task_state='completed', task_at=? WHERE direction='out' "
+                "AND kind='request' AND (msg_uuid=? OR part_id=?) AND (task_state IS NULL OR task_state "
+                f"NOT IN {envelope.TERMINAL})", (now, ref, ref))
         else:
             cur = self.db.execute(
                 "UPDATE messages SET status='read', read_receipt_at=?, "
@@ -867,7 +905,6 @@ class Daemon:
             )
         self.db.commit()
         if cur.rowcount:
-            alias = self._alias_of(friend_number)
             log.info("%s receipt for %s from %s", kind, ref[:8], alias)
             self._emit("receipt", {"msg_uuid": ref, "alias": alias, "kind": kind}, alias)
 
@@ -878,6 +915,12 @@ class Daemon:
         accepted it, so a sender that is offline (or a daemon restart in
         between) gets it later from _flush_receipts. `done` supersedes `read`.
         """
+        if not uuids:
+            return
+        local = [u for u in uuids if u.endswith(_LOCAL)]  # our own sessions: no Tox, no wait
+        for u in local:
+            self._apply_receipt(_twin(u), kind, config.SELF)
+        uuids = [u for u in uuids if not u.endswith(_LOCAL)]
         if not uuids:
             return
         qs = ",".join("?" * len(uuids))
@@ -914,7 +957,7 @@ class Daemon:
         self.db.commit()
         return sent
 
-    def _mark_handled(self, params: dict) -> dict:
+    def _mark_handled(self, params: dict, receipt: bool = True) -> dict:
         """We (or our agent) dealt with these incoming messages: mark them read and
         handled locally and send `done` receipts (design: processing receipt)."""
         now = int(time.time())
@@ -927,8 +970,13 @@ class Daemon:
                 "WHERE msg_uuid=? AND direction='in' AND handled_at IS NULL", (now, now, u))
             if cur.rowcount:
                 done.append(u)
+                self.db.execute(
+                    "UPDATE messages SET task_state='completed', task_at=? WHERE msg_uuid=? AND "
+                    f"kind='request' AND (task_state IS NULL OR task_state NOT IN {envelope.TERMINAL})",
+                    (now, u))
         self.db.commit()
-        self._send_receipts(done, "done")
+        if receipt:
+            self._send_receipts(done, "done")
         return {"handled": len(done)}
 
     def _auto_done(self, contact_id: int, meta: dict) -> None:
@@ -937,11 +985,127 @@ class Daemon:
         reply_to = meta.get("reply_to")
         if not reply_to or meta.get("kind") == "ack":
             return
+        state = meta.get("state")
+        if state in ("working", "input-required", "auth-required"):
+            return  # a step on the way, or a question back: the request is still to do
         row = self.db.execute(
             "SELECT msg_uuid FROM messages WHERE msg_uuid=? AND contact_id=? AND direction='in' "
             "AND handled_at IS NULL", (str(reply_to)[:64], contact_id)).fetchone()
         if row:
-            self._mark_handled({"msg_uuids": [row["msg_uuid"]]})
+            # `done` means completed: a request that failed or was rejected ends with
+            # its text alone, which a `done` arriving first must not overtake.
+            self._mark_handled({"msg_uuids": [row["msg_uuid"]]}, receipt=state in (None, "completed"))
+
+    # --- local delivery between the sessions of this identity (design §13.12) ---
+    def _self_contact(self) -> int:
+        """The contact that stands for our own other sessions."""
+        row = self.db.execute("SELECT id FROM contacts WHERE alias=?", (config.SELF,)).fetchone()
+        if row:
+            return row["id"]
+        self.db.execute("INSERT INTO contacts (public_key, alias, added_at, is_online) VALUES (?, ?, ?, 1)",
+                        (self.tox.self_get_address_hex()[:64], config.SELF, int(time.time())))
+        self.db.commit()
+        return self._self_contact()
+
+    def _send_local(self, params: dict, raw: str) -> dict:
+        """A text to another session of this identity: no Tox. It is stored twice,
+        as sent (`id`) and as received (`id:in`), and then goes on as any text
+        that arrives: routed by its `@name`, woken, receipted, its task state kept."""
+        body = params.get("body", "")
+        if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+            raise RpcError("TOO_LARGE", f"a local message is at most {MAX_BODY_BYTES} bytes")
+        session = str(params.get("session") or "").strip()[:64] or None
+        live = sessions.live()
+        name = peers.target({"content": body})
+        if not name and "@" in raw:  # `name@self`, as an agent writes a sender's label
+            name = raw.rsplit("@", 1)[0].strip().lower()
+            body = f"@{name} {body}"
+        others = [s["name"] for s in live if s["name"].lower() != (session or "").lower()]
+        if not name or sessions.resolve(name, live) not in [n.lower() for n in others]:
+            raise RpcError("NO_SESSION", "start the body with @ and the name of another session "
+                           f"of this identity: {', '.join(others) or 'none runs now'}")
+        cid = self._self_contact()
+        meta = envelope.clean_meta(params)
+        req = self._task_request(cid, meta, incoming=False)
+        if params.get("state") and req is None:
+            raise RpcError("BAD_STATE", f"state {params.get('state')!r} needs reply_to an open request")
+        uid, now = str(_uuid.uuid4()), int(time.time())
+        # The copy for the other side answers its twin: that is the row it has.
+        theirs = dict(meta, reply_to=_twin(meta["reply_to"])) if meta.get("reply_to") else meta
+        for u, direction, m, status in ((uid, "out", meta, "delivered"), (uid + _LOCAL, "in", theirs, "received")):
+            self.db.execute(
+                "INSERT INTO messages (msg_uuid, contact_id, direction, msg_type, content, created_at, "
+                "received_at, delivered_at, sent_at, status, from_session, from_dir, "
+                "thread, reply_to, kind, needs_human, tags, room_id, room_msg_id, relayed) "
+                "VALUES (?, ?, ?, 'text', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (u, cid, direction, body, now, now, now, now, status, session,
+                 str(params.get("session_dir") or "")[:512] or None if direction == "out" else None,
+                 *_meta_values(m)))
+        self.db.commit()
+        if req:
+            self._set_task_state(req, [uid], meta["state"])
+        self._auto_done(cid, meta)
+        self._stored(uid + _LOCAL, config.SELF, theirs)
+        log.info("local %s from %s to @%s", uid[:8], session, name)
+        return {"msg_uuid": uid, "status": "delivered", "local": True}
+
+    # --- task state (design §13.11) ---
+    def _task_request(self, contact_id: int, meta: dict, incoming: bool):
+        """The request (of this contact) whose task state this text sets, or None
+        when the state does not apply: no such request, the wrong side (only the
+        side that asked may cancel; only the side that does it sets the other
+        states), or the task has already ended."""
+        state, ref = meta.get("state"), meta.get("reply_to")
+        if not state or not ref:
+            return None
+        req = self.db.execute(
+            "SELECT msg_uuid, part_id, direction, task_state FROM messages WHERE contact_id=? "
+            "AND kind='request' AND (msg_uuid=? OR part_id=?) ORDER BY id LIMIT 1",
+            (contact_id, ref, ref)).fetchone()
+        if req is None or req["task_state"] in envelope.TERMINAL:
+            return None
+        does_it = (req["direction"] == "out") == incoming  # the writer of this text does the request
+        return req if state in (envelope.WORKER_STATES if does_it else ("canceled",)) else None
+
+    def _set_task_state(self, req, msg_uuids: list, state: str) -> None:
+        key = req["part_id"] or req["msg_uuid"]
+        self.db.execute("UPDATE messages SET task_state=?, task_at=? WHERE msg_uuid=? OR part_id=?",
+                        (state, int(time.time()), key, key))
+        qs = ",".join("?" * len(msg_uuids))
+        self.db.execute(f"UPDATE messages SET state=? WHERE msg_uuid IN ({qs})", (state, *msg_uuids))
+        self.db.commit()
+
+    def _get_request(self, params: dict) -> dict:
+        """A request and its task (design §13.11): the request with its state,
+        and the texts and files that answer it. Without an id: the open ones."""
+        rid = str(params.get("msg_uuid") or "").strip()[:64]
+        cols = ("SELECT m.msg_uuid, m.part_id, c.alias, m.direction, m.content, m.created_at, "
+                "m.status, m.read_at, m.handled_at, m.task_state, m.task_at, m.thread, "
+                "m.from_session, m.taken_by, m.needs_human FROM messages m "
+                "JOIN contacts c ON c.id=m.contact_id ")
+        if not rid:
+            rows = self.db.execute(
+                cols + "WHERE m.kind='request' AND (m.part_i IS NULL OR m.part_i=1) "
+                f"AND (m.task_state IS NULL OR m.task_state NOT IN {envelope.TERMINAL}) "
+                "AND m.handled_at IS NULL AND m.status NOT IN ('failed','bounced') "
+                "AND m.created_at > ? ORDER BY m.created_at DESC LIMIT ?",
+                (int(time.time()) - 30 * 86400, int(params.get("limit", 50)))).fetchall()
+            return {"requests": [dict(r, state=_task_state(dict(r)),
+                                      msg_uuid=r["part_id"] or r["msg_uuid"]) for r in rows]}
+        req = self.db.execute(cols + "WHERE m.kind='request' AND (m.msg_uuid=? OR m.part_id=?) "
+                              "ORDER BY m.part_i", (rid, rid)).fetchall()
+        if not req:
+            raise RpcError("NOT_FOUND", f"no request {rid!r}")
+        key = req[0]["part_id"] or req[0]["msg_uuid"]
+        out = dict(req[0], msg_uuid=key, content="".join(r["content"] or "" for r in req))
+        out["state"] = _task_state(out)
+        replies = self.db.execute(
+            "SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
+            "m.state, m.from_session, m.part_id, m.part_i FROM messages m "
+            "JOIN contacts c ON c.id=m.contact_id WHERE m.reply_to=? ORDER BY m.created_at, m.id",
+            (key,)).fetchall()
+        out["replies"] = _merge_parts([dict(r) for r in replies])
+        return {"request": out}
 
     # --- event stream for subscribers (design §4.3) ---
     def _announce(self, msg_uuid: str, alias: str, wake: bool = True) -> None:
@@ -1080,16 +1244,46 @@ class Daemon:
                 self._flush_receipts(c["id"], friend_number)
 
     def _send_profile(self, friend_number: int) -> bool:
-        if not self.profile:
+        """Our card. A collaborator or owner peer also gets the session directory:
+        the names of the sessions running here, so it can address one (C8).
+        Others do not: a session name can tell a project's name."""
+        prof = dict(self.profile)
+        spec = config.peer_config().get(self._alias_of(friend_number) or "") or {}
+        directory = self._directory() if spec.get("trust") in ("collaborator", "owner") else []
+        if directory:
+            prof["sessions"] = directory
+        if not prof:
             return False
-        return self.tox.friend_send_message(
-            friend_number, envelope.encode(envelope.make_profile(self.profile)))
+        payload = envelope.encode(envelope.make_profile(prof))
+        while len(payload) > MAX_MESSAGE_LENGTH and prof.get("sessions"):  # one Tox message
+            if any("about" in s for s in prof["sessions"]):
+                prof["sessions"] = [{"name": s["name"]} for s in prof["sessions"]]
+            else:
+                prof["sessions"] = prof["sessions"][:-1]
+            payload = envelope.encode(envelope.make_profile(prof))
+        return self.tox.friend_send_message(friend_number, payload)
 
-    def _broadcast_profile(self) -> int:
+    def _directory(self) -> list:
+        """The sessions running on this identity: [{name, about?}]."""
+        return envelope.clean_sessions(
+            [{"name": s["name"], "about": s.get("about")} for s in sessions.live()])
+
+    def _broadcast_profile(self, sharing_only: bool = False) -> int:
         rows = self.db.execute(
-            "SELECT friend_number FROM contacts WHERE is_online=1 AND friend_number IS NOT NULL"
+            "SELECT friend_number, alias FROM contacts WHERE is_online=1 AND friend_number IS NOT NULL"
         ).fetchall()
+        if sharing_only:  # only the peers that get the session directory
+            cfg = config.peer_config()
+            rows = [r for r in rows if (cfg.get(r["alias"]) or {}).get("trust") in ("collaborator", "owner")]
         return sum(1 for r in rows if self._send_profile(r["friend_number"]))
+
+    def _directory_tick(self) -> None:
+        """A session started, ended or changed its name: tell the peers that get
+        the session directory."""
+        key = json.dumps(self._directory())
+        if key != getattr(self, "_directory_sent", None):
+            self._directory_sent = key
+            self._broadcast_profile(sharing_only=True)
 
     def _load_profile(self) -> dict:
         p = paths.profile_path()
@@ -1822,6 +2016,7 @@ class Daemon:
                 if time.time() - self._last_sweep > SWEEP_INTERVAL:
                     self._retry_sweep()
                     self._archive_tick()
+                    self._directory_tick()
                     self._last_sweep = time.time()
                 timeout = min(self.tox.iteration_interval() / 1000, 0.1)
                 for key, events in self._sel.select(timeout):
@@ -2048,7 +2243,10 @@ class Daemon:
         return {"requests": [dict(r) for r in rows]}
 
     def _send_message(self, params: dict) -> dict:
-        alias = self._send_alias(params.get("alias", "").strip())
+        raw = params.get("alias", "").strip()
+        if raw.lower() == config.SELF or raw.lower().endswith("@" + config.SELF):
+            return self._send_local(params, raw)
+        alias = self._send_alias(raw)
         body = params.get("body", "")
         contact = self.db.execute(
             "SELECT id, friend_number, is_online, profile_json FROM contacts WHERE alias=?",
@@ -2072,6 +2270,11 @@ class Daemon:
         session = str(params.get("session") or "").strip()[:64] or None
         from_dir = str(params.get("session_dir") or "").strip()[:512] or None
         meta = envelope.clean_meta(params)
+        req = self._task_request(contact["id"], meta, incoming=False)
+        if params.get("state") and req is None:
+            raise RpcError("BAD_STATE", f"state {params.get('state')!r} needs reply_to one of {alias}'s "
+                           "requests that is still open. The side that asked may only set 'canceled'; "
+                           "the side that does it sets " + ", ".join(envelope.WORKER_STATES) + ".")
         fn = contact["friend_number"]
         # Presence straight from toxcore: the DB flag can lag behind a dropped link.
         online = fn is not None and self.tox.friend_get_connection_status(fn) != 0
@@ -2112,6 +2315,8 @@ class Daemon:
             self._emit("send.failed", {"msg_uuid": part_id or uuids[0], "alias": alias,
                                        "reason": "toxcore refused the message; queued for retry"},
                        alias)
+        if req:
+            self._set_task_state(req, uuids, meta["state"])
         self._auto_done(contact["id"], meta)
         res = {"msg_uuid": part_id or uuids[0], "status": "sent" if online else "queued"}
         if len(uuids) > 1:
@@ -2151,7 +2356,7 @@ class Daemon:
         query = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                  "m.received_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                  "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                 "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
+                 "m.relayed, m.state, m.task_state, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                  f"{base}{where}{' AND' if conds else ' WHERE'} {key} IN ({qs}) "
                  "ORDER BY m.created_at DESC, m.id DESC")
         rows = [_with_profile(r) for r in self.db.execute(query, (*args, *keys)).fetchall()]
@@ -2173,7 +2378,7 @@ class Daemon:
         cols = ("SELECT m.msg_uuid, c.alias, m.direction, m.msg_type, m.content, m.created_at, "
                 "m.received_at, m.sent_at, m.last_attempt_at, m.delivered_at, m.read_receipt_at, m.status, m.read_at, m.handled_at, m.from_session, m.part_id, m.part_i, m.part_n, "
                 "m.thread, m.reply_to, m.kind, m.needs_human, m.tags, m.room_id, m.room_msg_id, "
-                "m.relayed, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
+                "m.relayed, m.state, m.task_state, r.name AS room_name, c.profile_json, " + _ROUTE_SQL +
                 "FROM messages m "
                 "JOIN contacts c ON c.id=m.contact_id LEFT JOIN rooms r ON r.room_id=m.room_id ")
         rows = self.db.execute(cols + "WHERE m.msg_uuid=?", (params.get("msg_uuid"),)).fetchall()
@@ -2186,12 +2391,15 @@ class Daemon:
     def _mark_read(self, params: dict) -> dict:
         now = int(time.time())
         uuids = params.get("msg_uuids", [])
+        # The session that took them: a reply to one of them goes back to it.
+        taker = str(params.get("session") or "").strip()[:64] or None
+        taker_dir = str(params.get("session_dir") or "").strip()[:512] or None
         marked = []
         for u in uuids:
             cur = self.db.execute(
-                "UPDATE messages SET read_at=?, status='read' "
+                "UPDATE messages SET read_at=?, status='read', taken_by=?, taken_dir=? "
                 "WHERE msg_uuid=? AND direction='in' AND read_at IS NULL",
-                (now, u),
+                (now, taker, taker_dir if taker else None, u),
             )
             if cur.rowcount:
                 marked.append(u)
@@ -2304,7 +2512,8 @@ class Daemon:
             "SUM(CASE WHEN m.needs_human=1 AND m.direction='in' AND m.handled_at IS NULL "
             "THEN 1 ELSE 0 END) AS needs_human, "
             "SUM(CASE WHEN m.direction='out' AND m.kind='request' AND m.status NOT IN "
-            "('handled','failed','bounced') THEN 1 ELSE 0 END) AS open_requests, "
+            "('handled','failed','bounced') AND (m.task_state IS NULL OR m.task_state NOT IN "
+            f"{envelope.TERMINAL}) THEN 1 ELSE 0 END) AS open_requests, "
             "SUM(CASE WHEN m.direction='out' AND m.kind='request' AND m.status IN "
             "('failed','bounced') THEN 1 ELSE 0 END) AS failed_requests "
             "FROM messages m JOIN contacts c ON c.id=m.contact_id WHERE " + " AND ".join(conds) +

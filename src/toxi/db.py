@@ -109,7 +109,12 @@ _ADDED_COLUMNS = {
                  ("receipt_pending", "TEXT"),         # incoming: receipt kind still owed to the sender
                  ("relayed", "TEXT"),                 # JSON {name, ts}: room history relayed by the creator
                  ("sent_at", "INTEGER"),              # outgoing text: first hand-off since the peer came online
-                 ("notified_at", "INTEGER")],         # outgoing: when the sending session was told it failed
+                 ("notified_at", "INTEGER"),          # outgoing: when the sending session was told it failed
+                 ("state", "TEXT"),                   # task state this text sets on its reply_to request (§13.11)
+                 ("task_state", "TEXT"),              # a request: its current task state, when a text set it
+                 ("task_at", "INTEGER"),
+                 ("taken_by", "TEXT"),                # incoming: the session that took it (read it), and its dir:
+                 ("taken_dir", "TEXT")],              # a reply to it goes back there
     "room_members": [("history_sent", "INTEGER")],   # creator: when this member got the room's history
 }
 

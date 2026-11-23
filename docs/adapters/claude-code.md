@@ -30,7 +30,7 @@ A peer with `trust = "owner"` is your own device, for example ToxiOS on your pho
 
 ## Send
 
-The MCP tools for sending are `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`, `send_file` and `send_room_message`. The plugin fills in the session label automatically with the session name. The tool annotations mark these tools as non-destructive, so auto mode does not block them. If you use a strict allowlist, allow `mcp__plugin_toxi_toxi__send_message` in the permissions.
+The MCP tool for sending is `send_message(alias | room, body, file?, thread?, reply_to?, kind?, needs_human?, tags?, state?, wait_read?, wait_handled?)`. It sends a text, a file or both, to a contact or to a room. The plugin fills in the session label automatically with the session name. The tool annotations mark these tools as non-destructive, so auto mode does not block them. If you use a strict allowlist, allow `mcp__plugin_toxi_toxi__send_message` in the permissions.
 
 ## Identity
 
@@ -45,7 +45,7 @@ Run `toxi profile set --kind agent --runtime claude-code --operator <you> --role
 - `/toxi:read`: reads the messages of this session and marks them as read, shows images and plays voice messages. `/toxi:read --all` also reads the shared inbox.
 - `/toxi:send-terminal`.
 - `toxi statusline` in the bottom bar.
-- The MCP tools `get_unread`, `read_history`, `get_threads`, `get_message_status`, `search_messages`, `get_peers`, `list_contacts`, `list_rooms`, `read_room`, `view_media`, `mark_read`, `mark_handled` and `get_status`.
+- The MCP tools `read_messages`, `get_message`, `overview`, `view_media`, `mark` and `get_status`.
 
 ## Install / update
 

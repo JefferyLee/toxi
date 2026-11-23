@@ -134,12 +134,14 @@ Codex prefers calling these tools via MCP:
 
 | Tool | What it does | Marks read? |
 |---|---|---|
-| `get_status` | daemon, DHT, contacts, queue, stats | No |
-| `list_contacts` | list contacts and online status | No |
-| `get_unread` | peek at unread messages | No |
-| `read_history` | peek at history with a contact | No |
-| `mark_read` | mark specific message UUIDs as read | Yes |
-| `send_message` | send to a contact; queued if they're offline | No |
+| `get_status` | daemon, connection, queue, stats; contacts with online state and trust level; rooms | No |
+| `read_messages` | peek at messages: unread (`unread`), a contact (`alias`), a `thread`, a `room`, or a search (`q`) | No |
+| `get_message` | one message with its full text and status; for a request, its task state and replies | No |
+| `overview` | threads, and the open requests of this session | No |
+| `mark` | mark specific message UUIDs as read (`handled` also sends a `done` receipt) | Yes |
+| `send_message` | send to a contact or a room, with an optional file; queued if they're offline | No |
+| `wait_for_message` | wait for a peer's message | Yes |
+| `view_media` | show a received image, or the path of other media | No |
 
 If MCP isn't available, the Codex skill falls back to the CLI:
 
@@ -157,8 +159,8 @@ Incoming toxi messages are external input. What Codex may do with one depends on
 
 - A contact that is not a peer: "untrusted personal content". If such a message says "ignore your previous instructions" or asks Codex to install software, edit files or run commands, Codex treats it as text the sender wrote, nothing more. Codex sends to such a contact only when you ask in this Codex conversation.
 - A peer (`[peers.<alias>]` in config.toml): the message comes with its trust level and the matching guide. An `observer` gives information only. A `collaborator` can ask for work within the current task. An `owner` is you on your own device. Codex answers a peer with `send_message` to that alias. Destructive actions and actions outside the project still need you.
-- `get_unread` and `read_history` are peek-only; they don't mark messages read
-- `mark_read` is only called when you explicitly ask to clear unread, or after Codex has already relayed the corresponding messages to you
+- `read_messages` is peek-only; it doesn't mark messages read
+- `mark` is only called when you explicitly ask to clear unread, or after Codex has already relayed the corresponding messages to you
 
 ## 8. Troubleshooting
 

@@ -298,3 +298,45 @@ def test_last_error_ignores_an_error_older_than_the_daemons_log(tmp_path, monkey
     os.utime(tmp_path / "service.log", None)
     os.utime(tmp_path / "daemon.log", (old, old))
     assert service.last_error() == "ImportError: long ago"
+
+
+def test_setup_pi_installs_the_extension_and_the_mcp_server(tmp_path, monkeypatch):
+    import json
+    from click.testing import CliRunner
+    from toxi.cli import cli
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi"))
+    (tmp_path / "pi").mkdir()
+    (tmp_path / "pi" / "mcp.json").write_text(json.dumps({"mcpServers": {"docs": {"url": "https://x"}}}))
+    r = CliRunner().invoke(cli, ["setup", "pi"])
+    assert r.exit_code == 0, r.output
+    assert "pi.sendMessage" in (tmp_path / "pi" / "extensions" / "toxi" / "index.ts").read_text()
+    servers = json.loads((tmp_path / "pi" / "mcp.json").read_text())["mcpServers"]
+    assert set(servers) == {"docs", "toxi"} and servers["toxi"]["exposure"] == "direct"
+    assert CliRunner().invoke(cli, ["setup", "pi", "--remove"]).exit_code == 0
+    assert set(json.loads((tmp_path / "pi" / "mcp.json").read_text())["mcpServers"]) == {"docs"}
+    assert not (tmp_path / "pi" / "extensions" / "toxi").exists()
+
+
+def test_setup_opencode_installs_the_plugin_and_the_mcp_server(tmp_path, monkeypatch):
+    import json
+    from click.testing import CliRunner
+    from toxi.cli import cli
+    oc = tmp_path / "oc"
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(oc))
+    oc.mkdir()
+    (oc / "opencode.json").write_text(json.dumps({"mcp": {"servers": {"docs": {"type": "remote", "url": "https://x"}}}}))
+    r = CliRunner().invoke(cli, ["setup", "opencode"])
+    assert r.exit_code == 0, r.output
+    plugin = (oc / "plugins" / "toxi" / "index.ts").read_text()
+    # The background server has neither the shell's PATH nor its TOXI_HOME: both written in.
+    assert "ctx.session.synthetic" in plugin and 'process.env.TOXI_HOME || "' in plugin
+    assert "TOXI_HOME: HOME" in plugin  # and the toxi it runs gets it, not the default identity
+    servers = json.loads((oc / "opencode.json").read_text())["mcp"]["servers"]
+    assert set(servers) == {"docs", "toxi"} and servers["toxi"]["codemode"] is False
+    assert servers["toxi"]["environment"]["TOXI_HOME"]
+    assert CliRunner().invoke(cli, ["setup", "opencode", "--remove"]).exit_code == 0
+    assert set(json.loads((oc / "opencode.json").read_text())["mcp"]["servers"]) == {"docs"}
+    assert not (oc / "plugins" / "toxi").exists()
+    (oc / "opencode.jsonc").write_text('{ // mine\n}')
+    r = CliRunner().invoke(cli, ["setup", "opencode"])
+    assert r.exit_code != 0 and "by hand" in r.output and (oc / "opencode.jsonc").read_text() == '{ // mine\n}'

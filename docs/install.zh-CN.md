@@ -18,6 +18,8 @@ toxi doctor                               # 全绿？
 
 - `toxi setup claude`。然后在 Claude Code 里运行 `/plugin install toxi@toxi`，或让 `install.sh --for claude` 部署插件。
 - `toxi setup codex`。
+- `toxi setup pi`。见 [adapters/pi.zh-CN.md](adapters/pi.zh-CN.md)。
+- `toxi setup opencode`。然后运行 `opencode service restart`。见 [adapters/opencode.zh-CN.md](adapters/opencode.zh-CN.md)。
 - `toxi setup headless`。
 
 ## 或者：一行命令

@@ -30,7 +30,7 @@
 
 ## 发送
 
-用于发送的 MCP 工具是 `send_message(alias, body, thread?, reply_to?, kind?, needs_human?, tags?, wait_read?, wait_handled?)`、`send_file` 和 `send_room_message`。插件自动用会话名填充会话标签。工具注解把这些工具标为非破坏性，所以 auto 模式不会拦下它们。如果你用严格白名单，在权限里放行 `mcp__plugin_toxi_toxi__send_message`。
+用于发送的 MCP 工具是 `send_message(alias | room, body, file?, thread?, reply_to?, kind?, needs_human?, tags?, state?, wait_read?, wait_handled?)`。它可以给联系人或房间发文字、文件，或两者都发。插件自动用会话名填充会话标签。工具注解把这些工具标为非破坏性，所以 auto 模式不会拦下它们。如果你用严格白名单，在权限里放行 `mcp__plugin_toxi_toxi__send_message`。
 
 ## 身份
 
@@ -45,7 +45,7 @@
 - `/toxi:read`：读取本会话的消息并标为已读，显示图片，播放语音消息。`/toxi:read --all` 同时读取公共收件箱。
 - `/toxi:send-terminal`。
 - 底部栏里的 `toxi statusline`。
-- MCP 工具 `get_unread`、`read_history`、`get_threads`、`get_message_status`、`search_messages`、`get_peers`、`list_contacts`、`list_rooms`、`read_room`、`view_media`、`mark_read`、`mark_handled` 和 `get_status`。
+- MCP 工具 `read_messages`、`get_message`、`overview`、`view_media`、`mark` 和 `get_status`。
 
 ## 安装 / 更新
 

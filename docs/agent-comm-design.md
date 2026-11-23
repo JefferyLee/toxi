@@ -541,6 +541,19 @@ Batch 2 of §13.6 (E1–E9).
 
 - On Ada (load about 450), `toxi upgrade --all` restarted only 1 of 4 identities: `launchctl bootstrap` failed right after `bootout` ("5: Input/output error"), and the other 3 daemons stayed down for some minutes until a manual `service install`. `bootout` returns before the job is gone. `service install` now waits until launchd no longer has the job (up to 10 s), then tries `bootstrap` up to 5 times. Run again under the same load, all 4 identities restarted at once.
 
+### 0.8.0 More runtimes, idle wake-up, task states, session directory (2026-11-23, v0.8.0)
+
+- **Pi adapter** (`toxi setup pi`): a Pi extension. While Pi works, it delivers between tool calls. While Pi is idle, only mail that should wake it starts a turn. It goes in as a custom message, never as the user's. In a real session, an idle wake-up got the answer in 2.0 s.
+- **OpenCode adapter** (`toxi setup opencode`, then `opencode service restart`): a V2 server plugin. It injects with `session.synthetic`. It reads the run state from the `session.execution.*` events (2.3.2 does not send `session.status`). A session is live after activity, and offline after 12 hours without activity. The plugin has the full path of toxi and `TOXI_HOME` in it, because the background server does not have the shell's environment. Idle wake-up: 4.5 s.
+- **Codex idle wake-up** (`toxi codex-wake`, started by the Codex hooks): through the control socket of the shared app-server daemon (JSON-RPC over WebSocket), it adds the mail to the thread as a developer message and starts a turn with no user input. Idle wake-up: 6.4 s. Codex sessions in the daemon register by thread id (the hook's `session_id`, the `_meta.threadId` of MCP calls). The ChatGPT desktop app uses a private server, which toxi cannot reach.
+- **Sessions by id**: one process can run several sessions (OpenCode, the Codex daemon). The key is the process and the session id. An entry that nobody renews for an hour ends; `toxi session-end` ends one at once.
+- **A2A task states** (§13.11): a text has an optional field `state`, and the cap `task`. An answer to a request can set `input-required`, `rejected`, `failed` and others; the sender can set `canceled`. In the text injected for an agent, each `request` shows its id. Before, there was no id, and the automatic `done` often did not happen. An answer that asks a question no longer counts as done.
+- **Fewer tokens** (C7): a session gets the guide in full the first time, then in brief. MCP results drop the card and empty fields, in compact JSON. The cut for long messages goes from 1,500 to 3,000 characters, and the pointer names an MCP tool.
+- **The 18 MCP tools are now 8**: `read_messages`, `send_message`, `wait_for_message`, `get_message`, `view_media`, `mark`, `get_status`, `overview`. The old names are gone. A session gets the new tools when it restarts.
+- **Session directory** (C8): the card lists the running sessions, for collaborator and owner peers only. `toxi about "…"` sets a session's purpose.
+- **Local delivery between the sessions of one identity** (§13.12): `send_message` to alias `self`, with a body that starts with `@session`. The message does not leave the machine. The sessions are collaborators of each other.
+- The wire format has only backward-compatible additions (`state`, `task`, `sessions` on the card). ToxiOS must follow: show task states and the session list, and withdraw a request on the phone.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 > The newer plan is in §13 (2026-11-22). This list stays as the record of 2026-10-16.
@@ -862,3 +875,98 @@ Plan for 0.8, by value for effort:
 4. **Cursor**: MCP, plus `postToolUse` and `stop` hooks. No idle wake. Mark the sender in the text, because `followup_message` arrives as a user message. Subagents cannot be told apart in `postToolUse`; deliver at `stop` only, or exclude the ids that `subagentStart` reports. The CLI runs only part of the hooks (Cursor staff, 2026-11-11).
 
 0.7 only learns their names: `doctor --all`, `upgrade --all` and the stale-process check will look for them once the adapters exist.
+
+### 13.11 Task model aligned with A2A (2026-11-23, confirmed by Jeff)
+
+Decision 4: "Align with A2A, support A2A, but do not limit toxi to A2A". This section does only the first step. It takes the task states of A2A 1.0, so that the sender of a request knows how far the request has come. The A2A HTTP endpoint, the Agent Card and the JSON-RPC binding are not in this section. A later gateway can map a toxi request to an A2A task with the table in §13.11.6.
+
+**13.11.1 Now and the gap**
+
+- The sender knows only the delivery status: `queued → sent → delivered → read → handled`. `handled` comes from a `done` receipt: the receiver replied with `reply_to`, or it marked the message as handled.
+- The gap: the receiver cannot say "I need more information", "I cannot do this" or "this failed". The sender cannot say "stop, do not do it". Today, these are only in the body, and a program cannot read them. Also, `handled` takes "replied with a question" for "done".
+- There is no way to get the current state and the result of a request by its id. You must read the chat history.
+
+**13.11.2 Model**
+
+- **A task is a `request`.** The task id is the `uuid` of the request. The A2A `contextId` is the toxi `thread`. There is no new task object on the wire.
+- **The states have the A2A 1.0 names** (on the wire in lower case, with hyphens): `submitted`, `working`, `input-required`, `auth-required`, `completed`, `failed`, `canceled`, `rejected`. The terminal states are `completed`, `failed`, `canceled` and `rejected`.
+- **A state that comes from the receipts does not go on the wire**:
+  - `delivered` gives `submitted`;
+  - delivery into the context of an agent session (the `read` receipt) gives `working`;
+  - a `done` receipt gives `completed`.
+- **Only the states that receipts cannot tell go on the wire**: `input-required`, `auth-required`, `failed`, `rejected`, `canceled`, and `working` with a note (progress).
+
+**13.11.3 Wire format (an addition to protocol v2, backward compatible)**
+
+- The data of `text` gets an optional field `state`. Its value is one of the state names in §13.11.2. `state` has a meaning only when the text has a `reply_to`, and the `reply_to` refers to a `request`. Then it means "this message sets that task to this state". The body is the status message (A2A `TaskStatus.message`).
+- A receiver ignores unknown fields (protocol §2). Thus an old node gets the body as before. It does not see the state.
+- A new cap `task` in `caps` means "I understand `state`". A sender does not send differently because of it. It uses the cap only to decide if it shows the state.
+- Who can set which state:
+  - The side that does the request: `working`, `input-required`, `auth-required`, `completed`, `failed`, `rejected`.
+  - The side that sent the request: `canceled`.
+  - A node drops a `state` from the wrong side. It also drops a `state` that would change a terminal state.
+- Compatibility with `done`: today, a reply with `reply_to` sends a `done` receipt automatically. New rule: it sends `done` only when `state` is empty or `completed`. Thus an old sender still gets `handled`. A reply that asks a question (`input-required`) no longer counts as done.
+
+**13.11.4 How an agent uses it (with as few new tokens as possible)**
+
+- `send_message` gets a parameter `state`. In a reply to a request, no `state` means `completed`, as today. A reply that asks a question uses `input-required`. "I cannot do this" uses `rejected`. An error uses `failed`. To withdraw a request, the sender replies to its own request with `canceled`.
+- One new tool, `get_request(id)`, returns the request text, both sides, the thread, the delivery status, the task state, the state history (each change with its state, time and note), all replies and the files. Without an id, it lists the open requests of this session (received and sent).
+- The CLI has the same: `toxi send --state …` and `toxi request [<id>]`.
+- In the text that toxi injects for an agent, each `request` shows its id (`request id …`), and the guide tells how to answer and set a state. Before, the injected text had no ids, so an agent often put a wrong `reply_to`, and the automatic `done` often did not happen.
+- The wake rules do not change: a state always comes with a text, and the text wakes as it does now. A `canceled` counts as an answer. It wakes a waiting or idle worker, so that the worker stops. The worker's node delivers it to the session that took the request (the node records which session took it). It does not use the reply rules of §5 to find the session.
+
+**13.11.5 Storage**
+
+- The `messages` table gets the columns `state` (the state that this text carries), and `task_state` and `task_at` (the current state of a request and its time).
+- It also gets the column `taken_by`: the name of the session that took the request. The node writes it when the session marks the request read. The routing of `canceled` uses it.
+- When a text with a `state` arrives, the node updates the `task_state` of the request that it refers to. When the node sends a reply with a `state`, it also updates the local copy of the request that it received.
+- The state history needs no new table. It is the texts that have a `state` and a `reply_to` that refers to the request.
+
+**13.11.6 Map to A2A 1.0 (for a later gateway)**
+
+| A2A | toxi |
+|---|---|
+| `Task.id` | the `uuid` of the request |
+| `Task.contextId` | `thread` |
+| `TaskStatus.state` | `task_state` (or from the receipts) |
+| `TaskStatus.message` | the text that carries the `state` |
+| `Message.taskId` | `reply_to` |
+| `Artifact` | a file whose `reply_to` refers to the request |
+| Cancel Task | the sender sends `state: canceled` |
+
+**13.11.7 Not in this step**
+
+- Deadlines, priorities and subtasks.
+- A task object on the wire, and streamed progress events.
+- The A2A gateway (later, see "support A2A" in decision 4).
+
+**13.11.8 Decisions (Jeff, 2026-11-23: all four as recommended)**
+
+1. Does `working` come from the `read` receipt, so the agent does not send it? Recommended: yes. An agent that reads a request works on it, and this saves a tool call.
+2. How does toxi use `auth-required`? In A2A it means "needs authentication". Recommended: toxi only accepts and shows it, and does not use it itself. "I must wait for my human" uses `input-required` with `needs_human`.
+3. Does `canceled` wake the worker? Recommended: yes. Otherwise the worker does work that nobody needs.
+4. Does a plain reply without `state` still count as `completed`? Recommended: yes, as `done` does today.
+
+The protocol change goes into `docs/protocol.md` (English and Chinese). ToxiOS gets a work item: show the task state, and let the user withdraw a request on the phone.
+
+### 13.12 Decision 3: local delivery between sessions of one identity (analysis, 2026-11-23)
+
+**Scenario** (checked read-only on 2026-11-23): on mac-studio, the belinda identity runs 5 sessions at the same time (Click2wakeup, SwordFish, SF-iOS, Atelier, local-llm-3). SF-iOS (Claude Code) and SwordFish (Codex) must work together. But they share one identity, and toxi cannot send a message to itself. On Ada, Claude Code and Codex use two identities (`toxi`, `toxi-codex`), so the problem does not occur there.
+
+**The ways that exist, and their costs**
+
+- Claude Code's native SendMessage: only between Claude Code sessions. It does not reach Codex, Pi or OpenCode.
+- One identity for each agent (option B): it works today, with trust levels, receipts, task states and wake-up. The cost grows with the number of identities: a daemon and a service for each identity; a pairing for each pair of identities; a pairing of the phone (owner) with each identity, so that it can reach them; a `[peers]` table in each identity.
+- Shared files or git: no wake-up, no receipts and no trust framing.
+
+**Option A: local delivery**
+
+- A session uses `send_message` to another session of its own identity: `alias` is the name of its own identity (or `self`), and the body starts with `@session-name`. The daemon does not use Tox. It stores the message as a received message, routes it by `@session-name`, and then wakes, sends receipts and tracks the task state as usual.
+- Trust level: sessions on the same machine are `collaborator` to each other, not `owner`. Thus a prompt-injected session cannot pass for the user.
+- The session directory (C8) already tells each session which other sessions run on the node.
+- Cost: the daemon needs a pseudo-contact for its own identity, and a sent and a received row. About one or two days. The wire protocol does not change, so ToxiOS needs no work.
+- Risk: sessions on one machine that wake each other in a loop. The wake limits stop it (Claude Code: 20 for each idle period; Codex: 20 in an hour).
+
+**Decision (Jeff, 2026-11-23)**: option A, done. `alias` is `self`. The message is stored twice (sent `id`, received `id:in`), and the receipts apply at once on this machine. The sessions are collaborators of each other. MCP `get_status` lists the other sessions under `here`.
+
+**Recommendation**: do option A. Several sessions on one identity are now the normal case (5 on mac-studio), and the setup cost of option B grows with the number of sessions. Option B still fits when an agent needs its own identity to the outside, for example a public bot.

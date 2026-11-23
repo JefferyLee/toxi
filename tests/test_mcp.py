@@ -19,16 +19,20 @@ def test_tools_call_expected_rpcs(monkeypatch):
         return {
             "get_messages": {"messages": [{"alias": "bob", "content": "hi"}]},
             "mark_read": {"marked": 1},
+            "mark_handled": {"handled": 1},
             "send_message": {"status": "queued"},
-            "list_contacts": {"contacts": []},
-            "get_status": {"queue_size": 0},
+            "send_room": {"sent": 2},
+            "list_contacts": {"contacts": [{"alias": "bob", "is_online": 1,
+                                            "profile": {"kind": "agent", "runtime": "codex"}}]},
+            "list_rooms": {"rooms": []},
+            "get_status": {"queue_size": 0, "pid": 7},
         }.get(method, {})
 
     monkeypatch.setattr(mcp_server.client, "request", fake_request)
 
     # Dict results: an empty list would render as *no* content in FastMCP, and an
     # agent could not tell "nothing unread" from a failed call.
-    assert mcp_server.get_unread() == {"count": 1, "messages": [{"alias": "bob", "content": "hi"}]}
+    assert mcp_server.read_messages(unread=True) == {"count": 1, "messages": [{"alias": "bob", "content": "hi"}]}
     assert ("get_messages", {"unread_only": True, "limit": 100}) in calls
 
     monkeypatch.setenv("TOXI_SESSION", "toxi-tests")
@@ -37,13 +41,22 @@ def test_tools_call_expected_rpcs(monkeypatch):
     sent = next(p for m, p in calls if m == "send_message")
     assert (sent["alias"], sent["body"], sent["session"]) == ("bob", "hi", "toxi-tests")
 
-    assert mcp_server.list_contacts() == {"count": 0, "contacts": []}
-    assert mcp_server.get_status() == {"queue_size": 0}
-    mcp_server.read_history("bob", 5)
+    assert asyncio.run(mcp_server.send_message(room="chess", body="move"))["sent"] == 2
+    assert next(p for m, p in calls if m == "send_room")["room"] == "chess"
+    with pytest.raises(ValueError):  # one recipient: a contact or a room
+        asyncio.run(mcp_server.send_message("bob", "hi", room="chess"))
+
+    monkeypatch.setattr(mcp_server.peers, "overview", lambda: [{"alias": "bob", "peer": True,
+                                                                "trust": "collaborator", "unread": 2}])
+    assert mcp_server.get_status() == {"queue_size": 0, "rooms": [], "here": [], "contacts": [
+        {"alias": "bob", "online": True, "trust": "collaborator", "card": "agent/codex", "unread": 2}]}
+    mcp_server.read_messages("bob", limit=5)
     assert ("get_messages", {"alias": "bob", "limit": 5}) in calls
 
-    assert mcp_server.mark_read(["u1"]) == {"marked": 1}
-    assert ("mark_read", {"msg_uuids": ["u1"]}) in calls
+    assert mcp_server.mark(["u1"], handled=True) == {"handled": 1}
+    assert mcp_server.mark(["u1"]) == {"marked": 1}
+    marked = next(p for m, p in calls if m == "mark_read")  # with the session that took it
+    assert (marked["msg_uuids"], marked["session"]) == (["u1"], "toxi-tests")
 
 
 def test_view_media_returns_inline_image(tmp_path, monkeypatch):
@@ -154,14 +167,22 @@ def test_real_server_registers_annotations():
     import asyncio
     tools = {t.name: t for t in asyncio.run(mcp_server.build_server().list_tools())}
     assert set(tools) == {fn.__name__ for fn in mcp_server.TOOLS}
-    assert tools["get_unread"].annotations.readOnlyHint is True
+    assert len(tools) == 8
+    assert tools["read_messages"].annotations.readOnlyHint is True
     assert tools["send_message"].annotations.readOnlyHint is False
     assert tools["send_message"].annotations.destructiveHint is False
 
 
-def test_get_peers_reports_count(monkeypatch):
-    monkeypatch.setattr(mcp_server.peers, "overview", lambda: [{"alias": "codex"}])
-    assert mcp_server.get_peers() == {"count": 1, "peers": [{"alias": "codex"}]}
+def test_tools_answer_in_compact_json(monkeypatch):
+    pytest.importorskip("mcp.types")
+    import asyncio
+    monkeypatch.setattr(mcp_server.client, "request", lambda m, p=None, **k: {"messages": [
+        {"msg_uuid": "u1", "alias": "bob", "content": "你好", "profile": {"kind": "agent"},
+         "route_dir": None, "kind": "msg", "tags": []}]})
+    res = asyncio.run(mcp_server.build_server().call_tool("read_messages", {"alias": "bob"}))
+    text = (res[0] if isinstance(res, tuple) else res)[0].text
+    # no indentation, no escaped Chinese, no card or empty fields on each row
+    assert text == '{"count":1,"messages":[{"msg_uuid":"u1","alias":"bob","content":"你好"}]}'
 
 
 def _peer_cfg(tmp_path, monkeypatch, text):
@@ -185,13 +206,13 @@ def test_wait_for_message_wakes_on_event(tmp_path, monkeypatch):
     _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
     calls = []
 
-    def take(alias=None, cwd=None, thread=None):
+    def take(alias=None, cwd=None, thread=None, **_):
         calls.append((alias, cwd))
         return [] if len(calls) == 1 else [{"msg_uuid": "1", "alias": "codex", "msg_type": "text",
                                             "content": "hi", "trust": "observer"}]
 
     async def fake_sub(aliases=None, context=0, *, deadline=None, sock_path=None):
-        assert aliases == ["codex"]
+        assert aliases == ["codex", "self"]  # and the other sessions of this identity
         yield {"event": "contact.online", "data": {"alias": "codex"}}
         yield {"event": "message.new", "data": {"direction": "in", "alias": "codex"}}
 
@@ -207,7 +228,7 @@ def test_wait_for_message_polls_when_daemon_cannot_stream(tmp_path, monkeypatch)
     _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
     n = {"take": 0}
 
-    def take(alias=None, cwd=None, thread=None):
+    def take(alias=None, cwd=None, thread=None, **_):
         n["take"] += 1
         return [] if n["take"] < 2 else [{"msg_uuid": "1", "alias": "codex", "msg_type": "text",
                                           "content": "late", "trust": "observer"}]
@@ -242,7 +263,7 @@ def test_wait_for_message_reconnects_when_the_daemon_restarts(tmp_path, monkeypa
     _peer_cfg(tmp_path, monkeypatch, '[peers.codex]\ntrust = "observer"\n')
     state = {"subs": 0, "takes": 0}
 
-    def take(alias=None, cwd=None, thread=None):
+    def take(alias=None, cwd=None, thread=None, **_):
         state["takes"] += 1
         if state["takes"] == 2:
             raise mcp_server.client.DaemonNotRunning("restarting")

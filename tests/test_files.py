@@ -195,5 +195,6 @@ def test_cli_and_mcp_send_file(monkeypatch, tmp_path):
     from toxi import mcp_server
     monkeypatch.setattr(mcp_server.client, "request", request)
     monkeypatch.setenv("TOXI_SESSION", "mcp")
-    mcp_server.send_file("bob", str(f), thread="ui", kind="report")
+    import asyncio
+    asyncio.run(mcp_server.send_message("bob", file=str(f), thread="ui", kind="report"))
     assert calls[-1][1]["session"] == "mcp" and calls[-1][1]["kind"] == "report"
