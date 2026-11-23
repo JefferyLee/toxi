@@ -536,6 +536,10 @@ Codex 0.163 给 hook 命令导出的是 `PLUGIN_ROOT`（以及 `CLAUDE_PLUGIN_RO
 - 需要 Python 3.11 或更新。默认开启归档（90 天）；未读消息和待决定的消息不归档。install.sh 不会覆盖它读不懂的 `settings.json`。
 - 升级：从 0.6.x 先 `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`，再 `toxi upgrade --all`，然后重启 agent 会话。
 
+### 0.7.1 重启服务不再让 daemon 停着（2026-11-22，v0.7.1）
+
+- 在 Ada 上（负载约 450），`toxi upgrade --all` 只重启成功了 4 个身份中的 1 个：`launchctl bootstrap` 在 `bootout` 之后马上运行时失败（"5: Input/output error"），另外 3 个 daemon 停了几分钟，直到手动运行 `service install`。`bootout` 在任务真正结束前就返回了。现在 `service install` 先等 launchd 里不再有这个任务（最多 10 秒），再最多尝试 5 次 `bootstrap`。在同样的负载下再跑一次，4 个身份都一次重启成功。
+
 ## 12. 待办清单（2026-10-16 记录，按优先级；✅ = 已在 0.6.0 完成）
 
 > 更新的计划见 §13（2026-11-22）。本清单保留为 2026-10-16 的记录。

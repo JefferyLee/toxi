@@ -537,6 +537,10 @@ Batch 2 of §13.6 (E1–E9).
 - Python 3.11 or newer. Archiving is on by default (90 days); unread messages and open decisions stay. install.sh never overwrites a `settings.json` that it cannot read.
 - Upgrade: from 0.6.x, `pipx install --force "toxi[mcp]==0.7.0" --pip-args=--no-cache-dir`, then `toxi upgrade --all`, then restart the agent sessions.
 
+### 0.7.1 A service restart never leaves the daemon down (2026-11-22, v0.7.1)
+
+- On Ada (load about 450), `toxi upgrade --all` restarted only 1 of 4 identities: `launchctl bootstrap` failed right after `bootout` ("5: Input/output error"), and the other 3 daemons stayed down for some minutes until a manual `service install`. `bootout` returns before the job is gone. `service install` now waits until launchd no longer has the job (up to 10 s), then tries `bootstrap` up to 5 times. Run again under the same load, all 4 identities restarted at once.
+
 ## 12. Backlog (recorded 2026-10-16, by priority; ✅ = done in 0.6.0)
 
 > The newer plan is in §13 (2026-11-22). This list stays as the record of 2026-10-16.
